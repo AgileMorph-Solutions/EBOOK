@@ -53,10 +53,12 @@ def _openai():
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=20))
-def _gen_openai(prompt: str, aspect: str) -> bytes:
+def _gen_openai(prompt: str, aspect: str, negative_prompt: str = "") -> bytes:
+    # gpt-image-1 has no negative-prompt slot — fold it into the positive prompt.
+    full = f"{prompt} Avoid: {negative_prompt}." if negative_prompt else prompt
     resp = _openai().images.generate(
         model="gpt-image-1",
-        prompt=prompt,
+        prompt=full,
         size=_OPENAI_SIZE.get(aspect, _OPENAI_SIZE["full_bleed"]),
         quality="high",
         n=1,
@@ -73,13 +75,16 @@ _IMAGEN_FALLBACKS = [
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=20))
-def _gen_gemini(prompt: str, aspect: str) -> bytes:
+def _gen_gemini(prompt: str, aspect: str, negative_prompt: str = "") -> bytes:
     from google import genai
     from google.genai import types
 
     if not settings.gemini_api_key:
         raise RuntimeError("GEMINI_API_KEY is not set — populate .env")
     client = genai.Client(api_key=settings.gemini_api_key)
+    # Imagen on the Developer API rejects `negative_prompt` (Enterprise/Vertex
+    # only). Fold it into the positive prompt instead.
+    full = f"{prompt} Avoid: {negative_prompt}." if negative_prompt else prompt
     cfg = types.GenerateImagesConfig(
         number_of_images=1,
         aspect_ratio=_GEMINI_AR.get(aspect, _GEMINI_AR["full_bleed"]),
@@ -91,7 +96,7 @@ def _gen_gemini(prompt: str, aspect: str) -> bytes:
     last_err: Exception | None = None
     for model in models:
         try:
-            resp = client.models.generate_images(model=model, prompt=prompt, config=cfg)
+            resp = client.models.generate_images(model=model, prompt=full, config=cfg)
             return resp.generated_images[0].image.image_bytes
         except Exception as exc:  # availability / permission / not-found
             last_err = exc
@@ -99,14 +104,15 @@ def _gen_gemini(prompt: str, aspect: str) -> bytes:
     raise RuntimeError(f"all Imagen models failed; last error: {last_err}")
 
 
-def generate(prompt: str, *, aspect: str = "full_bleed", in_image_text: bool = False) -> bytes:
+def generate(prompt: str, *, aspect: str = "full_bleed", in_image_text: bool = False,
+             negative_prompt: str = "") -> bytes:
     """Generate one image. `in_image_text` is informational — gpt-image-1 renders
     text well natively, so we keep using the primary provider either way."""
     budget.assert_ok()
     provider = settings.image_primary_provider.lower()
     if provider == "gemini":
-        data = _gen_gemini(prompt, aspect)
+        data = _gen_gemini(prompt, aspect, negative_prompt=negative_prompt)
     else:  # default: openai
-        data = _gen_openai(prompt, aspect)
+        data = _gen_openai(prompt, aspect, negative_prompt=negative_prompt)
     budget.charge(_IMG_COST)
     return data

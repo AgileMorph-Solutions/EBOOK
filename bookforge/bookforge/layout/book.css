@@ -2,10 +2,13 @@
    BookForge print theme — token-driven (colors/fonts from :root, set per book).
    Fixed designed pages (one composed page each), printed 1:1 by Chromium.
    ============================================================================ */
+@page { size: 6.125in 9.25in; margin: 0; }
 @page { size: var(--page-w) var(--page-h); margin: 0; }
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
 html { font-family: var(--body); color: var(--ink); -webkit-font-smoothing: antialiased; }
+img { max-width: 100%; }
+h1, h2, h3, .heading, .title { overflow-wrap: anywhere; }
 
 .page {
   position: relative; width: var(--page-w); height: var(--page-h);
@@ -19,7 +22,7 @@ html { font-family: var(--body); color: var(--ink); -webkit-font-smoothing: anti
   width: calc(100% + 2*var(--bleed)); height: calc(100% + 2*var(--bleed));
   object-fit: cover; }
 .scrim-b { position: absolute; inset: 0;
-  background: linear-gradient(180deg, rgba(0,0,0,.05) 30%, rgba(0,0,0,.78)); }
+  background: linear-gradient(180deg, rgba(0,0,0,0) 55%, rgba(0,0,0,.55)); }
 .scrim-full { position: absolute; inset: 0; background: rgba(0,0,0,.42); }
 
 .safe { position: absolute; inset: var(--safe); }
@@ -33,14 +36,14 @@ html { font-family: var(--body); color: var(--ink); -webkit-font-smoothing: anti
   color: var(--accent); }
 
 /* ============================ COVER ============================ */
-.cover .scrim-b { background: linear-gradient(180deg, rgba(0,0,0,.38) 0%, rgba(0,0,0,.04) 42%, rgba(0,0,0,.42) 60%, rgba(0,0,0,.76) 100%); }
+.cover .scrim-b { background: linear-gradient(180deg, transparent 0%, transparent 55%, rgba(0,0,0,.55) 100%); }
 .cover .block { position: absolute; left: var(--safe); right: var(--safe); bottom: 1.1in; color: #fff; }
 .cover .kick { font-family: var(--cond); font-weight: 600; letter-spacing: .42em;
   text-transform: uppercase; font-size: 12pt; color: var(--gold); margin-bottom: .28in; }
 .cover h1 { font-family: var(--display); font-weight: 900; font-size: 58pt; line-height: .98;
-  text-shadow: 0 2px 8px rgba(0,0,0,.7); }
+  text-shadow: 0 1px 2px rgba(0,0,0,.55), 0 2px 10px rgba(0,0,0,.35); }
 .cover .sub { font-family: var(--body); font-style: italic; font-size: 16pt; margin-top: .3in;
-  max-width: 5in; text-shadow: 0 1px 6px rgba(0,0,0,.7); }
+  max-width: 5in; text-shadow: 0 1px 2px rgba(0,0,0,.6); }
 .cover .badge { position: absolute; top: 1in; right: var(--safe); width: 1.5in; height: 1.5in;
   border: 2px solid var(--gold); border-radius: 50%; color: var(--gold);
   display: flex; align-items: center; justify-content: center; text-align: center;
@@ -64,7 +67,7 @@ html { font-family: var(--body); color: var(--ink); -webkit-font-smoothing: anti
 .hero .cap .eyebrow { font-family: var(--cond); letter-spacing: .34em; text-transform: uppercase;
   font-size: 11pt; color: var(--gold); margin-bottom: .15in; }
 .hero .cap h2 { font-family: var(--display); font-weight: 800; font-size: 34pt; line-height: 1.04;
-  text-shadow: 0 2px 10px rgba(0,0,0,.55); }
+  text-shadow: 0 1px 2px rgba(0,0,0,.55), 0 2px 10px rgba(0,0,0,.35); }
 
 /* ============================ FEATURE (band + photo + body) ============================ */
 .feature .band { position: absolute; top: 0; left: 0; right: 0; min-height: 1.25in;
@@ -78,27 +81,37 @@ html { font-family: var(--body); color: var(--ink); -webkit-font-smoothing: anti
 .feature .photo .credit { position: absolute; right: var(--safe); bottom: .12in; color: #fff;
   font-family: var(--cond); font-size: 7.5pt; letter-spacing: .12em; opacity: .8; }
 .feature .body { position: absolute; top: 5.15in; left: var(--safe); right: var(--safe);
-  bottom: .95in; column-count: 2; column-gap: .4in; overflow: hidden; }
+  bottom: .95in; column-count: 2; column-gap: .4in; column-fill: auto; }
 .feature .body.one-col { column-count: 1; }
+.feature .body p, .textpage p { hyphens: auto; -webkit-hyphens: auto;
+  overflow-wrap: anywhere; word-break: normal; }
 
-/* feature variant: full-bleed photo with title overlaid, body below */
+/* feature variant: full-bleed photo + solid lower-third title card + body */
 .feature.overlay .band { display: none; }
 .feature.overlay .photo { top: 0; height: 5.9in; }
+/* Subtle scrim only at the very bottom — the title card carries contrast. */
 .feature.overlay .photo .scrim { position: absolute; inset: 0;
-  background: linear-gradient(180deg, rgba(0,0,0,.04) 25%, rgba(0,0,0,.55) 58%, rgba(0,0,0,.92)); }
-.feature.overlay .titleover { position: absolute; left: var(--safe); right: var(--safe);
-  top: 3.8in; color: #fff; }
-.feature.overlay .titleover .eyebrow { font-family: var(--cond); letter-spacing: .38em;
-  text-transform: uppercase; font-size: 10.5pt; color: #fff; opacity: .88;
-  margin-bottom: .14in; display: block;
-  text-shadow: 0 1px 4px rgba(0,0,0,.9); }
-.feature.overlay .titleover h2 { font-family: var(--display); font-weight: 900; font-size: 36pt;
-  line-height: 1.02; color: #fff;
-  text-shadow: 0 1px 0 rgba(0,0,0,1), 0 2px 8px rgba(0,0,0,.9), 0 6px 28px rgba(0,0,0,.7); }
+  background: linear-gradient(180deg, transparent 75%, rgba(0,0,0,.35) 100%); }
+/* Lower-third black card holds the title — guarantees legibility regardless
+   of what's behind. Reference editorial style. */
+.feature.overlay .titleover { position: absolute; left: 0; right: 0;
+  /* sit at the bottom of the 5.9in photo, height 1.6in */
+  top: 4.3in; height: 1.6in; color: #fff;
+  background: rgba(0,0,0,.82);
+  padding: .3in var(--safe);
+  display: flex; flex-direction: column; justify-content: center;
+  border-top: 3px solid var(--gold, #c9a24a); }
+.feature.overlay .titleover .eyebrow { font-family: var(--cond); letter-spacing: .34em;
+  text-transform: uppercase; font-size: 10.5pt; color: var(--gold, #c9a24a);
+  margin-bottom: .12in; display: block; text-shadow: none; }
+.feature.overlay .titleover h2 { font-family: var(--display); font-weight: 900;
+  font-size: 32pt; line-height: 1.04; color: #fff; text-shadow: none; }
 .feature.overlay .body { top: 6.25in; }
 
 /* ============================ TEXT PAGE ============================ */
-.textpage .col { position: absolute; inset: var(--safe); top: 1.15in; bottom: .95in; }
+.textpage .col { position: absolute; inset: var(--safe); top: 1.15in; bottom: .95in;
+  overflow: hidden; }
+.textpage .col::after { content: ""; display: block; clear: both; }
 .kicker-head { font-family: var(--cond); letter-spacing: .3em; text-transform: uppercase;
   font-size: 10pt; color: var(--accent); margin-bottom: .12in; }
 .heading { font-family: var(--display); font-weight: 700; color: var(--accent);

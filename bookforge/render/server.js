@@ -21,10 +21,13 @@ app.post("/render", async (req, res) => {
     browser = await puppeteer.launch({
       headless: "new",
       executablePath: EXECUTABLE,
-      args: ["--no-sandbox", "--disable-dev-shm-usage", "--font-render-hinting=none"],
+      args: ["--no-sandbox", "--disable-dev-shm-usage"],
     });
     const page = await browser.newPage();
-    await page.setContent(req.body, { waitUntil: "networkidle0", timeout: 120000 });
+    // Data URIs only — no network. "load" fires once images decode; "networkidle0"
+    // can stall on inline base64 payloads.
+    await page.setContent(req.body, { waitUntil: "load", timeout: 300000 });
+    await page.emulateMediaType("print");
     const pdf = await page.pdf({ printBackground: true, preferCSSPageSize: true });
     res.set("Content-Type", "application/pdf").send(Buffer.from(pdf));
   } catch (err) {

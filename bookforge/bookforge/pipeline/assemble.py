@@ -60,6 +60,16 @@ def assemble(
             f"file {size_mb:.1f}MB exceeds budget {settings.max_file_size_mb}MB "
             "— recompress images"
         )
+    budget_pages = sum(p.page_budget for p in bible.chapters)
+    if budget_pages:
+        drift = abs(pages - budget_pages) / budget_pages
+        log.info("page_budget_check", pages=pages, budget=budget_pages,
+                 drift=round(drift, 2))
+        if drift > 0.30:
+            issues.append(
+                f"page count {pages} drifts {drift*100:.0f}% from budget "
+                f"{budget_pages} — review chapter sizing"
+            )
 
     key = f"books/{book_id}/interior.pdf"
     storage.put(key, pdf, "application/pdf")

@@ -76,27 +76,64 @@ def _build_prompt(brief, bible) -> str:
     palette = bible.art_style.palette
     if brief.kind == "illustration":
         style = bible.art_style.style_suffix or "hand-painted vintage gouache illustration"
-        return (f"{subject}. {style}, cohesive {palette} palette, textured paper feel, "
-                f"editorial spot illustration. {_NO_TEXT}.")
-    # photoreal hero
-    return (
-        f"Editorial food photograph of {subject}. Shot on a 50mm lens, natural soft "
-        f"window light from the side, shallow depth of field with a softly blurred "
-        f"background, subtle film grain, professional food styling on a matte ceramic "
-        f"surface, {palette} color story, realistic textures and crumbs, unretouched, "
-        f"documentary cookbook style. {_NO_TEXT}."
-    )
+        prompt = (f"{subject}. {style}, cohesive {palette} palette, textured paper feel, "
+                  f"editorial spot illustration.")
+    else:
+        prompt = (
+            f"Editorial food photograph of {subject}. Shot on a 50mm lens, natural soft "
+            f"window light from the side, shallow depth of field with a softly blurred "
+            f"background, subtle film grain, professional food styling on a matte ceramic "
+            f"surface, {palette} color story, realistic textures and crumbs, unretouched, "
+            f"documentary cookbook style."
+        )
+    if brief.needs_in_image_text and brief.caption:
+        prompt = (f'Render the words "{brief.caption}" clearly and legibly in '
+                  f"a single tasteful caption area. {prompt}")
+    else:
+        prompt = f"{prompt} {_NO_TEXT}."
+    # Compose for editorial overlay: keep the lower third visually calm so a
+    # title card can sit there without fighting the subject. Avoid bright
+    # highlights, smoke, or busy detail in the bottom band.
+    if brief.aspect in ("full_bleed", "portrait"):
+        prompt += (" Compose with the main subject in the upper two-thirds; "
+                   "keep the lower third quiet and uncluttered (a calm dark "
+                   "surface or shadow area) so an editorial title card can "
+                   "be overlaid there. No steam, smoke, bright highlights, "
+                   "or busy detail in the bottom third.")
+    return prompt
+
+
+def _negative_for(bible) -> str:
+    parts: list[str] = []
+    neg = (bible.art_style.negative_prompt or "").strip()
+    if neg:
+        parts.append(neg)
+    banned = [b for b in (bible.voice.banned_patterns or []) if b]
+    if banned:
+        parts.append("clichés to avoid: " + ", ".join(banned))
+    return "; ".join(parts)
+
+
+# Placed-box pixel targets per aspect at 300 DPI (rough cookbook-page boxes).
+_ASPECT_BOX = {
+    "full_bleed": (1850, 2775),   # full page bleed
+    "portrait":   (1600, 2200),
+    "wide":       (1850, 1400),   # feature band photo strip
+    "square":     (1600, 1600),
+}
 
 
 def generate_for_chapter(chapter: Chapter, bible: BookBible) -> list[GeneratedImage]:
     out: list[GeneratedImage] = []
-    page_w, page_h = settings.page_px  # full-bleed target at 300 DPI
+    page_w, page_h = settings.page_px  # full-bleed fallback at 300 DPI
+    negative = _negative_for(bible)
 
     for bi, block in enumerate(chapter.blocks):
         if not block.image_brief:
             continue
         brief = block.image_brief
         prompt = _build_prompt(brief, bible)
+        box_w, box_h = _ASPECT_BOX.get(brief.aspect, (page_w, page_h))
 
         # Generate candidates, hard-reject only NSFW; among the rest keep the
         # highest-ranked even if the scorer flags minor artifacts (so a page is
@@ -107,6 +144,7 @@ def generate_for_chapter(chapter: Chapter, bible: BookBible) -> list[GeneratedIm
                 cand = img_client.generate(
                     prompt, aspect=brief.aspect,
                     in_image_text=brief.needs_in_image_text,
+                    negative_prompt=negative,
                 )
             except Exception as exc:
                 log.warning("image_gen_failed", err=str(exc)[:200])
@@ -128,7 +166,7 @@ def generate_for_chapter(chapter: Chapter, bible: BookBible) -> list[GeneratedIm
             log.warning("no_usable_image", chapter=chapter.index, block=bi)
             continue
 
-        sized, w, h = _rightsize(best[1], page_w, page_h)
+        sized, w, h = _rightsize(best[1], box_w, box_h)
         key = f"books/{bible.title[:32]}/ch{chapter.index}_b{bi}.jpg".replace(" ", "_")
         storage.put(key, sized, "image/jpeg")
         out.append(GeneratedImage(

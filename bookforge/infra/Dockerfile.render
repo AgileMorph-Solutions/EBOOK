@@ -1,0 +1,25 @@
+# Node + headless Chromium render service.
+# Use the OS-native Chromium (matches image arch — avoids the x86/arm Rosetta
+# crash you hit on Apple Silicon) instead of Puppeteer's bundled download.
+FROM node:20-slim
+
+ENV PUPPETEER_SKIP_DOWNLOAD=true \
+    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium \
+    NODE_ENV=production
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    chromium fonts-liberation fontconfig \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY package.json ./
+RUN npm install --omit=dev
+
+COPY server.js ./
+
+# Install licensed fonts into the image (mount or COPY real font files here).
+# COPY fonts/ /usr/share/fonts/truetype/bookforge/
+RUN fc-cache -f || true
+
+EXPOSE 4000
+CMD ["node", "server.js"]

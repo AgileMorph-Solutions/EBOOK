@@ -1,0 +1,132 @@
+/* ============================================================================
+   BookForge print theme — token-driven (colors/fonts from :root, set per book).
+   Fixed designed pages (one composed page each), printed 1:1 by Chromium.
+   ============================================================================ */
+@page { size: var(--page-w) var(--page-h); margin: 0; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html { font-family: var(--body); color: var(--ink); -webkit-font-smoothing: antialiased; }
+
+.page {
+  position: relative; width: var(--page-w); height: var(--page-h);
+  overflow: hidden; background: var(--paper);
+  page-break-after: always; break-after: page;
+}
+.page:last-child { page-break-after: auto; }
+
+/* full-bleed art + scrims */
+.bleed-img { position: absolute; inset: calc(-1 * var(--bleed));
+  width: calc(100% + 2*var(--bleed)); height: calc(100% + 2*var(--bleed));
+  object-fit: cover; }
+.scrim-b { position: absolute; inset: 0;
+  background: linear-gradient(180deg, rgba(0,0,0,.05) 30%, rgba(0,0,0,.78)); }
+.scrim-full { position: absolute; inset: 0; background: rgba(0,0,0,.42); }
+
+.safe { position: absolute; inset: var(--safe); }
+
+/* running header + folio (body pages) */
+.runhead { position: absolute; top: calc(var(--bleed) + .46in); left: var(--safe); right: var(--safe);
+  text-align: center; font-family: var(--body); font-style: italic; font-size: 9.5pt;
+  letter-spacing: .03em; color: var(--muted); }
+.folio { position: absolute; bottom: calc(var(--bleed) + .42in); left: 0; right: 0;
+  text-align: center; font-family: var(--cond); font-size: 10pt; letter-spacing: .24em;
+  color: var(--accent); }
+
+/* ============================ COVER ============================ */
+.cover .scrim-b { background: linear-gradient(180deg, rgba(0,0,0,.45) 0%, rgba(0,0,0,.15) 38%, rgba(0,0,0,.82) 100%); }
+.cover .block { position: absolute; left: var(--safe); right: var(--safe); bottom: 1.1in; color: #fff; }
+.cover .kick { font-family: var(--cond); font-weight: 600; letter-spacing: .42em;
+  text-transform: uppercase; font-size: 12pt; color: var(--gold); margin-bottom: .28in; }
+.cover h1 { font-family: var(--display); font-weight: 900; font-size: 58pt; line-height: .98;
+  text-shadow: 0 3px 18px rgba(0,0,0,.5); }
+.cover .sub { font-family: var(--body); font-style: italic; font-size: 16pt; margin-top: .3in;
+  max-width: 5in; text-shadow: 0 2px 8px rgba(0,0,0,.55); }
+.cover .badge { position: absolute; top: 1in; right: var(--safe); width: 1.5in; height: 1.5in;
+  border: 2px solid var(--gold); border-radius: 50%; color: var(--gold);
+  display: flex; align-items: center; justify-content: center; text-align: center;
+  font-family: var(--cond); font-size: 9.5pt; letter-spacing: .14em; text-transform: uppercase;
+  padding: .2in; line-height: 1.4; }
+
+/* ============================ CHAPTER DIVIDER ============================ */
+.divider { background: var(--deep); }
+.divider .stripe { position: absolute; top: 0; bottom: 0; left: 0; width: .9in; background: var(--accent); }
+.divider .inner { position: absolute; inset: var(--safe); left: 1.7in;
+  display: flex; flex-direction: column; justify-content: center; color: var(--paper); }
+.divider .eyebrow { font-family: var(--cond); font-weight: 600; letter-spacing: .4em;
+  text-transform: uppercase; font-size: 13pt; color: var(--gold); margin-bottom: .35in; }
+.divider .title { font-family: var(--display); font-weight: 800; font-size: 52pt; line-height: 1.02; }
+.divider .rule { width: 2.2in; height: 3px; background: var(--gold); margin: .5in 0; opacity: .9; }
+.divider .kicker { font-family: var(--body); font-style: italic; font-size: 14pt;
+  line-height: 1.5; max-width: 4.7in; color: rgba(255,255,255,.9); }
+
+/* ============================ HERO PHOTO ============================ */
+.hero .cap { position: absolute; left: var(--safe); right: var(--safe); bottom: 1in; color: #fff; }
+.hero .cap .eyebrow { font-family: var(--cond); letter-spacing: .34em; text-transform: uppercase;
+  font-size: 11pt; color: var(--gold); margin-bottom: .15in; }
+.hero .cap h2 { font-family: var(--display); font-weight: 800; font-size: 34pt; line-height: 1.04;
+  text-shadow: 0 2px 10px rgba(0,0,0,.55); }
+
+/* ============================ FEATURE (band + photo + body) ============================ */
+.feature .band { position: absolute; top: 0; left: 0; right: 0; min-height: 1.25in;
+  background: var(--accent); display: flex; align-items: center; padding: .35in var(--safe); }
+.feature .band .eyebrow { font-family: var(--cond); letter-spacing: .3em; text-transform: uppercase;
+  font-size: 10pt; color: rgba(255,255,255,.75); display: block; margin-bottom: .06in; }
+.feature .band h2 { font-family: var(--display); font-weight: 800; color: #fff;
+  font-size: 28pt; line-height: 1.03; }
+.feature .photo { position: absolute; top: 1.25in; left: 0; right: 0; height: 3.7in; }
+.feature .photo img { width: 100%; height: 100%; object-fit: cover; }
+.feature .photo .credit { position: absolute; right: var(--safe); bottom: .12in; color: #fff;
+  font-family: var(--cond); font-size: 7.5pt; letter-spacing: .12em; opacity: .8; }
+.feature .body { position: absolute; top: 5.15in; left: var(--safe); right: var(--safe);
+  bottom: .95in; column-count: 2; column-gap: .4in; }
+.feature .body.one-col { column-count: 1; }
+
+/* feature variant: full-bleed photo with title overlaid, body below */
+.feature.overlay .band { display: none; }
+.feature.overlay .photo { top: 0; height: 5.9in; }
+.feature.overlay .photo .scrim { position: absolute; inset: 0;
+  background: linear-gradient(180deg, rgba(0,0,0,.12) 40%, rgba(0,0,0,.72)); }
+.feature.overlay .titleover { position: absolute; left: var(--safe); right: var(--safe);
+  top: 4.05in; color: #fff; }
+.feature.overlay .titleover .eyebrow { font-family: var(--cond); letter-spacing: .34em;
+  text-transform: uppercase; font-size: 10pt; color: var(--gold); margin-bottom: .12in; display: block; }
+.feature.overlay .titleover h2 { font-family: var(--display); font-weight: 800; font-size: 32pt;
+  line-height: 1.03; text-shadow: 0 2px 10px rgba(0,0,0,.55); }
+.feature.overlay .body { top: 6.25in; }
+
+/* ============================ TEXT PAGE ============================ */
+.textpage .col { position: absolute; inset: var(--safe); top: 1.15in; bottom: .95in; }
+.kicker-head { font-family: var(--cond); letter-spacing: .3em; text-transform: uppercase;
+  font-size: 10pt; color: var(--accent); margin-bottom: .12in; }
+.heading { font-family: var(--display); font-weight: 700; color: var(--accent);
+  font-size: 22pt; line-height: 1.1; margin: 0 0 .3em; }
+.dropcap > p:first-of-type::first-letter { font-family: var(--display); font-weight: 800;
+  color: var(--accent); float: left; font-size: 58pt; line-height: .8; padding: .03em .1em 0 0; }
+
+p { font-family: var(--body); font-size: 11.5pt; line-height: 1.6; margin: 0 0 .62em;
+  text-align: justify; hyphens: auto; }
+.feature .body p:first-of-type { text-indent: 0; }
+.feature .body p + p, .textpage p + p { text-indent: 1.2em; margin-top: 0; }
+
+/* ============================ PULL-QUOTE PAGE ============================ */
+.quotepage { background: var(--panel); }
+.quotepage .q { position: absolute; inset: var(--safe); display: flex; flex-direction: column;
+  align-items: center; justify-content: center; text-align: center; }
+.quotepage .mark { font-family: var(--display); font-size: 90pt; color: var(--accent);
+  line-height: .5; opacity: .5; }
+.quotepage blockquote { font-family: var(--display); font-style: italic; font-weight: 500;
+  color: var(--ink); font-size: 28pt; line-height: 1.32; max-width: 5.4in; margin: .3in 0; }
+.quotepage .by { font-family: var(--cond); letter-spacing: .3em; text-transform: uppercase;
+  font-size: 10pt; color: var(--muted); }
+
+/* recipe lists */
+.ingredients { list-style: none; columns: 2; column-gap: .4in; }
+.ingredients li { font-size: 11pt; line-height: 1.5; margin-bottom: .25em; break-inside: avoid; }
+.ingredients li::before { content: "•  "; color: var(--accent); font-weight: 700; }
+.method { counter-reset: step; list-style: none; }
+.method li { font-size: 11.5pt; line-height: 1.55; margin-bottom: .5em; }
+.method li::before { counter-increment: step; content: counter(step);
+  font-family: var(--cond); font-weight: 700; color: #fff; background: var(--accent);
+  display: inline-flex; width: 1.6em; height: 1.6em; border-radius: 50%;
+  align-items: center; justify-content: center; margin-right: .45em; font-size: 9pt;
+  vertical-align: middle; }

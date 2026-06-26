@@ -1,0 +1,32 @@
+# One-shot Phase-0 E2E spike (no Redis/Postgres needed — orchestrator runs
+# in-process, storage falls back to a mounted local dir).
+#   docker compose -f infra/docker-compose.spike.yml run --build --rm spike
+name: bookforge-spike
+
+services:
+  render:
+    build: { context: ../render, dockerfile: ../infra/Dockerfile.render }
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:4000/health').then(()=>process.exit(0)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  spike:
+    build: { context: .., dockerfile: infra/Dockerfile.spike }
+    env_file: ../.env
+    environment:
+      RENDER_URL: "http://render:4000"
+      BOOKFORGE_LOCAL_STORE: "/work/artifacts"
+      IMAGE_CANDIDATES_PER_PAGE: "1"     # cheaper/faster first run
+      PER_BOOK_BUDGET_USD: "20"
+    volumes:
+      - ..:/work          # source text in, artifacts out (host-visible)
+    working_dir: /app     # package installed here; /work is just IO
+    depends_on:
+      render: { condition: service_healthy }
+    command: >
+      python -m bookforge.cli
+      --topic "100 Forgotten British Meals Our Grandparents Lived On"
+      --text-file /work/sample_source.txt
+      --chapters 1 --pages 100

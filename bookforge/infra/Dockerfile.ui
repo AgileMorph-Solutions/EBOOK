@@ -1,0 +1,13 @@
+# Next.js internal review UI (placeholder — app/ to be built in Phase 4).
+FROM node:20-slim AS build
+WORKDIR /app
+COPY package*.json ./
+RUN npm install || true
+COPY . .
+RUN npm run build || echo "ui not built yet (Phase 4)"
+
+FROM node:20-slim AS run
+WORKDIR /app
+COPY --from=build /app ./
+EXPOSE 3000
+CMD ["npm", "run", "start"]

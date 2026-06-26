@@ -1,0 +1,11 @@
+# Slim image for the Phase-0 E2E spike. Wheel-only deps -> fast build, no apt.
+FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PIP_NO_CACHE_DIR=1
+
+WORKDIR /app
+COPY requirements-spike.txt .
+RUN pip install -r requirements-spike.txt
+
+COPY bookforge ./bookforge
+CMD ["python", "-m", "bookforge.cli", "--help"]

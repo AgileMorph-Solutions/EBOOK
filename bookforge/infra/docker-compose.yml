@@ -1,0 +1,89 @@
+# BookForge full stack — `docker compose -f infra/docker-compose.yml up`
+# Secrets come from ../.env (never baked into images). GPU not required.
+name: bookforge
+
+x-python-env: &python-env
+  env_file: ../.env
+  environment:
+    BOOKFORGE_USE_S3: "1"
+    RENDER_URL: "http://render:4000"
+  depends_on:
+    redis: { condition: service_healthy }
+    postgres: { condition: service_healthy }
+    minio: { condition: service_healthy }
+
+services:
+  api:
+    build: { context: .., dockerfile: infra/Dockerfile.python }
+    command: uvicorn bookforge.api.main:app --host 0.0.0.0 --port 8000
+    <<: *python-env
+    ports: ["8000:8000"]
+
+  worker:
+    build: { context: .., dockerfile: infra/Dockerfile.python }
+    command: celery -A bookforge.workflow.celery_app worker -Q content,images,celery -l info --concurrency 4
+    <<: *python-env
+    deploy: { replicas: 2 }          # scale: docker compose up --scale worker=N
+
+  beat:
+    build: { context: .., dockerfile: infra/Dockerfile.python }
+    command: celery -A bookforge.workflow.celery_app beat -l info
+    <<: *python-env
+
+  render:
+    build: { context: ../render, dockerfile: ../infra/Dockerfile.render }
+    ports: ["4000:4000"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:4000/health').then(()=>process.exit(0)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  ui:
+    profiles: ["ui"]                 # Phase 4 — enable with: --profile ui
+    build: { context: ../app, dockerfile: ../infra/Dockerfile.ui }
+    environment:
+      NEXT_PUBLIC_API_URL: "http://localhost:8000"
+    ports: ["3000:3000"]
+    depends_on: [api]
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes: ["redis-data:/data"]
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: bookforge
+      POSTGRES_PASSWORD: bookforge
+      POSTGRES_DB: bookforge
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bookforge"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes: ["pg-data:/var/lib/postgresql/data"]
+
+  minio:
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports: ["9000:9000", "9001:9001"]
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes: ["minio-data:/data"]
+
+volumes:
+  redis-data:
+  pg-data:
+  minio-data:

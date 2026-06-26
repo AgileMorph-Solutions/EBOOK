@@ -1,0 +1,36 @@
+# --- Core ---
+pydantic>=2.7
+eval_type_backport>=0.2 ; python_version < "3.10"   # PEP 604 unions on <3.10
+pydantic-settings>=2.3
+python-dotenv>=1.0
+tenacity>=8.3
+structlog>=24.1
+
+# --- LLM / AI ---
+anthropic>=0.40
+openai>=1.40             # content fallback + gpt-image-1 image generation
+google-genai>=0.3        # Gemini / Imagen image generation
+
+# --- Ingest ---
+youtube-transcript-api>=0.6
+yt-dlp>=2024.8
+faster-whisper>=1.0      # optional ASR fallback
+
+# --- RAG / embeddings ---
+pgvector>=0.3
+numpy>=1.26
+
+# --- Orchestration / API ---
+celery[redis]>=5.4
+redis>=5.0
+fastapi>=0.111
+uvicorn[standard]>=0.30
+
+# --- Data ---
+sqlalchemy>=2.0
+psycopg[binary]>=3.2
+boto3>=1.34
+
+# --- Imaging / PDF ---
+Pillow>=10.3
+pikepdf>=9.0             # PDF inspect / linearize

@@ -1,0 +1,16 @@
+[project]
+name = "bookforge"
+version = "0.1.0"
+description = "AI ebook generation pipeline: topic/transcript -> print-ready KDP PDF"
+requires-python = ">=3.11"
+dynamic = ["dependencies"]
+
+[tool.setuptools]
+packages = ["bookforge"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"

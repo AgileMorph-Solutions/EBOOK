@@ -1,0 +1,28 @@
+# Secrets — NEVER commit
+.env
+*.env
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Node
+node_modules/
+.next/
+dist/
+
+# Build artifacts / generated books
+output/
+artifacts/
+*.pdf
+!reference/**/*.pdf
+
+# OS
+.DS_Store

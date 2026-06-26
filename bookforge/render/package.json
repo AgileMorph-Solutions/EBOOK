@@ -1,0 +1,14 @@
+{
+  "name": "bookforge-render",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "HTML -> print-ready PDF via Paged.js + headless Chromium",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "puppeteer": "^22.0.0"
+  }
+}

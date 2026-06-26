@@ -20,7 +20,7 @@ RUN pip install -r requirements.txt
 COPY bookforge ./bookforge
 
 # Non-root runtime
-RUN useradd -m forge && chown -R forge /app
+RUN useradd -m forge && chown -R forge /app && mkdir -p /home/forge/artifacts && chown forge /home/forge/artifacts
 USER forge
 
 EXPOSE 8000

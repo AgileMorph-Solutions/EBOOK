@@ -40,8 +40,12 @@ def _fetch_youtube(url: str) -> str:
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
 
-        parts = YouTubeTranscriptApi.get_transcript(video_id)
-        return " ".join(p["text"] for p in parts)
+        # v1.x: instance method fetch(); v0.x: class method get_transcript()
+        try:
+            parts = list(YouTubeTranscriptApi().fetch(video_id))
+        except (AttributeError, TypeError):
+            parts = YouTubeTranscriptApi.get_transcript(video_id)  # type: ignore[attr-defined]
+        return " ".join(p["text"] if isinstance(p, dict) else p.text for p in parts)
     except Exception as exc:  # no captions -> ASR fallback
         log.warning("no_captions_falling_back_to_asr", err=str(exc))
         return _asr_youtube(video_id)

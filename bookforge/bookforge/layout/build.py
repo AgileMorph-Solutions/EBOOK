@@ -151,7 +151,7 @@ def build_html(bible: BookBible, chapters: list[Chapter],
                           settings.trim_height_in + 2 * settings.bleed_in,
                           settings.bleed_in)
     log.info("layout_built", pages=len(d.pages), folios=d.folio)
-    return (f'<!doctype html><html><head><meta charset="utf-8">'
+    return (f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
             f'<title>{_esc(bible.title)}</title>'
             f'<style>{root}{_CSS}</style></head>'
             f'<body>{"".join(d.pages)}</body></html>')

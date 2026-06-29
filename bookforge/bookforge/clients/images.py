@@ -111,7 +111,11 @@ def generate(prompt: str, *, aspect: str = "full_bleed", in_image_text: bool = F
     budget.assert_ok()
     provider = settings.image_primary_provider.lower()
     if provider == "gemini":
-        data = _gen_gemini(prompt, aspect, negative_prompt=negative_prompt)
+        try:
+            data = _gen_gemini(prompt, aspect, negative_prompt=negative_prompt)
+        except Exception as exc:  # google-genai missing or Imagen unavailable
+            log.warning("gemini_fallback_openai", err=str(exc)[:160])
+            data = _gen_openai(prompt, aspect, negative_prompt=negative_prompt)
     else:  # default: openai
         data = _gen_openai(prompt, aspect, negative_prompt=negative_prompt)
     budget.charge(_IMG_COST)

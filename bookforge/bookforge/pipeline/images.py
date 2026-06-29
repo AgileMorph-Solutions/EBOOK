@@ -65,6 +65,15 @@ _NO_TEXT = ("absolutely no text, no words, no letters, no labels, no captions, "
             "no logos, no watermark, no signage anywhere in the image")
 
 
+def _negation(bible) -> str:
+    """Fold the book's negative_prompt into the POSITIVE prompt. Imagen ignores a
+    separate negative_prompt param on the versions we use, so the only reliable
+    way to suppress (e.g.) insects/pests/clutter is to state the exclusion in the
+    main prompt — otherwise a strong subject cue ('Roach Prevention') wins."""
+    neg = (bible.art_style.negative_prompt or "").strip().rstrip(".")
+    return f" Strictly exclude from the image: {neg}." if neg else ""
+
+
 def _build_prompt(brief, bible) -> str:
     """Wrap the subject in a research-backed art-direction recipe.
 
@@ -74,23 +83,26 @@ def _build_prompt(brief, bible) -> str:
     """
     subject = brief.prompt.strip().rstrip(".")
     palette = bible.art_style.palette
+    neg = _negation(bible)
     if brief.kind == "illustration":
         style = bible.art_style.style_suffix or "hand-painted vintage gouache illustration"
         prompt = (f"{subject}. {style}, cohesive {palette} palette, textured paper feel, "
                   f"editorial spot illustration.")
     else:
+        # photoreal hero — generic, driven by the book's art style (any topic)
+        style = bible.art_style.style_suffix or "bright clean editorial photography"
         prompt = (
-            f"Editorial food photograph of {subject}. Shot on a 50mm lens, natural soft "
-            f"window light from the side, shallow depth of field with a softly blurred "
-            f"background, subtle film grain, professional food styling on a matte ceramic "
-            f"surface, {palette} color story, realistic textures and crumbs, unretouched, "
-            f"documentary cookbook style."
+            f"A high-quality, realistic photograph of {subject}. {style}. "
+            f"Natural soft daylight, shallow depth of field with a gently blurred "
+            f"background, {palette} color story, real textures, clean and uncluttered "
+            f"composition, modern and professional, no people's faces."
         )
     if brief.needs_in_image_text and brief.caption:
         prompt = (f'Render the words "{brief.caption}" clearly and legibly in '
                   f"a single tasteful caption area. {prompt}")
     else:
         prompt = f"{prompt} {_NO_TEXT}."
+    prompt = f"{prompt}{neg}"
     # Compose for editorial overlay: keep the lower third visually calm so a
     # title card can sit there without fighting the subject. Avoid bright
     # highlights, smoke, or busy detail in the bottom band.
@@ -114,13 +126,47 @@ def _negative_for(bible) -> str:
     return "; ".join(parts)
 
 
-# Placed-box pixel targets per aspect at 300 DPI (rough cookbook-page boxes).
+# Placed-box pixel targets per aspect at 300 DPI (rough page boxes).
 _ASPECT_BOX = {
     "full_bleed": (1850, 2775),   # full page bleed
     "portrait":   (1600, 2200),
     "wide":       (1850, 1400),   # feature band photo strip
     "square":     (1600, 1600),
 }
+
+
+def generate_image(prompt: str, aspect: str, key: str) -> GeneratedImage | None:
+    """Generate ONE image (no candidates/scoring — lean path for guides), right-size
+    it to the placed box at print DPI, store it, and return its record."""
+    page_w, page_h = settings.page_px
+    try:
+        raw = img_client.generate(prompt, aspect=aspect)
+    except Exception as exc:
+        log.warning("image_gen_failed", key=key, err=str(exc)[:200])
+        return None
+    # Cap to the largest box a guide image is placed in (a hero ~ half page).
+    box_w = min(page_w, 1600)
+    box_h = min(page_h, 1600)
+    sized, w, h = _rightsize(raw, box_w, box_h)
+    storage.put(key, sized, "image/jpeg")
+    return GeneratedImage(block_ref=key, storage_key=key, width=w, height=h, score=0.9)
+
+
+def generate_for_brief(brief, bible: BookBible, key: str) -> GeneratedImage | None:
+    """Lean single-image generation for a content block's image_brief."""
+    gi = generate_image(_build_prompt(brief, bible), brief.aspect, key)
+    if gi:
+        gi.block_ref = key  # caller maps key -> block_ref
+    return gi
+
+
+def generate_cover(subject: str, bible: BookBible, key: str) -> GeneratedImage | None:
+    """Full-bleed cover background (title is overlaid in HTML, so no text baked in)."""
+    style = bible.art_style.style_suffix or "bright clean editorial photography"
+    prompt = (f"A high-quality, realistic photograph for a book cover background: "
+              f"{subject}. {style}. Soft daylight, {bible.art_style.palette} color story, "
+              f"clean composition with empty space for a title, modern and inviting. {_NO_TEXT}.")
+    return generate_image(prompt, "full_bleed", key)
 
 
 def generate_for_chapter(chapter: Chapter, bible: BookBible) -> list[GeneratedImage]:

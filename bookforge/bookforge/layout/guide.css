@@ -1,0 +1,323 @@
+/* ============================================================================
+   BookForge — PRACTICAL GUIDE theme (senior-first, big type, full-page fill).
+   Self-contained: guide pages do NOT inherit the legacy cookbook book.css, so
+   the recipe path is unaffected. Tokens (colors/fonts) come from :root.
+
+   Fill model: each body page is `.gbody-box > .gfit` (flex column). The .gfit
+   holds a tight `.ghead` (eyebrow/title/lead) on top and a `.gbodyfill` that
+   FILLS the remaining height (lists/checklists distribute, tables stretch).
+   render.py scales each .gfit's font to the biggest size that fits (down to a
+   senior floor), so pages are big-text, fully covered, and never clipped.
+   ============================================================================ */
+@page { size: var(--page-w) var(--page-h); margin: 0; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html { -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
+
+.page {
+  position: relative; width: var(--page-w); height: var(--page-h);
+  overflow: visible; background: var(--paper); color: var(--ink);
+  font-family: var(--body); page-break-after: always; break-after: page;
+}
+.page:last-child { page-break-after: auto; }
+
+.bleed-img { position: absolute; inset: calc(-1 * var(--bleed));
+  width: calc(100% + 2*var(--bleed)); height: calc(100% + 2*var(--bleed));
+  object-fit: cover; }
+
+/* ---- running chrome (body pages) ---- */
+.grunhead { position: absolute; top: calc(var(--bleed) + .40in); left: var(--safe);
+  right: var(--safe); text-align: center; font-family: var(--cond);
+  text-transform: uppercase; letter-spacing: .16em; font-size: 10pt; color: var(--muted); }
+.gfolio { position: absolute; bottom: calc(var(--bleed) + .34in); left: 0; right: 0;
+  text-align: center; font-family: var(--cond); font-size: 12pt; letter-spacing: .22em;
+  color: var(--accent); font-weight: 600; }
+
+/* content box for body pages: reserves room for runhead (top) + folio (bottom) */
+.gbody-box { position: absolute; left: var(--safe); right: var(--safe);
+  top: calc(var(--bleed) + .92in); bottom: calc(var(--bleed) + .78in);
+  display: flex; flex-direction: column; }
+
+/* the fit region — render.py tunes its font-size; children size in em */
+.gfit { font-size: 15pt; flex: 1 1 auto; min-height: 0;
+  display: flex; flex-direction: column; }
+.ghead { flex: 0 0 auto; }
+.gbodyfill { flex: 1 1 auto; min-height: 0; margin-top: .16in; }
+
+/* fill strategies (applied to .gbodyfill or a child) */
+.fill-spread { display: flex; flex-direction: column; justify-content: space-between;
+  flex: 1 1 auto; min-height: 0; }
+.fill-row { display: flex; flex-direction: row; gap: .5in; flex: 1 1 auto; min-height: 0; }
+.fill-row > * { flex: 1 1 0; min-width: 0; }
+.fill-center { display: flex; flex-direction: column; justify-content: center;
+  flex: 1 1 auto; min-height: 0; }
+
+/* during measurement, everything collapses to natural top-aligned flow so the
+   true content height is observable; afterwards fills expand to cover the page */
+.gfit.measuring .grow,
+.gfit.measuring .entry-hero,
+.gfit.measuring .entry-mid { flex-grow: 0 !important; }
+/* measure the card's middle row at the TRUE height of its tallest part (the
+   hero given a definite height, the needs panel free to size to content) so the
+   needs list never crowds after fitting */
+.gfit.measuring .entry-hero { flex: 0 0 auto !important; height: 1.7in !important; }
+.gfit.measuring .entry-mid { align-items: flex-start !important; }
+.gfit.measuring .fill-spread,
+.gfit.measuring .fill-row,
+.gfit.measuring .fill-center { display: block !important; height: auto !important; }
+
+p { line-height: 1.5; }
+b, strong { font-weight: 700; }
+
+/* shared eyebrow + headings */
+.eyebrow { font-family: var(--cond); text-transform: uppercase; letter-spacing: .18em;
+  font-size: .80em; color: var(--accent); font-weight: 600; }
+.gh2 { font-family: var(--display); font-weight: 800; color: var(--accent);
+  line-height: 1.05; }
+.glead { font-size: 1.0em; line-height: 1.45; color: var(--muted); margin-top: .04in; }
+
+/* ============================ COVER ============================ */
+/* SPLIT COVER: clean photo on top, solid brand-color band below (no overlay over
+   the photo). The band carries kicker / title / subtitle / footer. */
+/* overflow:hidden clips each cover/divider to its OWN bleed-sized page box, so the
+   photo/band still fills to the bleed edge (full bleed kept) but the bleed overshoot
+   can't leak a colored strip onto the previous/next page. */
+.gcover { background: var(--deep); overflow: hidden; }
+.gcover .cphoto { position: absolute; top: calc(-1 * var(--bleed));
+  left: calc(-1 * var(--bleed)); right: calc(-1 * var(--bleed)); bottom: 5.0in;
+  overflow: hidden; background: var(--deep); }
+.gcover .cphoto img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.gcover .cband { position: absolute; left: calc(-1 * var(--bleed));
+  right: calc(-1 * var(--bleed)); bottom: calc(-1 * var(--bleed)); top: 6.25in;
+  background: var(--accent); color: #fff; text-align: center;
+  display: flex; flex-direction: column; justify-content: center; align-items: center;
+  padding: .5in .8in calc(.45in + var(--bleed)); }
+.gcover .ckicker { font-family: var(--cond); text-transform: uppercase;
+  color: rgba(255,255,255,.9); letter-spacing: .3em; font-size: 13pt; font-weight: 600;
+  margin-bottom: .3in; }
+.gcover .cmid { display: flex; flex-direction: column; align-items: center; }
+.gcover .ctitle { font-family: var(--display); font-weight: 900; color: #fff;
+  font-size: 46pt; line-height: 1.0; }
+.gcover .csub { font-family: var(--body); font-weight: 700; font-size: 17pt;
+  line-height: 1.32; color: rgba(255,255,255,.96); max-width: 6.1in;
+  border-top: 2px solid var(--gold); padding-top: .24in; margin-top: .24in; }
+.gcover .cfoot { font-family: var(--cond); text-transform: uppercase;
+  letter-spacing: .22em; font-size: 11.5pt; color: rgba(255,255,255,.85);
+  margin-top: .34in; }
+
+/* ============================ TITLE PAGE ============================ */
+.gtitle .wrap { position: absolute; inset: var(--safe); display: flex; flex-direction: column;
+  align-items: center; justify-content: center; text-align: center; }
+.gtitle .t { font-family: var(--display); font-weight: 800; color: var(--accent);
+  font-size: 42pt; line-height: 1.05; max-width: 6.4in; }
+.gtitle .rule { width: 2.4in; height: 3px; background: var(--gold); margin: .44in 0; }
+.gtitle .s { font-family: var(--body); font-size: 19pt; line-height: 1.45; max-width: 5.6in;
+  color: var(--ink); }
+.gtitle .imp { margin-top: .8in; font-family: var(--cond); text-transform: uppercase;
+  letter-spacing: .2em; font-size: 12pt; color: var(--muted); }
+
+/* ============================ HOW TO USE ============================ */
+.howto .kick { font-family: var(--cond); text-transform: uppercase; letter-spacing: .2em;
+  font-size: .82em; color: var(--accent); font-weight: 600; }
+.howto .gh2 { font-size: 2.0em; margin: .04in 0 .12in; }
+.howto .glead { font-size: 1.04em; color: var(--ink); margin-bottom: .1in; }
+/* 4 points become evenly-stretched feature cards that fill the page (instead of
+   space-between gaps). Roomy, senior-friendly, and clearly designed. */
+.howto ol { list-style: none; counter-reset: h; display: flex; flex-direction: column; gap: .22in; }
+.howto ol li { position: relative; font-size: 1.04em; line-height: 1.45; flex: 1 1 0;
+  display: flex; flex-direction: column; justify-content: center;
+  background: var(--panel); border-radius: 14px; padding: .3in .44in .3in 1.05in;
+  border: 1px solid rgba(16,38,46,.10); }
+.howto ol li::before { counter-increment: h; content: counter(h); position: absolute; left: .36in;
+  top: 50%; transform: translateY(-50%); width: 1.7em; height: 1.7em; border-radius: 50%;
+  background: var(--accent); color: #fff; font-family: var(--cond); font-weight: 700;
+  font-size: .82em; display: flex; align-items: center; justify-content: center; }
+
+/* ============================ SAFETY PAGE ============================ */
+.gsafety { background: var(--paper); }
+.gsafety .band { position: absolute; top: 0; left: 0; right: 0; height: 1.7in;
+  background: var(--danger); display: flex; align-items: center; padding: 0 var(--safe); }
+.gsafety .band .bk { font-family: var(--cond); text-transform: uppercase; letter-spacing: .26em;
+  font-size: 13pt; font-weight: 600; color: #fff; opacity: .92; }
+.gsafety .band h2 { font-family: var(--display); font-weight: 800; font-size: 40pt; line-height: 1;
+  color: #fff; }
+.gsafety .body { position: absolute; top: 2.0in; left: var(--safe); right: var(--safe);
+  bottom: calc(var(--bleed) + .6in); display: flex; flex-direction: column; }
+.gsafety .lead { font-size: 15.5pt; line-height: 1.5; margin-bottom: .2in; }
+.gsafety .nevermix-label { font-family: var(--cond); text-transform: uppercase;
+  letter-spacing: .14em; font-weight: 700; font-size: 15pt; color: var(--danger); margin-bottom: .14in; }
+.gsafety .nm-grid { flex: 1 1 auto; display: grid; grid-template-columns: 1fr 1fr;
+  grid-auto-rows: 1fr; gap: .2in; }
+.gsafety .nm { background: rgba(179,38,30,.08); border: 2px solid var(--danger); border-radius: 12px;
+  padding: .22in .24in; display: flex; flex-direction: column; justify-content: center; }
+.gsafety .nm .pair { font-family: var(--display); font-weight: 800; font-size: 18pt;
+  color: var(--danger); margin-bottom: .08in; }
+.gsafety .nm .why { font-size: 14pt; line-height: 1.4; color: var(--ink); }
+
+/* ============================ TABLE OF CONTENTS ============================ */
+.toc .head { position: absolute; top: calc(var(--bleed) + .85in); left: var(--safe); right: var(--safe); }
+.toc .kick { font-family: var(--cond); text-transform: uppercase; letter-spacing: .24em;
+  font-size: 13pt; color: var(--accent); font-weight: 600; }
+.toc .head h2 { font-family: var(--display); font-weight: 800; color: var(--ink);
+  font-size: 46pt; line-height: 1; margin-top: .06in; }
+.toc .rule { height: 3px; background: var(--gold); width: 100%; margin-top: .18in; }
+.toc .cols { position: absolute; top: 2.6in; left: var(--safe); right: var(--safe);
+  bottom: calc(var(--bleed) + .7in); column-count: 2; column-gap: .5in; }
+.toc .grp { break-inside: avoid; margin-bottom: .3in; }
+.toc .grp .gt { font-family: var(--cond); text-transform: uppercase; letter-spacing: .08em;
+  font-weight: 700; font-size: 14pt; color: var(--accent); margin-bottom: .1in;
+  border-bottom: 2px solid var(--panel); padding-bottom: .05in; }
+.toc .row { display: flex; align-items: baseline; font-size: 14pt; line-height: 1.85; }
+.toc .row .tt { color: var(--ink); }
+.toc .row .dots { flex: 1 1 auto; border-bottom: 1.5px dotted var(--muted); margin: 0 .12in;
+  transform: translateY(-.04in); }
+.toc .row .pg { font-family: var(--cond); color: var(--muted); font-weight: 600; }
+
+/* ============================ SECTION DIVIDER ============================ */
+/* SPLIT DIVIDER: solid brand-color panel (left) carries the text; clean photo
+   (right) is never covered by an overlay. */
+.gdivider { background: var(--deep); color: #fff; overflow: hidden; }
+.gdivider .dphoto { position: absolute; top: calc(-1 * var(--bleed));
+  right: calc(-1 * var(--bleed)); bottom: calc(-1 * var(--bleed)); left: 3.9in;
+  overflow: hidden; background: var(--deep); }
+.gdivider .dphoto img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.gdivider:not(.has-img) .dphoto { display: none; }
+.gdivider .dpanel { position: absolute; top: calc(-1 * var(--bleed));
+  left: calc(-1 * var(--bleed)); bottom: calc(-1 * var(--bleed));
+  width: calc(3.9in + var(--bleed)); background: var(--accent); color: #fff;
+  display: flex; flex-direction: column; justify-content: center;
+  padding: 1in .6in 1in calc(.7in + var(--bleed)); }
+.gdivider:not(.has-img) .dpanel { width: auto; right: calc(-1 * var(--bleed)); }
+.gdivider .num { font-family: var(--cond); text-transform: uppercase; letter-spacing: .3em;
+  font-size: 13pt; color: var(--gold); font-weight: 600; margin-bottom: .2in; }
+.gdivider .t { font-family: var(--display); font-weight: 800; font-size: 34pt; line-height: 1.05; color: #fff; }
+.gdivider .rule { width: 1.5in; height: 3px; background: var(--gold); margin: .34in 0; }
+.gdivider .k { font-family: var(--body); font-size: 15pt; line-height: 1.5;
+  color: rgba(255,255,255,.95); }
+
+/* ============================ ENTRY CARD (workhorse) ============================ */
+.entry-fit-root { }
+.entry-fit > * + * { margin-top: .14in; }
+.entry-fit { height: 100%; display: flex; flex-direction: column; }
+.entry-title { font-family: var(--display); font-weight: 800; color: var(--accent);
+  font-size: 2.0em; line-height: 1.04; }
+.entry-intro { font-size: 1.02em; line-height: 1.5; color: var(--ink); }
+.entry-mid { display: flex; gap: .22in; flex: 1 1 auto; min-height: 1.8in; }
+.entry-hero { flex: 1 1 52%; border-radius: 12px; overflow: hidden; background: var(--panel); }
+.entry-hero img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.entry-need { flex: 1 1 48%; background: var(--panel); border-radius: 12px; padding: .2in .24in;
+  display: flex; flex-direction: column; }
+.need-label, .steps-label { font-family: var(--cond); text-transform: uppercase;
+  letter-spacing: .12em; font-weight: 700; font-size: 1.0em; color: var(--accent); }
+.need-list { list-style: none; margin-top: .12in; }
+.need-list li { font-size: 1.0em; line-height: 1.38; margin-bottom: .1in;
+  padding-left: 1.1em; text-indent: -1.1em; }
+.need-list li::before { content: "•"; color: var(--accent); font-weight: 800; margin-right: .5em; }
+.entry-steps { background: var(--panel_dark, #143842); color: #fff; border-radius: 12px;
+  padding: .24in .28in; }
+.entry-steps .steps-label { color: #fff; }
+.steps-list { list-style: none; counter-reset: s; margin-top: .14in; }
+.steps-list li { position: relative; font-size: 1.0em; line-height: 1.45; margin-bottom: .14in;
+  padding-left: 2.0em; color: #fff; }
+.steps-list li:last-child { margin-bottom: 0; }
+.steps-list li::before { counter-increment: s; content: counter(s); position: absolute; left: 0;
+  top: .02em; width: 1.4em; height: 1.4em; border-radius: 50%; background: var(--gold, #C79A3E);
+  color: #10242b; font-family: var(--cond); font-weight: 700; font-size: .82em;
+  display: flex; align-items: center; justify-content: center; }
+.entry-callouts { display: flex; gap: .18in; }
+.callout { flex: 1; border-radius: 10px; padding: .16in .2in; font-size: .96em; line-height: 1.4; }
+.callout .cl-label { font-family: var(--cond); text-transform: uppercase; letter-spacing: .06em;
+  font-weight: 700; }
+.callout.savings { background: rgba(46,125,91,.14); border-left: 6px solid var(--savings, #2E7D5B); }
+.callout.savings .cl-label { color: var(--savings, #2E7D5B); }
+.callout.caution { background: rgba(181,101,29,.14); border-left: 6px solid var(--caution, #B5651D); }
+.callout.caution .cl-label { color: var(--caution, #B5651D); }
+.callout.danger { background: rgba(179,38,30,.12); border-left: 6px solid var(--danger, #B3261E); }
+.callout.danger .cl-label { color: var(--danger, #B3261E); }
+
+/* ============================ COMPACT LIST PAGE ============================ */
+.list-col { display: flex; flex-direction: column; justify-content: space-between; height: 100%; }
+.list-item { font-size: 1.0em; line-height: 1.4; padding: .06in 0; }
+.list-item .ln { display: flex; gap: .45em; }
+.list-item .num { font-family: var(--cond); font-weight: 700; color: var(--accent); min-width: 1.7em; }
+.list-item .nm { font-weight: 700; color: var(--ink); }
+.list-item .tx { color: var(--ink); }
+
+/* ============================ CHART / TABLE PAGE ============================ */
+.gtable { width: 100%; border-collapse: collapse; font-size: 1.0em; }
+.gtable thead th { background: var(--accent); color: #fff; font-family: var(--cond);
+  text-transform: uppercase; letter-spacing: .04em; font-size: .92em; text-align: left;
+  padding: .16in .18in; }
+.gtable thead th:last-child { text-align: right; }
+.gtable tbody td { padding: .15in .18in; line-height: 1.35; border-bottom: 1px solid var(--panel);
+  vertical-align: middle; }
+.gtable tbody td:last-child { text-align: right; font-weight: 700; color: var(--savings, #2E7D5B);
+  white-space: nowrap; }
+.gtable tbody tr:nth-child(even) { background: var(--panel); }
+.chart-note { margin-top: .16in; font-size: .9em; color: var(--muted); font-style: italic; }
+/* chart fills the page: table grows to fill the height with roomy, even rows and
+   sits right under the heading instead of floating centered with gaps */
+.chartpage .gbodyfill { justify-content: flex-start; }
+.chartpage .gtable { flex: 1 1 auto; }
+.chartpage .gtable tbody td { padding-top: .22in; padding-bottom: .22in; }
+
+/* ============================ CHECKLIST PAGE ============================ */
+.check-grp { min-width: 0; display: flex; flex-direction: column; }
+.check-grp .ct { flex: 0 0 auto; font-family: var(--cond); text-transform: uppercase;
+  letter-spacing: .08em; font-weight: 700; font-size: .95em; color: var(--accent);
+  margin-bottom: .12in; }
+.check-row { display: flex; align-items: flex-start; gap: .5em; font-size: 1.0em;
+  line-height: 1.4; margin-bottom: .14in; break-inside: avoid; }
+.check-box { flex: 0 0 auto; width: 1.0em; height: 1.0em; border: 2.5px solid var(--accent);
+  border-radius: 4px; margin-top: .14em; }
+/* checklist fills the page: rows stretch evenly with hairline dividers (a clean
+   "form" rhythm) instead of uneven space-between gaps */
+.checkpage .check-rows { display: flex; flex-direction: column; }
+.checkpage .check-row { flex: 1 1 0; align-items: center; margin-bottom: 0; padding: .06in 0;
+  border-bottom: 1px solid rgba(16,38,46,.12); }
+.checkpage .check-row:last-child { border-bottom: none; }
+.checkpage .check-box { margin-top: 0; }
+
+/* ============================ WHEN TO CALL A PRO ============================ */
+.propage .gh2 { font-size: 2.0em; }
+.propage .plead { font-size: 1.05em; line-height: 1.5; margin: .12in 0 .1in; }
+/* signs stretch evenly to fill the page above the reassurance box (no empty band) */
+.propage ul { list-style: none; display: flex; flex-direction: column; flex: 1 1 auto; }
+.propage li { position: relative; font-size: 1.04em; line-height: 1.4; flex: 1 1 0;
+  display: flex; flex-direction: column; justify-content: center;
+  padding: .08in .1in .08in 2.0em; border-bottom: 1px solid rgba(16,38,46,.12); }
+.propage li:last-child { border-bottom: none; }
+.propage li::before { content: "!"; position: absolute; left: 0; top: 50%; transform: translateY(-50%);
+  width: 1.4em; height: 1.4em; border-radius: 50%; background: var(--caution, #B5651D); color: #fff;
+  font-family: var(--cond); font-weight: 700; font-size: .82em; display: flex;
+  align-items: center; justify-content: center; }
+.propage .reassure { flex: 0 0 auto; background: var(--panel); border-radius: 12px;
+  padding: .26in .3in; font-size: 1.05em; line-height: 1.5; margin-top: .24in; }
+
+/* generic text/continuation page */
+.gtext .gh2 { font-size: 1.8em; margin-bottom: .16in; }
+.gtext p { font-size: 1.0em; line-height: 1.55; margin-bottom: .12in; }
+
+/* ============================================================================
+   VISUAL POLISH — depth, rhythm, and richer section openers (senior-safe).
+   ============================================================================ */
+/* Card definition via hairline borders ONLY — never box-shadow. Chromium's
+   print-to-PDF rasterizes a blurred box-shadow as a SOLID grey rectangle
+   (offset down-right), which reads as ugly overlapping grey boxes behind each
+   component. A 1px border prints clean and crisp and still reads as a card.
+   NB: scope the never-mix box to `.gsafety .nm` — a bare `.nm` also matches the
+   bold lead-in span on quick-use list items. */
+.entry-need, .entry-hero, .callout, .reassure {
+  border: 1px solid rgba(16, 38, 46, 0.10);
+}
+.gtable { border-radius: 12px; overflow: hidden;
+  border: 1px solid rgba(16, 38, 46, 0.10); }
+
+/* quick-use list: round number badges (echo the step badges) for rhythm */
+.list-item .ln { align-items: flex-start; gap: .6em; }
+.list-item .num { display: inline-flex; align-items: center; justify-content: center;
+  min-width: 1.7em; height: 1.7em; padding: 0 .35em; border-radius: 999px;
+  background: var(--accent); color: #fff; font-size: .76em; line-height: 1;
+  flex: 0 0 auto; margin-top: .12em; }
+
+/* Cover & dividers use solid split panels (above) — no photo overlay, so no
+   blurred shadows or scrims that print as dark boxes. */

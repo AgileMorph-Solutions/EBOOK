@@ -66,6 +66,37 @@ class ChapterPlan(BaseModel):
     page_budget: int
 
 
+class SpecialPage(str, Enum):
+    """Named special pages a practical-guide section can own."""
+
+    safety_dilution = "safety_dilution"
+    never_mix = "never_mix"
+    replace_chart = "replace_chart"
+    savings_calc = "savings_calc"
+    monthly_checklist = "monthly_checklist"
+    when_pro = "when_pro"
+    exterminator_tracker = "exterminator_tracker"
+
+
+class SectionPlan(BaseModel):
+    """Practical-guide analog of ChapterPlan: a TOC category with quotas."""
+
+    index: int
+    title: str  # == a table-of-contents category
+    summary: str = ""
+    entry_budget: int = 0      # how many of the book's "uses" this section owns
+    full_card_quota: int = 0   # of those, how many are full use_cards
+    list_quota: int = 0        # remainder rendered as compact use_list rows
+    special_pages: list[SpecialPage] = Field(default_factory=list)
+    image_quota: int = 1       # hero + key step images for this section
+    page_budget: int = 4
+    # Explicit subject for this section's full-page divider photo. Set this when
+    # the section TITLE would mislead the image model (e.g. "Roach Prevention"
+    # makes it draw roaches) — describe the clean/prevented scene instead. When
+    # empty, the orchestrator falls back to a title-based subject.
+    divider_subject: str = ""
+
+
 class BookBible(BaseModel):
     title: str
     subtitle: str
@@ -73,15 +104,19 @@ class BookBible(BaseModel):
     tone: str
     art_style: ArtStyle
     voice: VoiceStyle
-    chapters: list[ChapterPlan]
+    chapters: list[ChapterPlan] = Field(default_factory=list)
     recurring_motifs: list[str] = Field(default_factory=list)
     target_pages: int = 100
+    # --- practical-guide path (additive; narrative books leave these default) ---
+    book_kind: Literal["narrative", "practical_guide"] = "narrative"
+    sections: list[SectionPlan] = Field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- #
 # Stage 2 — content
 # --------------------------------------------------------------------------- #
 class BlockType(str, Enum):
+    # --- narrative / recipe path (existing — do not remove) ---
     intro = "intro"
     history = "history"
     ingredients = "ingredients"
@@ -89,6 +124,17 @@ class BlockType(str, Enum):
     sidebar = "sidebar"
     pull_quote = "pull_quote"
     body = "body"
+    # --- practical-guide path (additive) ---
+    section_intro = "section_intro"  # short lead-in under a section hero
+    use_card = "use_card"            # ONE full how-to entry (the workhorse)
+    use_list = "use_list"            # compact page of many terse uses
+    what_you_need = "what_you_need"  # standalone supplies list
+    steps = "steps"                  # standalone numbered steps
+    caution = "caution"              # safety/warning callout (safety-gated)
+    savings_note = "savings_note"    # "replaces X / saves ~$Y" callout
+    chart = "chart"                  # table (replace-this / dilution / tracker)
+    checklist = "checklist"          # checkbox list (prevention / pest-proofing)
+    faq = "faq"                      # Q/A pairs
 
 
 class Claim(BaseModel):
@@ -111,12 +157,56 @@ class ImageBrief(BaseModel):
     caption: str | None = None
 
 
+# --- structured payloads for practical-guide blocks (additive) --------------- #
+class StepItem(BaseModel):
+    text: str
+
+
+class UseEntry(BaseModel):
+    """One of the book's numbered "uses", in full-card or compact-list form."""
+
+    number: int = 0  # stable global id (1..250 for book 1)
+    title: str
+    intro: str = ""  # short lead; empty in compact-list form
+    what_you_need: list[str] = Field(default_factory=list)
+    steps: list[StepItem] = Field(default_factory=list)
+    caution: str | None = None  # short inline safety note
+    savings: str | None = None  # "Replaces bleach pens (~$6/yr)"
+
+
+class TableModel(BaseModel):
+    columns: list[str] = Field(default_factory=list)
+    rows: list[list[str]] = Field(default_factory=list)  # each row len == columns
+    note: str | None = None
+
+
+class ChecklistItem(BaseModel):
+    text: str
+    cadence: Literal["daily", "weekly", "monthly", "seasonal", "once"] | None = None
+
+
+class ChecklistModel(BaseModel):
+    title: str | None = None
+    items: list[ChecklistItem] = Field(default_factory=list)
+
+
+class FAQItem(BaseModel):
+    q: str
+    a: str
+
+
 class ContentBlock(BaseModel):
     type: BlockType
     heading: str | None = None
-    text: str
+    text: str = ""  # prose blocks; structured blocks may leave this empty
     claims: list[Claim] = Field(default_factory=list)
     image_brief: ImageBrief | None = None
+    # --- structured payloads (exactly one populated for structured types) ---
+    entries: list[UseEntry] = Field(default_factory=list)  # use_card (1) / use_list (N)
+    table: TableModel | None = None                         # chart
+    checklist: ChecklistModel | None = None                # checklist
+    faqs: list[FAQItem] = Field(default_factory=list)       # faq
+    callout_kind: Literal["savings", "caution", "tip"] | None = None
 
 
 class Chapter(BaseModel):
@@ -147,6 +237,17 @@ class TemplateName(str, Enum):
     recipe_spread = "recipe_spread"
     text_page = "text_page"
     sidebar = "sidebar"
+    # practical-guide templates
+    title_page = "title_page"
+    how_to_use = "how_to_use"
+    toc = "toc"
+    safety_page = "safety_page"
+    use_card_page = "use_card_page"
+    use_list_page = "use_list_page"
+    chart_page = "chart_page"
+    checklist_page = "checklist_page"
+    faq_page = "faq_page"
+    pro_page = "pro_page"
 
 
 class Page(BaseModel):
@@ -157,12 +258,24 @@ class Page(BaseModel):
     image_key: str | None = None
 
 
+class SafetyFinding(BaseModel):
+    """A safety problem found in the prose/instructions (chemical guides)."""
+
+    severity: Literal["block", "warn"]
+    rule: str  # which safety rule was violated
+    location: str = ""  # "section 4 / entry 'Clean grout'"
+    excerpt: str = ""
+    fix: str = ""
+
+
 class QAResult(BaseModel):
     groundedness: float  # fraction of retained claims verified (target = 1.0)
     unsupported_claims: list[Claim] = Field(default_factory=list)
     prose_quality_score: float = 0.0
     layout_issues: list[str] = Field(default_factory=list)
     image_issues: list[str] = Field(default_factory=list)
+    safety_findings: list[SafetyFinding] = Field(default_factory=list)
+    safety_passed: bool = True
     passed: bool = False
 
 

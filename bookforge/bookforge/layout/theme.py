@@ -7,11 +7,24 @@ topic" mode); an explicit name overrides it.
 """
 from __future__ import annotations
 
-# Google Fonts import shared by presets (display + serif body + condensed).
+# Google Fonts import shared by presets.
+#   display  -> Playfair Display (warm serif headings)
+#   body     -> Atkinson Hyperlegible (designed by the Braille Institute for
+#               low-vision readers; the strongest choice for a senior audience)
+#   cond     -> Oswald (condensed labels, eyebrows, folios, step numbers)
+#   EB Garamond kept available for the legacy cookbook presets.
 FONT_IMPORT = ("https://fonts.googleapis.com/css2?"
                "family=Playfair+Display:ital,wght@0,500;0,700;0,800;0,900;1,500"
+               "&family=Atkinson+Hyperlegible:ital,wght@0,400;0,700;1,400;1,700"
                "&family=EB+Garamond:ital@0;1"
                "&family=Oswald:wght@400;500;600;700&display=swap")
+
+# Senior-readable font stacks (overridden per preset only if needed).
+_SENIOR_FONTS = {
+    "display": "'Playfair Display', Georgia, serif",
+    "cond": "'Oswald', 'Arial Narrow', sans-serif",
+    "body": "'Atkinson Hyperlegible', 'Helvetica Neue', Arial, sans-serif",
+}
 
 PRESETS: dict[str, dict[str, str]] = {
     # Mid-century American food/history — warm cream, tomato red, pine green.
@@ -41,6 +54,23 @@ PRESETS: dict[str, dict[str, str]] = {
         "cond": "'Oswald', 'Arial Narrow', sans-serif",
         "body": "'EB Garamond', Georgia, serif",
     },
+    # --- senior-first practical-guide presets (high contrast, big type) ----- #
+    # Bright, clean, hygienic — for hydrogen-peroxide / cleaning books.
+    "home_clean": {
+        "paper": "#FBFAF6", "panel": "#E7F0EE", "panel_dark": "#143842",
+        "ink": "#14222B", "accent": "#15616D", "deep": "#103039",
+        "gold": "#C79A3E", "muted": "#4C5B62", "onpaper_soft": "#37454E",
+        "savings": "#2E7D5B", "caution": "#B5651D", "danger": "#B3261E",
+        **_SENIOR_FONTS,
+    },
+    # Protective, serious — for pest-control books. Red reserved for danger only.
+    "pest_guard": {
+        "paper": "#FBFAF6", "panel": "#ECF0EA", "panel_dark": "#1E342B",
+        "ink": "#14222B", "accent": "#2F5D50", "deep": "#1B3328",
+        "gold": "#C79A3E", "muted": "#4C5B62", "onpaper_soft": "#37454E",
+        "savings": "#2E7D5B", "caution": "#B5651D", "danger": "#B3261E",
+        **_SENIOR_FONTS,
+    },
 }
 
 _KEYWORDS = {
@@ -48,6 +78,12 @@ _KEYWORDS = {
     "vintage_cookbook": ["british", "grandparent", "forgotten", "vintage", "old",
                          "traditional", "heritage", "recipe", "meal"],
     "modern_editorial": ["modern", "future", "tech", "startup", "minimal", "design"],
+    "home_clean": ["hydrogen", "peroxide", "clean", "cleaning", "savings", "home",
+                   "household", "freshen", "stain", "odor", "laundry", "kitchen",
+                   "bathroom", "pennies", "thrifty"],
+    "pest_guard": ["pest", "pests", "roach", "roaches", "ant", "ants", "mouse",
+                   "mice", "mosquito", "gnat", "wasp", "flea", "bed bug", "bedbug",
+                   "exterminator", "infestation"],
 }
 
 
@@ -69,4 +105,4 @@ def css_root(tokens: dict[str, str], page_w: float, page_h: float,
     toks = ";".join(f"--{k}:{v}" for k, v in tokens.items())
     return (f"@import url('{FONT_IMPORT}');"
             f":root{{--page-w:{page_w}in;--page-h:{page_h}in;"
-            f"--bleed:{bleed}in;--safe:{bleed + 0.62}in;{toks}}}")
+            f"--bleed:{bleed}in;--safe:{bleed + 0.62}in;--measure:34em;{toks}}}")

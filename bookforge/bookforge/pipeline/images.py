@@ -16,6 +16,8 @@ from pydantic import BaseModel
 from bookforge.clients import images as img_client
 from bookforge.clients import llm, storage
 from bookforge.config import settings
+from bookforge.layout import image_slots
+from bookforge.layout.image_slots import Placement
 from bookforge.pipeline import postprocess
 from bookforge.schemas import BookBible, Chapter, GeneratedImage
 
@@ -47,14 +49,35 @@ def _score(image_bytes: bytes, brief_prompt: str) -> _Score:
     )
 
 
+def _crop_to_box(data: bytes, box_w: int, box_h: int) -> tuple[bytes, int, int]:
+    """Center-crop to target aspect, resize to exact box, de-AI finish."""
+    im = Image.open(io.BytesIO(data)).convert("RGB")
+    w, h = im.size
+    target_ar = box_w / box_h
+    src_ar = w / h
+    if src_ar > target_ar:
+        new_w = int(h * target_ar)
+        left = (w - new_w) // 2
+        im = im.crop((left, 0, left + new_w, h))
+    elif src_ar < target_ar:
+        new_h = int(w / target_ar)
+        top = (h - new_h) // 2
+        im = im.crop((0, top, w, top + new_h))
+    im = im.resize((box_w, box_h), Image.LANCZOS)
+    buf = io.BytesIO()
+    im.save(buf, format="JPEG", quality=92)
+    finished = postprocess.finish(buf.getvalue())
+    out = Image.open(io.BytesIO(finished))
+    return finished, out.width, out.height
+
+
 def _rightsize(data: bytes, max_w: int, max_h: int) -> tuple[bytes, int, int]:
-    """Downsample to the placed box at target DPI, apply the de-AI photographic
-    finish (grade + grain + vignette), and recompress for print."""
+    """Downsample to the placed box at target DPI (narrative path — preserves aspect)."""
     im = Image.open(io.BytesIO(data)).convert("RGB")
     im.thumbnail((max_w, max_h), Image.LANCZOS)
     buf = io.BytesIO()
     im.save(buf, format="JPEG", quality=92)
-    finished = postprocess.finish(buf.getvalue())  # cohesive filmic look
+    finished = postprocess.finish(buf.getvalue())
     out = Image.open(io.BytesIO(finished))
     return finished, out.width, out.height
 
@@ -135,38 +158,51 @@ _ASPECT_BOX = {
 }
 
 
-def generate_image(prompt: str, aspect: str, key: str) -> GeneratedImage | None:
-    """Generate ONE image (no candidates/scoring — lean path for guides), right-size
-    it to the placed box at print DPI, store it, and return its record."""
+def generate_image(
+    prompt: str,
+    aspect: str,
+    key: str,
+    *,
+    placement: Placement | None = None,
+) -> GeneratedImage | None:
+    """Generate ONE image (lean guide path), center-crop to slot, store, return."""
     page_w, page_h = settings.page_px
+    box_w, box_h = image_slots.box_for_brief(aspect, placement=placement)
+    box_w = min(box_w, page_w)
+    box_h = min(box_h, page_h)
     try:
         raw = img_client.generate(prompt, aspect=aspect)
     except Exception as exc:
         log.warning("image_gen_failed", key=key, err=str(exc)[:200])
         return None
-    # Cap to the largest box a guide image is placed in (a hero ~ half page).
-    box_w = min(page_w, 1600)
-    box_h = min(page_h, 1600)
-    sized, w, h = _rightsize(raw, box_w, box_h)
+    sized, w, h = _crop_to_box(raw, box_w, box_h)
     storage.put(key, sized, "image/jpeg")
     return GeneratedImage(block_ref=key, storage_key=key, width=w, height=h, score=0.9)
 
 
-def generate_for_brief(brief, bible: BookBible, key: str) -> GeneratedImage | None:
+def generate_for_brief(
+    brief,
+    bible: BookBible,
+    key: str,
+    *,
+    placement: Placement | None = None,
+) -> GeneratedImage | None:
     """Lean single-image generation for a content block's image_brief."""
-    gi = generate_image(_build_prompt(brief, bible), brief.aspect, key)
+    gi = generate_image(
+        _build_prompt(brief, bible), brief.aspect, key, placement=placement,
+    )
     if gi:
-        gi.block_ref = key  # caller maps key -> block_ref
+        gi.block_ref = key
     return gi
 
 
 def generate_cover(subject: str, bible: BookBible, key: str) -> GeneratedImage | None:
-    """Full-bleed cover background (title is overlaid in HTML, so no text baked in)."""
+    """Cover top-band photo (title overlaid in HTML — no text baked in)."""
     style = bible.art_style.style_suffix or "bright clean editorial photography"
     prompt = (f"A high-quality, realistic photograph for a book cover background: "
               f"{subject}. {style}. Soft daylight, {bible.art_style.palette} color story, "
               f"clean composition with empty space for a title, modern and inviting. {_NO_TEXT}.")
-    return generate_image(prompt, "full_bleed", key)
+    return generate_image(prompt, "wide", key, placement="cover")
 
 
 def generate_for_chapter(chapter: Chapter, bible: BookBible) -> list[GeneratedImage]:

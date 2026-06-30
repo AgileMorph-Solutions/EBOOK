@@ -1,13 +1,9 @@
 """Book 2 — The Senior Pest Control Savings Guide."""
 from __future__ import annotations
 
-from bookforge.books import GuideBook, Special
-from bookforge.schemas import ArtStyle, BookBible, SectionPlan, VoiceStyle
+from bookforge.books import GuideBook
+from bookforge.schemas import ArtStyle, BookBible, HowToPage, SectionPlan, SpecialPlan, VoiceStyle
 
-# (title, summary, divider_subject). The divider_subject describes a CLEAN,
-# pest-free, "problem-already-prevented" scene — never the pest itself — because
-# the title alone ("Roach Prevention") biases the image model into drawing the
-# pest. Each is on-palette (forest green / warm wood / soft white) and topical.
 _SECTIONS = [
     ("Roach Prevention", "Keep roaches out with cheap household steps — before you ever "
      "need to call an exterminator.",
@@ -49,19 +45,53 @@ _SECTIONS = [
 
 
 def get() -> GuideBook:
+    expanded: list[tuple[str, str, str]] = []
+    for title, summary, divider in _SECTIONS:
+        expanded.append((f"{title} — Essentials", summary, divider))
+        expanded.append((f"{title} — More Tips",
+                         f"More low-cost {title.lower()} steps before you call an exterminator.",
+                         divider))
     sections = [
         SectionPlan(index=i + 1, title=t, summary=s, divider_subject=dv,
-                    full_card_quota=3, list_quota=10, image_quota=2, page_budget=6)
-        for i, (t, s, dv) in enumerate(_SECTIONS)
+                    full_card_quota=10, list_quota=35, image_quota=3, page_budget=28)
+        for i, (t, s, dv) in enumerate(expanded)
     ]
+    how_to = HowToPage(
+        heading="How to Use This Book",
+        lead=("This book helps you stop pests with cheap, simple steps before you "
+              "pay for an exterminator. Everything is in large, clear print."),
+        points=[
+            "Each tip lists what you need, the steps, and what it can save you.",
+            "Read the Safety First page before using borax or any chemical.",
+            "Start with the pest you are dealing with today.",
+            "Some problems need a professional — the book tells you when.",
+        ],
+    )
     bible = BookBible(
         title="The Senior Pest Control Savings Guide",
         subtitle="How to Fight Roaches, Ants, Mice, Mosquitoes, Wasps, Gnats, Fleas & Bed Bugs Without Paying Hundreds",
         audience="Seniors (65+), large-print friendly",
         tone="warm, calm, reassuring",
         book_kind="practical_guide",
-        target_pages=60,
+        target_pages=250,
         sections=sections,
+        theme_name="pest_guard",
+        safety_key="pest",
+        cover_subject=("a clean, tidy, well-kept home entryway and kitchen with sealed "
+                       "cabinets, a caulk gun, a spray bottle, and bay leaves on a clean counter"),
+        how_to=how_to,
+        list_lead="Quick jobs you can do in a minute or two with items already at home.",
+        pro_topic="home pest control",
+        specials=[
+            SpecialPlan(after_section=1, kind="checklist",
+                        heading="Monthly Pest-Proofing Checklist",
+                        about="a simple monthly routine to keep the home sealed and unattractive to pests",
+                        items=12),
+            SpecialPlan(after_section=18, kind="chart",
+                        heading="Exterminator Bill Avoidance Tracker",
+                        columns=["Pest problem", "Cheap DIY first step", "~Cost avoided"],
+                        rows=7),
+        ],
         art_style=ArtStyle(
             medium="clean protective home photography",
             palette="calm forest green, warm wood, and soft white",
@@ -82,28 +112,4 @@ def get() -> GuideBook:
                              "rich tapestry", "it's worth noting", "boasts", "infestation hellscape"],
         ),
     )
-    return GuideBook(
-        bible=bible,
-        safety_key="pest",
-        cover_subject=("a clean, tidy, well-kept home entryway and kitchen with sealed "
-                       "cabinets, a caulk gun, a spray bottle, and bay leaves on a clean counter"),
-        how_to={
-            "heading": "How to Use This Book",
-            "lead": ("This book helps you stop pests with cheap, simple steps before you "
-                     "pay for an exterminator. Everything is in large, clear print."),
-            "points": [
-                "Each tip lists what you need, the steps, and what it can save you.",
-                "Read the Safety First page before using borax or any chemical.",
-                "Start with the pest you are dealing with today.",
-                "Some problems need a professional — the book tells you when.",
-            ],
-        },
-        pro_topic="home pest control",
-        specials=[
-            Special(after_section=1, kind="checklist", heading="Monthly Pest-Proofing Checklist",
-                    about="a simple monthly routine to keep the home sealed and unattractive to pests",
-                    items=12),
-            Special(after_section=9, kind="chart", heading="Exterminator Bill Avoidance Tracker",
-                    columns=["Pest problem", "Cheap DIY first step", "~Cost avoided"], rows=7),
-        ],
-    )
+    return GuideBook(bible=bible)

@@ -59,7 +59,8 @@ html { -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; 
 /* measure the card's middle row at the TRUE height of its tallest part (the
    hero given a definite height, the needs panel free to size to content) so the
    needs list never crowds after fitting */
-.gfit.measuring .entry-hero { flex: 0 0 auto !important; height: 1.7in !important; }
+.gfit.measuring .entry-hero { flex: 0 0 auto !important; aspect-ratio: 1 / 1 !important;
+  width: 1.7in !important; height: auto !important; max-height: none !important; }
 .gfit.measuring .entry-mid { align-items: flex-start !important; }
 .gfit.measuring .fill-spread,
 .gfit.measuring .fill-row,
@@ -85,7 +86,8 @@ b, strong { font-weight: 700; }
 .gcover .cphoto { position: absolute; top: calc(-1 * var(--bleed));
   left: calc(-1 * var(--bleed)); right: calc(-1 * var(--bleed)); bottom: 5.0in;
   overflow: hidden; background: var(--deep); }
-.gcover .cphoto img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.gcover .cphoto img { width: 100%; height: 100%; object-fit: cover;
+  object-position: center top; display: block; }
 .gcover .cband { position: absolute; left: calc(-1 * var(--bleed));
   right: calc(-1 * var(--bleed)); bottom: calc(-1 * var(--bleed)); top: 6.25in;
   background: var(--accent); color: #fff; text-align: center;
@@ -178,18 +180,24 @@ b, strong { font-weight: 700; }
 .gdivider { background: var(--deep); color: #fff; overflow: hidden; }
 .gdivider .dphoto { position: absolute; top: calc(-1 * var(--bleed));
   right: calc(-1 * var(--bleed)); bottom: calc(-1 * var(--bleed)); left: 3.9in;
-  overflow: hidden; background: var(--deep); }
-.gdivider .dphoto img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  overflow: hidden; background: var(--deep); z-index: 1;
+  aspect-ratio: 4.6 / 11; }
+.gdivider .dphoto img { width: 100%; height: 100%; object-fit: cover;
+  object-position: center; display: block; }
 .gdivider:not(.has-img) .dphoto { display: none; }
 .gdivider .dpanel { position: absolute; top: calc(-1 * var(--bleed));
   left: calc(-1 * var(--bleed)); bottom: calc(-1 * var(--bleed));
   width: calc(3.9in + var(--bleed)); background: var(--accent); color: #fff;
+  overflow: hidden; z-index: 2;
   display: flex; flex-direction: column; justify-content: center;
   padding: 1in .6in 1in calc(.7in + var(--bleed)); }
 .gdivider:not(.has-img) .dpanel { width: auto; right: calc(-1 * var(--bleed)); }
+.gdivider .dpanel-inner { max-width: 100%; min-width: 0; }
 .gdivider .num { font-family: var(--cond); text-transform: uppercase; letter-spacing: .3em;
   font-size: 13pt; color: var(--gold); font-weight: 600; margin-bottom: .2in; }
-.gdivider .t { font-family: var(--display); font-weight: 800; font-size: 34pt; line-height: 1.05; color: #fff; }
+.gdivider .t { font-family: var(--display); font-weight: 800;
+  font-size: clamp(22pt, 6.5cqi, 34pt); line-height: 1.05; color: #fff;
+  overflow-wrap: anywhere; max-width: 100%; }
 .gdivider .rule { width: 1.5in; height: 3px; background: var(--gold); margin: .34in 0; }
 .gdivider .k { font-family: var(--body); font-size: 15pt; line-height: 1.5;
   color: rgba(255,255,255,.95); }
@@ -199,13 +207,16 @@ b, strong { font-weight: 700; }
 .entry-fit > * + * { margin-top: .14in; }
 .entry-fit { height: 100%; display: flex; flex-direction: column; }
 .entry-title { font-family: var(--display); font-weight: 800; color: var(--accent);
-  font-size: 2.0em; line-height: 1.04; }
+  font-size: 2.0em; line-height: 1.04; overflow-wrap: anywhere; }
 .entry-intro { font-size: 1.02em; line-height: 1.5; color: var(--ink); }
 .entry-mid { display: flex; gap: .22in; flex: 1 1 auto; min-height: 1.8in; }
-.entry-hero { flex: 1 1 52%; border-radius: 12px; overflow: hidden; background: var(--panel); }
-.entry-hero img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.entry-hero { flex: 1 1 52%; border-radius: 12px; overflow: hidden;
+  background: var(--panel); aspect-ratio: 1 / 1; min-width: 0; min-height: 0;
+  max-height: 2.4in; align-self: flex-start; }
+.entry-hero img { width: 100%; height: 100%; object-fit: cover;
+  object-position: center; display: block; }
 .entry-need { flex: 1 1 48%; background: var(--panel); border-radius: 12px; padding: .2in .24in;
-  display: flex; flex-direction: column; }
+  display: flex; flex-direction: column; min-width: 0; }
 .need-label, .steps-label { font-family: var(--cond); text-transform: uppercase;
   letter-spacing: .12em; font-weight: 700; font-size: 1.0em; color: var(--accent); }
 .need-list { list-style: none; margin-top: .12in; }
@@ -296,6 +307,11 @@ b, strong { font-weight: 700; }
 /* generic text/continuation page */
 .gtext .gh2 { font-size: 1.8em; margin-bottom: .16in; }
 .gtext p { font-size: 1.0em; line-height: 1.55; margin-bottom: .12in; }
+.gtext.dropcap > p:first-of-type::first-letter { font-family: var(--display); font-weight: 800;
+  color: var(--accent); float: left; font-size: 3.5em; line-height: 0.8; padding: 0.05em 0.1em 0 0; }
+.gtext blockquote { font-family: var(--display); font-style: italic; font-weight: 500;
+  color: var(--ink); font-size: 1.4em; line-height: 1.35; margin: 0.25in 0; padding-left: 0.25in;
+  border-left: 4px solid var(--gold); }
 
 /* ============================================================================
    VISUAL POLISH — depth, rhythm, and richer section openers (senior-safe).

@@ -29,21 +29,41 @@ _FIT_FLOOR = float(os.environ.get("FIT_FLOOR_PT", "12.5"))
 
 # Runs in the page: set every .gfit to the canonical BASE size; only if its
 # content overflows do we binary-search DOWN to the largest size that fits (never
-# below the floor). Growable regions (fill-spread / hero images) then absorb any
-# slack with whitespace, so pages stay full WITHOUT changing the type size.
+# below the floor). Growable regions then absorb slack with whitespace.
+# Also fits section-divider titles and safety-band headings so text never bleeds.
 # Returns a report of any region still overflowing at the floor.
-_FIT_JS = """
+_LAYOUT_FIT_JS = """
 () => {
   const FLOOR = %f, BASE = %f;
   const stuck = [];
+
+  const shrinkToFit = (el, prop, minPt, maxPt, container) => {
+    const box = container || el.parentElement;
+    if (!box) return;
+    const fits = (s) => { el.style[prop] = s + 'pt';
+      return box.scrollHeight <= box.clientHeight + 2; };
+    let best = minPt;
+    if (fits(maxPt)) { best = maxPt; }
+    else {
+      let lo = minPt, hi = maxPt;
+      for (let k = 0; k < 22; k++) {
+        const mid = (lo + hi) / 2;
+        if (fits(mid)) { best = mid; lo = mid; } else { hi = mid; }
+      }
+    }
+    el.style[prop] = best + 'pt';
+    if (best <= minPt + 0.01 && box.scrollHeight > box.clientHeight + 2)
+      stuck.push(el.className || prop);
+  };
+
   document.querySelectorAll('.gfit').forEach((el, i) => {
     const MIN = parseFloat(el.dataset.fitmin) || FLOOR;
     el.classList.add('measuring');
     const fits = (s) => { el.style.fontSize = s + 'pt';
                           return el.scrollHeight <= el.clientHeight + 1; };
     let best = MIN;
-    if (fits(BASE)) { best = BASE; }            // the common case: canonical size
-    else {                                       // too dense -> shrink only
+    if (fits(BASE)) { best = BASE; }
+    else {
       let lo = MIN, hi = BASE;
       for (let k = 0; k < 22; k++) { const mid = (lo + hi) / 2;
         if (fits(mid)) { best = mid; lo = mid; } else { hi = mid; } }
@@ -51,8 +71,19 @@ _FIT_JS = """
     el.style.fontSize = best + 'pt';
     el.classList.remove('measuring');
     if (best <= MIN + 0.01 && el.scrollHeight > el.clientHeight + 2)
-      stuck.push(i);
+      stuck.push('gfit:' + i);
   });
+
+  document.querySelectorAll('.gdivider .dpanel').forEach((panel) => {
+    const title = panel.querySelector('.t');
+    if (title) shrinkToFit(title, 'fontSize', 20, 34, panel);
+  });
+
+  document.querySelectorAll('.gsafety .band h2').forEach((h2) => {
+    const band = h2.closest('.band');
+    if (band) shrinkToFit(h2, 'fontSize', 28, 40, band);
+  });
+
   return { count: document.querySelectorAll('.gfit').length, stuck };
 }
 """ % (_FIT_FLOOR, _FIT_BASE)
@@ -65,7 +96,7 @@ def _setup_page(page) -> None:
 def _prepare(page, html: str) -> dict:
     page.set_content(html, wait_until="networkidle")
     page.evaluate("() => document.fonts.ready")
-    report = page.evaluate(_FIT_JS)
+    report = page.evaluate(_LAYOUT_FIT_JS)
     if report.get("stuck"):
         log.warning("fit_overflow_at_floor", regions=report["stuck"])
     return report

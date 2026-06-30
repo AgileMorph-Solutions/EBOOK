@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from bookforge.books import GuideBook, Special
-from bookforge.schemas import ArtStyle, BookBible, SectionPlan, VoiceStyle
+from bookforge.schemas import ArtStyle, BookBible, HowToPage, SectionPlan, SpecialPlan, VoiceStyle
 
 _SECTIONS = [
     ("Kitchen Cleaning", "The kitchen is where one cheap brown bottle saves the most — "
@@ -25,20 +25,52 @@ _SECTIONS = [
 
 
 def get() -> GuideBook:
+    expanded: list[tuple[str, str]] = []
+    for title, summary in _SECTIONS:
+        expanded.append((f"{title} — Essentials", summary))
+        expanded.append((f"{title} — More Uses", f"More practical {title.lower()} tips with the same cheap brown bottle."))
+        expanded.append((f"{title} — Extra Tips", f"Additional senior-friendly {title.lower()} jobs that save money."))
     sections = [
         SectionPlan(index=i + 1, title=t, summary=s,
-                    full_card_quota=3, list_quota=28, image_quota=2,
-                    page_budget=7)
-        for i, (t, s) in enumerate(_SECTIONS)
+                    full_card_quota=8, list_quota=28, image_quota=3,
+                    page_budget=28)
+        for i, (t, s) in enumerate(expanded)
     ]
+    how_to = HowToPage(
+        heading="How to Use This Book",
+        lead=("This book is built to be easy on the eyes and easy to follow. "
+              "Everything is in large print, one idea at a time."),
+        points=[
+            "Every tip is laid out the same way: what you need, the steps, and what you save.",
+            "Read the Safety First page before you try anything with a chemical.",
+            "Start with the section that matches the room or job you have today.",
+            "You do not need special tools — most tips use what is already in your home.",
+        ],
+    )
     bible = BookBible(
         title="The Hydrogen Peroxide Savings Bible",
         subtitle="250 Cheap Ways Seniors Can Clean, Fix, Freshen, and Protect Their Home for Pennies",
         audience="Seniors (65+), large-print friendly",
         tone="warm, plain, reassuring",
         book_kind="practical_guide",
-        target_pages=66,
+        target_pages=250,
         sections=sections,
+        theme_name="home_clean",
+        safety_key="hp",
+        cover_subject=("a tidy bright home cleaning scene with a brown bottle of hydrogen "
+                       "peroxide, a spray bottle, a cloth, and a lemon on a clean counter"),
+        how_to=how_to,
+        list_lead="Quick jobs you can do in a minute or two with the same brown bottle.",
+        pro_topic="home cleaning with hydrogen peroxide",
+        specials=[
+            SpecialPlan(after_section=1, kind="chart", heading="Replace These Kitchen Products",
+                        columns=["Store product", "Cheap peroxide method", "~Yearly saving"], rows=6),
+            SpecialPlan(after_section=4, kind="checklist", heading="Weekly Cleaning Routine",
+                        about="a simple weekly and monthly cleaning routine using 3% hydrogen peroxide",
+                        items=10),
+            SpecialPlan(after_section=24, kind="chart", heading="Your Yearly Savings at a Glance",
+                        columns=["Product you stop buying", "Cheap method", "~Yearly saving"], rows=7),
+        ],
         art_style=ArtStyle(
             medium="bright clean home photography",
             palette="bright clean teal, soft white, and warm wood",
@@ -59,30 +91,4 @@ def get() -> GuideBook:
                              "rich tapestry", "it's worth noting", "boasts"],
         ),
     )
-    return GuideBook(
-        bible=bible,
-        safety_key="hp",
-        cover_subject=("a tidy bright home cleaning scene with a brown bottle of hydrogen "
-                       "peroxide, a spray bottle, a cloth, and a lemon on a clean counter"),
-        how_to={
-            "heading": "How to Use This Book",
-            "lead": ("This book is built to be easy on the eyes and easy to follow. "
-                     "Everything is in large print, one idea at a time."),
-            "points": [
-                "Every tip is laid out the same way: what you need, the steps, and what you save.",
-                "Read the Safety First page before you try anything with a chemical.",
-                "Start with the section that matches the room or job you have today.",
-                "You do not need special tools — most tips use what is already in your home.",
-            ],
-        },
-        pro_topic="home cleaning with hydrogen peroxide",
-        specials=[
-            Special(after_section=1, kind="chart", heading="Replace These Kitchen Products",
-                    columns=["Store product", "Cheap peroxide method", "~Yearly saving"], rows=6),
-            Special(after_section=4, kind="checklist", heading="Weekly Cleaning Routine",
-                    about="a simple weekly and monthly cleaning routine using 3% hydrogen peroxide",
-                    items=10),
-            Special(after_section=8, kind="chart", heading="Your Yearly Savings at a Glance",
-                    columns=["Product you stop buying", "Cheap method", "~Yearly saving"], rows=7),
-        ],
-    )
+    return GuideBook(bible=bible)

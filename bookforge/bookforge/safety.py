@@ -87,4 +87,34 @@ def rules_for(book_kind_key: str) -> str:
     """Return the safety rule block to inject into content prompts."""
     if book_kind_key == "pest":
         return HP_RULES + "\n\n" + PEST_RULES
-    return HP_RULES
+    if book_kind_key == "hp":
+        return HP_RULES
+    return GENERAL_RULES + "\n\n" + HP_RULES
+
+
+GENERAL_RULES = """SAFETY RULES — HOME GUIDES (obey exactly):
+- Never instruct mixing cleaning products together unless the source explicitly
+  says it is safe. When in doubt, use one product, rinse, then another.
+- Keep all chemicals and baits away from children and pets.
+- Tell the reader to spot-test on a hidden area first.
+- Keep the room ventilated when using sprays or powders.
+- Do not give medical advice; for bites, burns, or reactions, say to call a doctor."""
+
+GENERAL_NEVER_MIX = [
+    ("Bleach + Ammonia",
+     "This makes a toxic gas. Never mix cleaning products blindly."),
+    ("Bleach + Vinegar",
+     "Mixing these releases harmful fumes. Use one product at a time."),
+    ("Different Drain Cleaners",
+     "Never pour two different drain products down the same drain."),
+    ("Chemicals + Children or Pets",
+     "Store cleaners locked up and keep treated areas off-limits until dry."),
+]
+
+
+def never_mix_for(safety_key: str) -> list[tuple[str, str]]:
+    if safety_key == "pest":
+        return PEST_NEVER_MIX
+    if safety_key == "hp":
+        return HP_NEVER_MIX
+    return GENERAL_NEVER_MIX

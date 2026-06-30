@@ -16,7 +16,7 @@ def main() -> None:
     reuse = "reuse" in sys.argv
     name = args[0] if args else "hydrogen_peroxide"
     limit = int(args[1]) if len(args) > 1 else None
-    res = run_practical_book(name, limit_sections=limit, render_pngs=True, reuse=reuse)
+    res = run_practical_book(name, limit_sections=limit, render_pngs=False, reuse=reuse)
     print("\n=== RESULT ===")
     for k, v in res.items():
         print(f"{k}: {v}")

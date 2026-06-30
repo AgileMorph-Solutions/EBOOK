@@ -19,6 +19,7 @@ import structlog
 from bookforge.config import settings
 from bookforge.layout import theme
 from bookforge.layout.build import _uri  # data-URI from a storage key
+from bookforge.layout.labels import divider_title, section_eyebrow
 from bookforge.schemas import BlockType, BookBible, Chapter, GeneratedImage
 
 log = structlog.get_logger(__name__)
@@ -113,9 +114,10 @@ class GuideDirector:
         cls = "page gdivider has-img" if hero_uri else "page gdivider"
         self.pages.append(
             f'<section class="{cls}"><div class="dphoto">{img}</div>'
-            f'<div class="dpanel"><div class="num">Section {number}</div>'
+            f'<div class="dpanel"><div class="dpanel-inner">'
+            f'<div class="num">Section {number}</div>'
             f'<div class="t">{_esc(title)}</div><div class="rule"></div>'
-            f'<div class="k">{_esc(kicker)}</div></div></section>')
+            f'<div class="k">{_esc(kicker)}</div></div></div></section>')
 
     def entry_card(self, section: str, entry, hero_uri: str | None) -> None:
         folio = self._pos()
@@ -222,8 +224,12 @@ class GuideDirector:
             f'<div class="gbody-box"><div class="gfit">{inner}</div></div></section>')
 
     def render(self) -> str:
+        tokens = theme.pick(
+            self.bible.title + " " + self.bible.subtitle,
+            name=self.bible.theme_name or None,
+        )
         root = theme.css_root(
-            theme.pick(self.bible.title + " " + self.bible.subtitle),
+            tokens,
             settings.trim_width_in + 2 * settings.bleed_in,
             settings.trim_height_in + 2 * settings.bleed_in,
             settings.bleed_in,
@@ -297,26 +303,27 @@ def build_practical_html(
                 kicker = b.text
                 break
         section_rows.append((ch.title, len(d.pages) + 1))
-        d.divider(ci, ch.title, kicker, hero_uri=img_map.get(f"{ch.index}.0"))
+        d.divider(ci, divider_title(ch.title), kicker, hero_uri=img_map.get(f"{ch.index}.0"))
 
+        eyebrow = section_eyebrow(ch.title)
         for bi, b in enumerate(ch.blocks):
             ref = f"{ch.index}.{bi}"
             hero = img_map.get(ref)
             if b.type == BlockType.use_card and b.entries:
-                d.entry_card(ch.title, b.entries[0], hero)
+                d.entry_card(eyebrow, b.entries[0], hero)
             elif b.type == BlockType.use_list and b.entries:
                 per = 14  # items per list page — keeps big text, full but not crammed
                 chunks = [b.entries[i:i + per] for i in range(0, len(b.entries), per)]
-                base = b.heading or "More Quick Uses"
+                base = b.heading or f"More {eyebrow} Uses"
                 for ci2, chunk in enumerate(chunks):
                     head = base if len(chunks) == 1 else f"{base} ({ci2 + 1} of {len(chunks)})"
-                    d.list_page(ch.title, head, b.text if ci2 == 0 else "", chunk)
+                    d.list_page(eyebrow, head, b.text if ci2 == 0 else "", chunk)
             elif b.type == BlockType.chart and b.table:
                 ref_rows.append((b.heading or "Chart", len(d.pages) + 1))
-                d.chart_page(ch.title, b.heading or "Reference Chart", b.text, b.table)
+                d.chart_page(eyebrow, b.heading or "Reference Chart", b.text, b.table)
             elif b.type == BlockType.checklist and b.checklist:
                 ref_rows.append((b.heading or "Checklist", len(d.pages) + 1))
-                d.checklist_page(ch.title, b.heading or "Checklist", b.text, b.checklist)
+                d.checklist_page(eyebrow, b.heading or "Checklist", b.text, b.checklist)
 
     if pro:
         ref_rows.append((pro.get("heading", "When to Call a Professional"), len(d.pages) + 1))

@@ -33,7 +33,9 @@ def main(argv=None):
     src.add_argument("--youtube", help="YouTube URL to transcribe")
     ap.add_argument("--pages", type=int, default=100, help="target page count")
     ap.add_argument("--chapters", type=int, default=None,
-                    help="limit chapters (Phase-0 spike); omit for full book")
+                    help="limit chapters/sections; omit for full book")
+    ap.add_argument("--book-kind", choices=["practical_guide", "narrative"],
+                    default="practical_guide", help="book layout pipeline")
     args = ap.parse_args(argv)
 
     text = None
@@ -46,6 +48,7 @@ def main(argv=None):
     artifact = run_book(
         book_id, args.topic, text=text, youtube_url=args.youtube,
         target_pages=args.pages, chapter_limit=args.chapters,
+        book_kind=args.book_kind,
     )
 
     print("\n" + "=" * 60)

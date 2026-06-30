@@ -1,10 +1,7 @@
-"""Stage 2 — novelist-grade content generation (chapter-wise).
+"""Stage 2 — content generation.
 
-Pipeline per chapter:
-  1. retrieve grounding passages (RAG)
-  2. draft  -> structured ContentBlocks with claims + image briefs
-  3. editorial cascade: developmental -> line -> copy -> AI-tell removal
-A running summary is threaded across chapters for long-form coherence.
+Narrative path: novelist-grade prose chapters with claim grounding.
+Practical-guide path: structured card/list blocks for the senior guide layout.
 """
 from __future__ import annotations
 
@@ -12,8 +9,8 @@ import structlog
 from pydantic import BaseModel
 
 from bookforge.clients import llm
-from bookforge.pipeline import grounding
-from bookforge.schemas import BookBible, Chapter, ChapterPlan, Claim, SourceDoc
+from bookforge.pipeline import content_guide, grounding, layout_budget
+from bookforge.schemas import BookBible, Chapter, ChapterPlan, Claim, SourceDoc, SpecialPlan
 
 log = structlog.get_logger(__name__)
 
@@ -67,6 +64,44 @@ CHAPTER:
 {chapter}"""
 
 
+def write_guide(
+    bible: BookBible,
+    source: SourceDoc,
+    *,
+    limit: int | None = None,
+) -> list[Chapter]:
+    """Generate practical-guide sections as structured card/list chapters."""
+    sections = bible.sections[:limit] if limit else bible.sections
+    chapters: list[Chapter] = []
+    n = 1
+    list_lead = bible.list_lead or (
+        "Quick jobs you can do in a minute or two with items already at home."
+    )
+    for section in sections:
+        passages = grounding.retrieve(
+            f"{section.title} {section.summary}", source.passages, k=8,
+        )
+        ch, n = content_guide.write_section(
+            section, bible, start_number=n,
+            safety_key=bible.safety_key,
+            passages=passages,
+            list_lead=list_lead,
+        )
+        for sp in bible.specials_for(section.index):
+            ch.blocks.append(_make_special(sp, section.title, bible))
+        chapters.append(layout_budget.trim_chapter(ch))
+    log.info("guide_written", sections=len(chapters), uses=n - 1)
+    return chapters
+
+
+def _make_special(sp: SpecialPlan, section_title: str, bible: BookBible):
+    if sp.kind == "chart":
+        return content_guide.make_chart(
+            section_title, sp.heading, sp.columns, sp.rows, bible,
+        )
+    return content_guide.make_checklist(sp.heading, sp.about, sp.items, bible)
+
+
 def write_chapter(
     plan: ChapterPlan,
     bible: BookBible,
@@ -87,16 +122,12 @@ def write_chapter(
         ),
         Chapter, system=system, max_tokens=8000,
     )
-    # Editorial cascade — each pass is a separate model call.
     dev = llm.structured(_DEV_EDIT.format(draft=draft.model_dump_json()),
                          Chapter, system=system, max_tokens=8000)
     final = llm.structured(_LINE_EDIT.format(chapter=dev.model_dump_json()),
                           Chapter, system=system, max_tokens=8000)
     final.index, final.title = plan.index, plan.title
 
-    # Claim attribution is done AFTER prose is finalized — the cascade rewrites
-    # text and would otherwise drop/garble per-claim citations. Here we extract
-    # atomic claims from the final prose and cite the real passage ids.
     attribute_claims(final, passages)
     log.info("chapter_written", idx=plan.index, blocks=len(final.blocks),
              claims=sum(len(b.claims) for b in final.blocks))

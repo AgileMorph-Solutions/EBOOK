@@ -78,6 +78,22 @@ class SpecialPage(str, Enum):
     exterminator_tracker = "exterminator_tracker"
 
 
+class HowToPage(BaseModel):
+    heading: str = "How to Use This Book"
+    lead: str = ""
+    points: list[str] = Field(default_factory=list)
+
+
+class SpecialPlan(BaseModel):
+    after_section: int
+    kind: Literal["chart", "checklist"]
+    heading: str
+    columns: list[str] = Field(default_factory=list)
+    rows: int = 6
+    about: str = ""
+    items: int = 10
+
+
 class SectionPlan(BaseModel):
     """Practical-guide analog of ChapterPlan: a TOC category with quotas."""
 
@@ -110,6 +126,16 @@ class BookBible(BaseModel):
     # --- practical-guide path (additive; narrative books leave these default) ---
     book_kind: Literal["narrative", "practical_guide"] = "narrative"
     sections: list[SectionPlan] = Field(default_factory=list)
+    theme_name: str = "home_clean"
+    safety_key: str = "general"
+    cover_subject: str = ""
+    how_to: HowToPage | None = None
+    list_lead: str = ""
+    pro_topic: str = ""
+    specials: list[SpecialPlan] = Field(default_factory=list)
+
+    def specials_for(self, section_index: int) -> list[SpecialPlan]:
+        return [s for s in self.specials if s.after_section == section_index]
 
 
 # --------------------------------------------------------------------------- #

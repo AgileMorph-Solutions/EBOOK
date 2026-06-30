@@ -57,7 +57,7 @@ PRESETS: dict[str, dict[str, str]] = {
     # --- senior-first practical-guide presets (high contrast, big type) ----- #
     # Bright, clean, hygienic — for hydrogen-peroxide / cleaning books.
     "home_clean": {
-        "paper": "#FBFAF6", "panel": "#E7F0EE", "panel_dark": "#143842",
+        "paper": "#FAF8F4", "panel": "#E7F0EE", "panel_dark": "#143842",
         "ink": "#14222B", "accent": "#15616D", "deep": "#103039",
         "gold": "#C79A3E", "muted": "#4C5B62", "onpaper_soft": "#37454E",
         "savings": "#2E7D5B", "caution": "#B5651D", "danger": "#B3261E",
@@ -71,6 +71,14 @@ PRESETS: dict[str, dict[str, str]] = {
         "savings": "#2E7D5B", "caution": "#B5651D", "danger": "#B3261E",
         **_SENIOR_FONTS,
     },
+    # Warm burgundy/cream — food, cooking, recipe guides for seniors.
+    "senior_cookbook": {
+        "paper": "#FAF6F0", "panel": "#F0E8DC", "panel_dark": "#3D2020",
+        "ink": "#2A1A18", "accent": "#7B2D3B", "deep": "#4A1F28",
+        "gold": "#C79A3E", "muted": "#6B5A52", "onpaper_soft": "#524640",
+        "savings": "#2E7D5B", "caution": "#B5651D", "danger": "#B3261E",
+        **_SENIOR_FONTS,
+    },
 }
 
 _KEYWORDS = {
@@ -79,11 +87,14 @@ _KEYWORDS = {
                          "traditional", "heritage", "recipe", "meal"],
     "modern_editorial": ["modern", "future", "tech", "startup", "minimal", "design"],
     "home_clean": ["hydrogen", "peroxide", "clean", "cleaning", "savings", "home",
-                   "household", "freshen", "stain", "odor", "laundry", "kitchen",
-                   "bathroom", "pennies", "thrifty"],
+                   "household", "freshen", "stain", "odor", "laundry",
+                   "bathroom", "pennies", "thrifty", "disinfect", "bleach"],
     "pest_guard": ["pest", "pests", "roach", "roaches", "ant", "ants", "mouse",
                    "mice", "mosquito", "gnat", "wasp", "flea", "bed bug", "bedbug",
                    "exterminator", "infestation"],
+    "senior_cookbook": ["rice", "cook", "cooking", "recipe", "recipes", "meal",
+                        "meals", "dinner", "dinners", "supper", "kitchen", "food",
+                        "baking", "british", "storecupboard", "budget meal"],
 }
 
 

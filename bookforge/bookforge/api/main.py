@@ -18,7 +18,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -120,6 +120,8 @@ class CreateBook(BaseModel):
     youtube_url: str | None = None
     target_pages: int = 100
     chapter_limit: int | None = None
+    section_limit: int | None = None
+    book_kind: Literal["practical_guide", "narrative"] = "practical_guide"
 
     @model_validator(mode="after")
     def require_source(self) -> "CreateBook":
@@ -157,6 +159,8 @@ def create_book(req: CreateBook, background_tasks: BackgroundTasks):
         created_at=datetime.now(timezone.utc).isoformat(),
         target_pages=req.target_pages,
         chapter_limit=req.chapter_limit,
+        section_limit=req.section_limit,
+        book_kind=req.book_kind,
         source_type="youtube" if req.youtube_url else "text",
     )
     background_tasks.add_task(_run_pipeline, book_id, req)
@@ -210,6 +214,8 @@ def _run_pipeline(book_id: str, req: CreateBook) -> None:
             youtube_url=req.youtube_url,
             target_pages=req.target_pages,
             chapter_limit=req.chapter_limit,
+            section_limit=req.section_limit,
+            book_kind=req.book_kind,
         )
         _set_state(book_id, status="done", artifact=artifact.model_dump())
     except Exception as exc:

@@ -13,41 +13,10 @@ import structlog
 from bookforge import books, safety
 from bookforge.cost import budget
 from bookforge.layout import guide, render
-from bookforge.pipeline import content_guide
-from bookforge.pipeline import images as images_stage
-from bookforge.schemas import Chapter, GeneratedImage, ImageBrief
+from bookforge.pipeline import content_guide, guide_images
+from bookforge.schemas import Chapter, GeneratedImage
 
 log = structlog.get_logger(__name__)
-
-
-def _ensure_divider_images(chapters, images, bible, name) -> int:
-    """Give every section a full-page divider photo (block_ref 'index.0').
-
-    The subject must NOT echo a pest/topic name that would bias the image model
-    into drawing the very thing the book is about avoiding (e.g. "Roach
-    Prevention" -> roaches). A section can supply an explicit, on-message
-    `divider_subject`; otherwise we fall back to a neutral clean-home scene.
-    """
-    have = {gi.block_ref for gi in images}
-    subjects = {s.index: (s.divider_subject or "").strip() for s in bible.sections}
-    added = 0
-    for ch in chapters:
-        ref = f"{ch.index}.0"
-        if ref in have:
-            continue
-        subject = subjects.get(ch.index) or (
-            f"{ch.title} in a clean, bright, tidy modern home, wide view, "
-            f"soft natural daylight, no people")
-        gi = images_stage.generate_for_brief(
-            ImageBrief(prompt=subject, kind="photo", aspect="full_bleed"),
-            bible, f"books/{name}/div_{ch.index}.jpg")
-        if gi:
-            gi.block_ref = ref
-            images.append(gi)
-            added += 1
-    if added:
-        log.info("divider_images_added", added=added, spent=round(budget.spent, 2))
-    return added
 
 
 def _save_manifest(manifest: Path, chapters, images, cover_key, pro, total_uses) -> None:
@@ -61,9 +30,15 @@ def _generate(book, bible, name, limit_sections, with_images, with_pro):
     sections = bible.sections[:limit_sections] if limit_sections else bible.sections
     chapters: list[Chapter] = []
     n = 1
+    list_lead = bible.list_lead or (
+        "Quick jobs you can do in a minute or two with items already at home."
+    )
     for section in sections:
         ch, n = content_guide.write_section(
-            section, bible, start_number=n, safety_key=book.safety_key)
+            section, bible, start_number=n,
+            safety_key=book.safety_key,
+            list_lead=list_lead,
+        )
         for sp in book.specials_for(section.index):
             if sp.kind == "chart":
                 ch.blocks.append(content_guide.make_chart(
@@ -79,19 +54,7 @@ def _generate(book, bible, name, limit_sections, with_images, with_pro):
     images: list[GeneratedImage] = []
     cover_key = None
     if with_images:
-        cov = images_stage.generate_cover(book.cover_subject, bible, f"books/{name}/cover.jpg")
-        cover_key = cov.storage_key if cov else None
-        for ch in chapters:
-            for bi, b in enumerate(ch.blocks):
-                if not b.image_brief:
-                    continue
-                ref = f"{ch.index}.{bi}"
-                gi = images_stage.generate_for_brief(
-                    b.image_brief, bible, f"books/{name}/img_{ch.index}_{bi}.jpg")
-                if gi:
-                    gi.block_ref = ref
-                    images.append(gi)
-        _ensure_divider_images(chapters, images, bible, name)
+        images, cover_key = guide_images.generate_all(bible, chapters, name)
         log.info("images_done", count=len(images), spent=round(budget.spent, 2))
 
     pro = content_guide.make_pro(book.pro_topic, bible) if with_pro else None
@@ -120,17 +83,18 @@ def run_practical_book(
         images = [GeneratedImage.model_validate(i) for i in data["images"]]
         cover_key, pro, total_uses = data.get("cover_key"), data.get("pro"), data.get("uses", 0)
         log.info("reused_manifest", chapters=len(chapters), images=len(images))
-        if with_images and _ensure_divider_images(chapters, images, bible, name):
+        if with_images and guide_images.ensure_divider_images(chapters, images, bible, f"books/{name}"):
             _save_manifest(manifest, chapters, images, cover_key, pro, total_uses)
     else:
         chapters, images, cover_key, pro, total_uses = _generate(
             book, bible, name, limit_sections, with_images, with_pro)
         _save_manifest(manifest, chapters, images, cover_key, pro, total_uses)
 
-    never_mix = safety.HP_NEVER_MIX if book.safety_key == "hp" else safety.PEST_NEVER_MIX
     html = guide.build_practical_html(
         bible, chapters, images, cover_key=cover_key,
-        how_to=book.how_to, safety={"never_mix": never_mix}, pro=pro)
+        how_to=book.how_to,
+        safety={"never_mix": safety.never_mix_for(book.safety_key)},
+        pro=pro)
     (out / f"{name}.html").write_text(html)
 
     pdf = render.html_to_pdf(html)

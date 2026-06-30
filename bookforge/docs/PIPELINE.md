@@ -8,10 +8,15 @@ spike (`pipeline/orchestrator.py`) and the production Celery path
 ## API Surface
 
 ```
+GET  /books              # list recent jobs (newest first)
 POST /books              # submit a job; returns book_id
 GET  /books/{book_id}    # poll status: queued | running | done | failed
 GET  /books/{book_id}/download   # download final interior.pdf
 ```
+
+The web UI at `http://localhost:3000` (`bookforge/app/`) maps its create form
+1:1 to the `POST /books` body below (paste text, file upload → `text`, or
+`youtube_url`).
 
 Submission body:
 

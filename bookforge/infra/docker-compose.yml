@@ -8,6 +8,7 @@ x-python-env: &python-env
     BOOKFORGE_USE_S3: "0"
     RENDER_URL: "http://render:4000"
     BOOKFORGE_LOCAL_STORE: "/home/forge/artifacts"
+    CORS_ORIGINS: "http://localhost:3000,http://127.0.0.1:3000"
   depends_on:
     redis: { condition: service_healthy }
     postgres: { condition: service_healthy }
@@ -19,6 +20,11 @@ services:
     <<: *python-env
     ports: ["8000:8000"]
     volumes: ["artifacts:/home/forge/artifacts"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   worker:
     build: { context: .., dockerfile: infra/Dockerfile.python }
@@ -42,12 +48,16 @@ services:
       retries: 5
 
   ui:
-    profiles: ["ui"]                 # Phase 4 — enable with: --profile ui
-    build: { context: ../app, dockerfile: ../infra/Dockerfile.ui }
+    build:
+      context: ../app
+      dockerfile: ../infra/Dockerfile.ui
+      args:
+        NEXT_PUBLIC_API_URL: "http://localhost:8000"
     environment:
       NEXT_PUBLIC_API_URL: "http://localhost:8000"
     ports: ["3000:3000"]
-    depends_on: [api]
+    depends_on:
+      api: { condition: service_healthy }
 
   redis:
     image: redis:7-alpine

@@ -46,13 +46,15 @@ Output PDF lands in `./artifacts/books/<book_id>/interior.pdf`.
 
 ```bash
 docker compose -f infra/docker-compose.yml up --build
-# api      :8000   (POST /books, GET /tasks/{id}, GET /books/{id}/interior.pdf)
+# ui       :3000   (create books, poll status, download PDF)
+# api      :8000   (POST /books, GET /books/{id}, GET /books/{id}/download)
 # render   :4000   (Paged.js HTML→PDF)
-# minio    :9001   (artifact storage console)
 # scale workers:  docker compose -f infra/docker-compose.yml up --scale worker=4
 ```
 
-Submit a job:
+Open **http://localhost:3000** to create a book via the web UI (topic + pasted text, file upload, or YouTube URL).
+
+Or submit via API:
 ```bash
 curl -X POST localhost:8000/books -H 'content-type: application/json' \
   -d '{"topic":"Forgotten British Meals","text":"...","chapter_limit":1}'

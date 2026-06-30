@@ -1,5 +1,6 @@
 """FastAPI — job submission, status polling, and PDF delivery.
 
+GET  /books                    → list recent jobs (newest first)
 POST /books                    → start a pipeline job, returns book_id (topic slug)
 GET  /books/{book_id}          → poll status: queued | running | done | failed
 GET  /books/{book_id}/download → stream the finished PDF
@@ -14,17 +15,30 @@ import json
 import os
 import re
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 from typing import Any
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, model_validator
 
 from bookforge.clients import storage
 
 app = FastAPI(title="BookForge API", version="0.2.0")
+
+_cors_origins = os.environ.get(
+    "CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000"
+).split(",")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[o.strip() for o in _cors_origins if o.strip()],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 _lock = Lock()
 
@@ -72,6 +86,30 @@ def _make_book_id(topic: str) -> str:
     return f"{slug}-{uuid.uuid4().hex[:6]}"
 
 
+def _list_jobs() -> list[dict[str, Any]]:
+    """Scan artifact dirs for status.json files, newest first."""
+    books_dir = _ARTIFACTS / "books"
+    if not books_dir.is_dir():
+        return []
+    jobs: list[dict[str, Any]] = []
+    for path in books_dir.glob("*/status.json"):
+        try:
+            state = json.loads(path.read_text())
+        except Exception:
+            continue
+        book_id = path.parent.name
+        jobs.append({
+            "book_id": book_id,
+            "topic": state.get("topic", ""),
+            "status": state.get("status", "unknown"),
+            "created_at": state.get("created_at", ""),
+            "target_pages": state.get("target_pages"),
+            "chapter_limit": state.get("chapter_limit"),
+        })
+    jobs.sort(key=lambda j: j.get("created_at") or "", reverse=True)
+    return jobs
+
+
 # --------------------------------------------------------------------------- #
 # Request schema
 # --------------------------------------------------------------------------- #
@@ -99,6 +137,12 @@ def health():
     return {"ok": True}
 
 
+@app.get("/books")
+def list_books():
+    """Recent book jobs, newest first."""
+    return {"books": _list_jobs()}
+
+
 @app.post("/books", status_code=202)
 def create_book(req: CreateBook, background_tasks: BackgroundTasks):
     """Submit a book job. Returns immediately with a readable book_id.
@@ -106,7 +150,15 @@ def create_book(req: CreateBook, background_tasks: BackgroundTasks):
     Poll GET /books/{book_id} for progress, then GET /books/{book_id}/download.
     """
     book_id = _make_book_id(req.topic)
-    _set_state(book_id, status="queued")
+    _set_state(
+        book_id,
+        status="queued",
+        topic=req.topic,
+        created_at=datetime.now(timezone.utc).isoformat(),
+        target_pages=req.target_pages,
+        chapter_limit=req.chapter_limit,
+        source_type="youtube" if req.youtube_url else "text",
+    )
     background_tasks.add_task(_run_pipeline, book_id, req)
     return {"book_id": book_id, "status": "queued"}
 

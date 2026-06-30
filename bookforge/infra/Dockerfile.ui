@@ -1,13 +1,26 @@
-# Next.js internal review UI (placeholder — app/ to be built in Phase 4).
+# Next.js BookForge UI — standalone production image.
+FROM node:20-slim AS deps
+WORKDIR /app
+COPY package.json package-lock.json* ./
+RUN npm install
+
 FROM node:20-slim AS build
 WORKDIR /app
-COPY package*.json ./
-RUN npm install || true
+COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-RUN npm run build || echo "ui not built yet (Phase 4)"
+ENV NEXT_TELEMETRY_DISABLED=1
+ARG NEXT_PUBLIC_API_URL=http://localhost:8000
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+RUN npm run build
 
 FROM node:20-slim AS run
 WORKDIR /app
-COPY --from=build /app ./
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+COPY --from=build /app/public ./public
+COPY --from=build /app/.next/standalone ./
+COPY --from=build /app/.next/static ./.next/static
 EXPOSE 3000
-CMD ["npm", "run", "start"]
+ENV PORT=3000
+ENV HOSTNAME=0.0.0.0
+CMD ["node", "server.js"]

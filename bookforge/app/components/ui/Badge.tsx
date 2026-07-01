@@ -1,14 +1,14 @@
 import { cn } from "@/lib/cn";
 
 const variants = {
-  default: "bg-surface-container-low text-on-surface border-outline-variant/30",
-  queued: "bg-amber-100 text-amber-900 border-amber-200",
-  running: "bg-primary-container text-white border-primary-container",
-  done: "bg-outline-variant text-on-surface-variant border-outline-variant",
-  failed: "bg-error-container text-on-error-container border-error/30",
-  guide: "bg-primary/5 text-primary border-primary/20",
-  narrative: "bg-surface-container-low text-secondary border-outline-variant/30",
-  verified: "bg-tertiary-container text-on-tertiary-container border-tertiary-container",
+  default: "bg-surface-container-high text-on-surface-variant border-white/[0.06]",
+  queued: "bg-amber-400/15 text-amber-300 border-amber-400/30",
+  running: "bg-primary/15 text-primary border-primary/40",
+  done: "bg-tertiary/15 text-tertiary border-tertiary/30",
+  failed: "bg-error/15 text-error border-error/30",
+  guide: "bg-primary/10 text-primary border-primary/25",
+  narrative: "bg-surface-container-high text-secondary border-white/[0.06]",
+  verified: "bg-tertiary/15 text-tertiary border-tertiary/30",
 } as const;
 
 type BadgeVariant = keyof typeof variants;

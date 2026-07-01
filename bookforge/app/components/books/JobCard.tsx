@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import type { BookSummary } from "@/lib/api";
+import { useState } from "react";
+import { downloadBookPdf, type BookSummary } from "@/lib/api";
 import { StatusBadge } from "@/components/ui/Badge";
 import { Icon } from "@/components/ui/Icon";
 import { cn } from "@/lib/cn";
@@ -36,9 +37,29 @@ type JobCardProps = {
   book: BookSummary;
 };
 
+function slugify(s: string) {
+  return (s || "book").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 60);
+}
+
 export function JobCard({ book }: JobCardProps) {
   const isRunning =
     book.status === "running" || book.status === "queued";
+  const isDone = book.status === "done";
+  const [downloading, setDownloading] = useState(false);
+
+  async function handleDownload(e: React.MouseEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (downloading) return;
+    setDownloading(true);
+    try {
+      await downloadBookPdf(book.book_id, `${slugify(book.topic)}.pdf`);
+    } catch {
+      /* surfaced on the detail page */
+    } finally {
+      setDownloading(false);
+    }
+  }
 
   return (
     <Link
@@ -46,20 +67,34 @@ export function JobCard({ book }: JobCardProps) {
       className={cn(
         "group relative block cursor-pointer overflow-hidden rounded-xl p-4 transition-all",
         isRunning
-          ? "border border-primary/20 bg-white editorial-shadow hover:bg-primary/5"
-          : "bg-surface-container-low hover:bg-surface-container",
-        !isRunning && "opacity-90"
+          ? "border border-primary/25 bg-primary/[0.06] editorial-shadow hover:bg-primary/10"
+          : "border border-white/[0.05] bg-surface-container-low hover:bg-surface-container hover:border-white/10",
+        !isRunning && !isDone && "opacity-90"
       )}
     >
       {isRunning && (
         <div className="absolute bottom-0 left-0 top-0 w-1 bg-primary" />
       )}
       <div className="flex flex-col gap-1">
-        <div className="flex items-start justify-between">
-          <h3 className="truncate pr-4 font-body text-body-md font-semibold text-on-surface">
+        <div className="flex items-start justify-between gap-2">
+          <h3 className="truncate pr-1 font-body text-body-md font-semibold text-on-surface">
             {book.topic || book.book_id}
           </h3>
-          <StatusBadge status={book.status} />
+          <div className="flex shrink-0 items-center gap-1.5">
+            {isDone && (
+              <button
+                type="button"
+                onClick={handleDownload}
+                disabled={downloading}
+                title="Download PDF"
+                aria-label="Download PDF"
+                className="flex h-7 w-7 items-center justify-center rounded-md text-primary transition-colors hover:bg-primary/15 disabled:opacity-50"
+              >
+                <Icon name={downloading ? "hourglass_top" : "download"} size={16} />
+              </button>
+            )}
+            <StatusBadge status={book.status} />
+          </div>
         </div>
         <div className="mt-2 flex items-center justify-between">
           <div className="flex items-center gap-2">

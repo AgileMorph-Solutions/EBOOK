@@ -30,7 +30,11 @@ function HealthDot({ ok }: { ok: boolean | null }) {
 
 const NAV = [
   { href: "/", label: "Create", match: (p: string) => p === "/" },
-  { href: "/#jobs", label: "Jobs", match: (p: string) => p.startsWith("/books") },
+  {
+    href: "/jobs",
+    label: "Jobs",
+    match: (p: string) => p.startsWith("/jobs") || p.startsWith("/books"),
+  },
 ];
 
 export function Header() {
@@ -53,13 +57,16 @@ export function Header() {
   }, []);
 
   return (
-    <header className="fixed left-0 right-0 top-0 z-50 bg-surface/70 backdrop-blur-md">
+    <header className="fixed left-0 right-0 top-0 z-50 border-b border-white/[0.06] bg-surface/70 backdrop-blur-xl">
       <div className="mx-auto flex max-w-container-max items-center justify-between px-margin-mobile py-4 md:px-margin-desktop">
         <Link
           href="/"
-          className="font-display text-display-lg-mobile text-primary md:text-display-lg"
+          className="group flex items-center gap-2.5 font-display text-display-lg-mobile md:text-display-lg"
         >
-          BookForge
+          <span className="relative flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-on-primary ember-glow md:h-9 md:w-9">
+            <Icon name="local_fire_department" size={20} className="filled" />
+          </span>
+          <span className="text-ember-gradient">BookForge</span>
         </Link>
 
         <nav className="hidden items-center gap-8 md:flex">

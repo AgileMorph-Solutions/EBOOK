@@ -42,6 +42,26 @@ python -m bookforge.cli \
 
 Output PDF lands in `./artifacts/books/<book_id>/interior.pdf`.
 
+## Run the app (single-node, no Docker)
+
+Serves the FastAPI backend (in-process pipeline, local Playwright render) plus a
+**production** build of the Next.js UI:
+
+```bash
+cd bookforge
+playwright install chromium         # one-time (local HTML→PDF)
+./run_local.sh                      # UI :3000 + API :8000
+# API_PORT=8000 UI_PORT=3000 SKIP_UI_BUILD=1 ./run_local.sh
+```
+
+Open **http://localhost:3000** to create a book, watch pipeline progress, and
+download the PDF. The **/jobs** page is the history view (filter by status,
+re-download past books). `GET /health` reports version + key/render status.
+
+Dynamic guides scale to length: set `target_pages` (e.g. 200) and the bible plans
+~16 dense sections (recipe-grade ~9 cards + ~32 tips each). See
+[`docs/RELEASE_NOTES.md`](docs/RELEASE_NOTES.md).
+
 ## Full stack (Docker)
 
 ```bash

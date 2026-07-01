@@ -30,7 +30,7 @@ function PreviewTile({
   overlay?: string;
 }) {
   return (
-    <div className="group relative aspect-[3/4] cursor-pointer overflow-hidden rounded-lg border border-outline/5 bg-surface-container-high editorial-shadow">
+    <div className="group relative aspect-[3/4] cursor-pointer overflow-hidden rounded-lg border border-white/[0.06] bg-surface-container-high editorial-shadow">
       <div className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center">
         <Icon name={icon} className="text-outline" size={48} />
         <p className="font-label text-label-sm text-secondary">{label}</p>
@@ -38,7 +38,7 @@ function PreviewTile({
       </div>
       {overlay && (
         <div className="absolute inset-0 flex items-center justify-center bg-on-surface/20 opacity-0 transition-opacity group-hover:opacity-100">
-          <span className="rounded-full bg-white/90 px-4 py-2 font-label text-label-sm backdrop-blur">
+          <span className="rounded-full bg-surface-container-highest/90 px-4 py-2 font-label text-label-sm text-on-surface backdrop-blur">
             {overlay}
           </span>
         </div>

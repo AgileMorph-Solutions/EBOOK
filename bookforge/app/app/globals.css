@@ -3,28 +3,96 @@
 @tailwind utilities;
 
 @layer base {
+  html {
+    color-scheme: dark;
+  }
+
   body {
     @apply bg-background text-on-background antialiased font-body text-body-md;
+    position: relative;
+    min-height: 100vh;
+  }
+
+  /* Ambient forge atmosphere: molten ember glows bled into a warm-charcoal
+     field, with a fixed film grain overlay for cinematic texture. */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -2;
+    background:
+      radial-gradient(
+        60rem 40rem at 12% -8%,
+        rgba(255, 138, 76, 0.16),
+        transparent 60%
+      ),
+      radial-gradient(
+        50rem 40rem at 100% 0%,
+        rgba(194, 82, 28, 0.14),
+        transparent 55%
+      ),
+      radial-gradient(
+        70rem 50rem at 50% 120%,
+        rgba(121, 207, 152, 0.06),
+        transparent 60%
+      );
+    pointer-events: none;
+  }
+
+  body::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    opacity: 0.035;
+    pointer-events: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
   }
 }
 
 @layer utilities {
+  /* Frosted dark glass — used for panels and the header */
   .glass-panel {
-    background: rgba(255, 255, 255, 0.7);
-    backdrop-filter: blur(12px);
-    border: 1px solid rgba(138, 114, 104, 0.1);
+    background: rgba(28, 22, 17, 0.55);
+    backdrop-filter: blur(18px) saturate(140%);
+    -webkit-backdrop-filter: blur(18px) saturate(140%);
+    border: 1px solid rgba(255, 255, 255, 0.06);
   }
 
+  /* Depth: soft ambient drop + a hairline top-edge highlight for lift */
   .editorial-shadow {
-    box-shadow: 0px 4px 20px rgba(26, 22, 18, 0.05);
+    box-shadow:
+      0 1px 0 0 rgba(255, 255, 255, 0.04) inset,
+      0 20px 50px -24px rgba(0, 0, 0, 0.7),
+      0 4px 16px -8px rgba(0, 0, 0, 0.5);
+  }
+
+  /* Ember halo — for primary CTAs and focused/active elements */
+  .ember-glow {
+    box-shadow:
+      0 0 0 1px rgba(255, 138, 76, 0.25),
+      0 8px 24px -6px rgba(255, 138, 76, 0.45),
+      0 2px 8px -2px rgba(194, 82, 28, 0.5);
+  }
+
+  .text-ember-gradient {
+    background: linear-gradient(135deg, #ffd9c2 0%, #ff8a4c 45%, #c2521c 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  .hairline {
+    border: 1px solid rgba(255, 255, 255, 0.06);
   }
 
   .success-accent-border {
-    border-left: 4px solid #45624f;
+    border-left: 4px solid #79cf98;
   }
 
   .custom-scrollbar::-webkit-scrollbar {
-    width: 4px;
+    width: 6px;
+    height: 6px;
   }
 
   .custom-scrollbar::-webkit-scrollbar-track {
@@ -32,8 +100,12 @@
   }
 
   .custom-scrollbar::-webkit-scrollbar-thumb {
-    background: #ddc1b5;
+    background: rgba(255, 138, 76, 0.28);
     border-radius: 10px;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 138, 76, 0.5);
   }
 
   .material-symbols-outlined {
@@ -42,5 +114,36 @@
 
   .material-symbols-outlined.filled {
     font-variation-settings: "FILL" 1, "wght" 400, "GRAD" 0, "opsz" 24;
+  }
+
+  @keyframes ember-pulse {
+    0%,
+    100% {
+      opacity: 0.5;
+      transform: scale(1);
+    }
+    50% {
+      opacity: 1;
+      transform: scale(1.15);
+    }
+  }
+
+  .animate-ember-pulse {
+    animation: ember-pulse 2.4s ease-in-out infinite;
+  }
+
+  @keyframes rise-in {
+    from {
+      opacity: 0;
+      transform: translateY(12px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  .animate-rise-in {
+    animation: rise-in 0.6s cubic-bezier(0.16, 1, 0.3, 1) both;
   }
 }

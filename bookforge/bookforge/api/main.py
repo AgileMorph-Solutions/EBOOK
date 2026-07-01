@@ -15,12 +15,15 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from threading import Lock
+from threading import BoundedSemaphore, Lock
 from typing import Any, Literal
 
+import structlog
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
@@ -29,7 +32,43 @@ from pydantic import BaseModel, model_validator
 from bookforge.clients import storage
 from bookforge.config import get_settings
 
-app = FastAPI(title="BookForge API", version="0.2.0")
+log = structlog.get_logger(__name__)
+
+API_VERSION = "0.3.0"
+
+
+@asynccontextmanager
+async def lifespan(_app: "FastAPI"):
+    """Fail fast on missing keys and recover jobs orphaned by a prior crash."""
+    s = get_settings()
+    missing = [
+        name for name, val in (
+            ("ANTHROPIC_API_KEY", s.anthropic_api_key),
+            ("GEMINI_API_KEY", s.gemini_api_key),
+        ) if not val
+    ]
+    if missing:
+        log.error("missing_required_keys", missing=missing)
+
+    recovered = 0
+    books_dir = _ARTIFACTS / "books"
+    if books_dir.is_dir():
+        for path in books_dir.glob("*/status.json"):
+            state = _read_state(path.parent.name)
+            if state and state.get("status") in ("queued", "running"):
+                _set_state(path.parent.name, status="failed",
+                           error="interrupted by server restart")
+                recovered += 1
+    log.info("startup", version=API_VERSION, artifacts=str(_ARTIFACTS),
+             recovered_orphans=recovered, max_concurrent=s.max_concurrent_books)
+    yield
+
+
+app = FastAPI(title="BookForge API", version=API_VERSION, lifespan=lifespan)
+
+# Serialize expensive pipeline runs so concurrent submissions can't exhaust
+# Chromium/RAM on a single node. Extra jobs stay "queued" until a slot frees.
+_pipeline_sem = BoundedSemaphore(max(1, get_settings().max_concurrent_books))
 
 _cors_origins = os.environ.get(
     "CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000"
@@ -163,7 +202,16 @@ def _enqueue_book(
 
 @app.get("/health")
 def health():
-    return {"ok": True}
+    s = get_settings()
+    return {
+        "ok": bool(s.anthropic_api_key and s.gemini_api_key),
+        "version": API_VERSION,
+        "storage": "s3" if os.environ.get("BOOKFORGE_USE_S3") == "1" else "local",
+        "render": "render_service" if os.environ.get("RENDER_URL") else "playwright",
+        "anthropic_key": bool(s.anthropic_api_key),
+        "gemini_key": bool(s.gemini_api_key),
+        "max_concurrent_books": s.max_concurrent_books,
+    }
 
 
 @app.get("/books")
@@ -255,30 +303,44 @@ def download(book_id: str):
     )
 
 
+@app.delete("/books/{book_id}", status_code=204)
+def delete_book(book_id: str):
+    """Archive (delete) a job and its artifacts. 404 if it never existed."""
+    if _read_state(book_id) is None:
+        raise HTTPException(status_code=404, detail="book not found")
+    book_dir = _ARTIFACTS / "books" / book_id
+    if book_dir.is_dir():
+        shutil.rmtree(book_dir, ignore_errors=True)
+    log.info("book_deleted", book_id=book_id)
+    return Response(status_code=204)
+
+
 # --------------------------------------------------------------------------- #
 # Background pipeline runner
 # --------------------------------------------------------------------------- #
 
 def _run_pipeline(book_id: str, req: CreateBook) -> None:
-    _set_state(book_id, status="running")
-
     def on_stage(stage: str) -> None:
         _set_state(book_id, stage=stage)
 
-    try:
-        from bookforge.pipeline.orchestrator import run_book
+    # Block here (still "queued") until a pipeline slot is free.
+    with _pipeline_sem:
+        _set_state(book_id, status="running")
+        try:
+            from bookforge.pipeline.orchestrator import run_book
 
-        artifact = run_book(
-            book_id,
-            req.topic,
-            text=req.text,
-            youtube_url=req.youtube_url,
-            target_pages=req.target_pages,
-            chapter_limit=req.chapter_limit,
-            section_limit=req.section_limit,
-            book_kind=req.book_kind,
-            on_stage=on_stage,
-        )
-        _set_state(book_id, status="done", artifact=artifact.model_dump())
-    except Exception as exc:
-        _set_state(book_id, status="failed", error=str(exc))
+            artifact = run_book(
+                book_id,
+                req.topic,
+                text=req.text,
+                youtube_url=req.youtube_url,
+                target_pages=req.target_pages,
+                chapter_limit=req.chapter_limit,
+                section_limit=req.section_limit,
+                book_kind=req.book_kind,
+                on_stage=on_stage,
+            )
+            _set_state(book_id, status="done", artifact=artifact.model_dump())
+        except Exception as exc:
+            log.exception("pipeline_failed", book_id=book_id)
+            _set_state(book_id, status="failed", error=str(exc))

@@ -2,17 +2,17 @@ import { cn } from "@/lib/cn";
 
 const variants = {
   primary:
-    "bg-primary text-on-primary editorial-shadow hover:bg-primary-container active:scale-[0.98]",
+    "bg-primary text-on-primary ember-glow hover:bg-primary-fixed-dim hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98]",
   accent:
-    "bg-primary text-on-primary editorial-shadow hover:bg-primary-container active:scale-[0.98]",
+    "bg-primary text-on-primary ember-glow hover:bg-primary-fixed-dim hover:-translate-y-0.5 active:scale-[0.98]",
   outline:
-    "border border-outline bg-transparent text-on-surface hover:bg-surface-container-low active:scale-[0.98]",
+    "border border-outline/60 bg-transparent text-on-surface hover:border-primary hover:text-primary hover:bg-primary/5 active:scale-[0.98]",
   ghost:
-    "bg-transparent text-on-surface hover:bg-surface-container-low active:scale-[0.98]",
+    "bg-transparent text-on-surface hover:bg-white/[0.05] active:scale-[0.98]",
   destructive:
-    "text-error hover:bg-error-container/20 active:scale-[0.98]",
+    "text-error hover:bg-error/10 active:scale-[0.98]",
   surface:
-    "bg-surface-container-highest border border-outline/10 text-on-surface hover:bg-white active:scale-[0.98]",
+    "bg-surface-container-high border border-white/[0.06] text-on-surface hover:bg-surface-container-highest active:scale-[0.98]",
 } as const;
 
 type ButtonVariant = keyof typeof variants;

@@ -1,10 +1,12 @@
 import { cn } from "@/lib/cn";
 
 const variants = {
-  default: "rounded-2xl border border-outline/10 bg-white/60 editorial-shadow",
+  default:
+    "rounded-2xl border border-white/[0.06] bg-surface-container/60 editorial-shadow",
   glass: "glass-panel rounded-2xl editorial-shadow",
-  elevated: "rounded-xl border border-outline/10 bg-white editorial-shadow",
-  low: "rounded-xl bg-surface-container-low border border-outline/5",
+  elevated:
+    "rounded-xl border border-white/[0.06] bg-surface-container editorial-shadow",
+  low: "rounded-xl bg-surface-container-low border border-white/[0.04]",
 } as const;
 
 type CardVariant = keyof typeof variants;

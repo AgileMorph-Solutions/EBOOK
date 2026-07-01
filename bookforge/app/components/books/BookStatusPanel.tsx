@@ -14,7 +14,7 @@ import { Button } from "@/components/ui/Button";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { Skeleton } from "@/components/ui/Spinner";
 import { Icon } from "@/components/ui/Icon";
-import type { BookStatus } from "@/lib/api";
+import { deleteBook, type BookStatus } from "@/lib/api";
 import { formatBookDate, shortBookId } from "@/lib/config";
 
 function formatElapsed(startIso?: string) {
@@ -42,7 +42,24 @@ export function BookStatusPanel({
   isActive,
 }: BookStatusPanelProps) {
   const router = useRouter();
-  const [archiveToast, setArchiveToast] = useState(false);
+  const [archiving, setArchiving] = useState(false);
+  const [archiveError, setArchiveError] = useState<string | null>(null);
+
+  async function handleArchive() {
+    if (archiving) return;
+    if (!window.confirm("Archive this job? This permanently deletes the PDF and its record.")) {
+      return;
+    }
+    setArchiving(true);
+    setArchiveError(null);
+    try {
+      await deleteBook(bookId);
+      router.push("/jobs");
+    } catch (e) {
+      setArchiveError(e instanceof Error ? e.message : "Archive failed");
+      setArchiving(false);
+    }
+  }
 
   if (loading && !book) {
     return (
@@ -73,7 +90,7 @@ export function BookStatusPanel({
       <div className="mb-2 md:col-span-12">
         <Breadcrumb
           items={[
-            { label: "Jobs", href: "/#jobs" },
+            { label: "Jobs", href: "/jobs" },
             { label: shortBookId(bookId) },
           ]}
         />
@@ -173,17 +190,15 @@ export function BookStatusPanel({
               <Button
                 variant="destructive"
                 className="w-full py-4"
-                onClick={() => {
-                  setArchiveToast(true);
-                  setTimeout(() => setArchiveToast(false), 3000);
-                }}
+                disabled={archiving}
+                onClick={handleArchive}
               >
-                <Icon name="delete" />
-                Archive Job
+                <Icon name={archiving ? "hourglass_top" : "delete"} />
+                {archiving ? "Archiving…" : "Archive Job"}
               </Button>
-              {archiveToast && (
-                <p className="text-center font-body text-body-sm text-secondary">
-                  Archive coming soon
+              {archiveError && (
+                <p className="text-center font-body text-body-sm text-error">
+                  {archiveError}
                 </p>
               )}
             </div>

@@ -189,3 +189,11 @@ export async function listBooks(): Promise<BookSummary[]> {
   const data = await apiFetch<{ books: BookSummary[] }>("/books");
   return data.books;
 }
+
+export async function deleteBook(bookId: string): Promise<void> {
+  const apiUrl = await getApiUrl();
+  const res = await fetch(`${apiUrl}/books/${bookId}`, { method: "DELETE" });
+  if (!res.ok && res.status !== 404) {
+    throw new Error(formatApiError(res.statusText));
+  }
+}

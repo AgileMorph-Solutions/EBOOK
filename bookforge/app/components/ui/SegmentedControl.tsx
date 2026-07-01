@@ -41,8 +41,8 @@ export function SegmentedControl<T extends string>({
           className={cn(
             "rounded-md px-6 py-2 font-label text-label-md transition-all",
             value === opt.id
-              ? "bg-white text-primary editorial-shadow"
-              : "text-secondary hover:bg-white/50"
+              ? "bg-surface-container-highest text-primary editorial-shadow"
+              : "text-secondary hover:bg-white/[0.04]"
           )}
         >
           {opt.label}

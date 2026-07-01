@@ -35,3 +35,4 @@ boto3>=1.34
 # --- Imaging / PDF ---
 Pillow>=10.3
 pikepdf>=9.0             # PDF inspect / linearize
+playwright>=1.50         # local HTML→PDF render (run `playwright install chromium`)

@@ -1,5 +1,9 @@
 import { NextResponse } from "next/server";
 
+// Evaluate env at request time so one production build works across
+// dev/staging/prod without a rebuild (API_URL is read per request).
+export const dynamic = "force-dynamic";
+
 export function GET() {
   const apiUrl =
     process.env.API_URL ??

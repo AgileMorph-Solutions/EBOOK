@@ -68,7 +68,9 @@ Produce:
 - art_style: bright clean home photography; palette matches the topic; \
 negative_prompt must include "no text, no clutter, no faces".
 - voice: second person, short sentences, everyday words; banned_patterns list.
-- base_sections: 6-10 topic areas from the source (e.g. "Kitchen Cleaning"). \
+- base_sections: {base_lo}-{base_hi} DISTINCT topic areas from the source (e.g. \
+"Kitchen Cleaning"). Aim for the higher end so a long book never repeats itself; \
+each area must be genuinely different (not a rewording of another). \
 Each has title, one-paragraph summary, and divider_subject — a CLEAN vertical \
 portrait scene for the section opener photo panel (centered subject with margin \
 on all sides; one bowl, plate, or tidy scene — NOT a wide pantry shelf that \
@@ -171,18 +173,34 @@ def _clamp(lo: int, hi: int, v: int) -> int:
     return max(lo, min(hi, v))
 
 
+# Empirically (matching the hand-authored recipe books) one senior "use card"
+# fills ~1 page and a quick-tip list runs ~6 tips/page; with the section intro
+# and divider photo a dense section lands near ~14 finished pages. We therefore
+# size the SECTION COUNT to the page target and keep every section at
+# recipe-grade density (≈10 cards + ≈35 tips) rather than thinning sections out
+# — thin sections render as padded, whitespace-heavy pages.
+_PAGES_PER_SECTION = 14
+
+
+def _base_section_target(target_pages: int, tiers: int) -> int:
+    """How many DISTINCT base topics to ask the model for, so base×tiers
+    sections at recipe density reach ~target_pages."""
+    return _clamp(4, 14, round(target_pages / (_PAGES_PER_SECTION * tiers)))
+
+
 def _section_quotas(target_pages: int, num_sections: int) -> tuple[int, int, int, int]:
-    pages_per = max(4, target_pages // max(1, num_sections))
-    full_cards = _clamp(3, 10, pages_per // 3)
-    list_quota = _clamp(10, 35, int(pages_per * 1.2))
+    pages_per = max(8, (target_pages + num_sections - 1) // max(1, num_sections))
+    # Recipe-grade floors: never drop below a dense, well-filled card page.
+    full_cards = _clamp(7, 11, round(pages_per * 0.72))
+    list_quota = _clamp(24, 38, round(pages_per * 2.5))
     image_quota = min(3, full_cards)
     return full_cards, list_quota, image_quota, pages_per
 
 
 def _expand_sections(
-    base_sections: list[_BaseSection], target_pages: int,
+    base_sections: list[_BaseSection], target_pages: int, *, tiers_count: int = 2,
 ) -> list[SectionPlan]:
-    tiers = _TIER_NAMES if target_pages >= 150 else _TIER_NAMES[:2]
+    tiers = _TIER_NAMES[:tiers_count]
     n = len(base_sections) * len(tiers)
     fc, lq, iq, pb = _section_quotas(target_pages, n)
     expanded: list[SectionPlan] = []
@@ -287,12 +305,23 @@ def build_bible(
                  chapters=len(bible.chapters))
         return bible
 
+    # Two dense tiers per base topic (Essentials + More Uses) matches the
+    # hand-authored recipe books; the base-topic count is what scales length.
+    tiers_per = 2
+    base_target = _base_section_target(target_pages, tiers_per)
+    base_lo = max(4, base_target - 1)
+    base_hi = base_target + 2
+
     draft = llm.structured(
-        _GUIDE_PROMPT.format(topic=source.topic, pages=target_pages, source=excerpt),
+        _GUIDE_PROMPT.format(
+            topic=source.topic, pages=target_pages, source=excerpt,
+            base_lo=base_lo, base_hi=base_hi,
+        ),
         _PracticalBibleDraft, system=_GUIDE_SYSTEM, max_tokens=8000,
     )
-    tiers_per = 3 if target_pages >= 150 else 2
-    sections = _expand_sections(draft.base_sections, target_pages)
+    sections = _expand_sections(
+        draft.base_sections, target_pages, tiers_count=tiers_per,
+    )
     raw_specials = [s.to_plan() for s in draft.specials] or _default_specials()
     specials = _map_specials(raw_specials, len(draft.base_sections), tiers_per)
 

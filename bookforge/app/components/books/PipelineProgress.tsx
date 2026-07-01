@@ -55,10 +55,10 @@ export function PipelineProgress({
                 done && "border-tertiary/30 bg-tertiary/10 text-tertiary",
                 current &&
                   !done &&
-                  "border-primary/30 bg-primary-fixed/40 text-on-primary-fixed-variant",
+                  "border-primary/40 bg-primary/15 text-primary ember-glow",
                 !done &&
                   !current &&
-                  "border-outline-variant/30 bg-white/60 text-secondary"
+                  "border-white/[0.06] bg-surface-container-low text-secondary"
               )}
             >
               {done ? (

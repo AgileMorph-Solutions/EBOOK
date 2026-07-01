@@ -176,18 +176,19 @@ b, strong { font-weight: 700; }
 
 /* ============================ SECTION DIVIDER ============================ */
 /* SPLIT DIVIDER: solid brand-color panel (left) carries the text; clean photo
-   (right) is never covered by an overlay. */
+   (right) fills the remaining page height edge-to-edge. */
 .gdivider { background: var(--deep); color: #fff; overflow: hidden; }
 .gdivider .dphoto { position: absolute; top: calc(-1 * var(--bleed));
-  right: calc(-1 * var(--bleed)); bottom: calc(-1 * var(--bleed)); left: 3.9in;
-  overflow: hidden; background: var(--deep); z-index: 1;
-  aspect-ratio: 4.6 / 11; }
-.gdivider .dphoto img { width: 100%; height: 100%; object-fit: cover;
-  object-position: center; display: block; }
+  right: calc(-1 * var(--bleed)); bottom: calc(-1 * var(--bleed)); left: 3.45in;
+  overflow: hidden; background: var(--deep); z-index: 1; }
+.gdivider .dphoto-inner { position: absolute; inset: 0; overflow: hidden; }
+.gdivider .dphoto img { position: absolute; left: 50%; top: 50%;
+  transform: translate(-50%, -50%); min-width: 100%; min-height: 100%;
+  width: auto; height: auto; object-fit: cover; display: block; }
 .gdivider:not(.has-img) .dphoto { display: none; }
 .gdivider .dpanel { position: absolute; top: calc(-1 * var(--bleed));
   left: calc(-1 * var(--bleed)); bottom: calc(-1 * var(--bleed));
-  width: calc(3.9in + var(--bleed)); background: var(--accent); color: #fff;
+  width: calc(3.45in + var(--bleed)); background: var(--accent); color: #fff;
   overflow: hidden; z-index: 2;
   display: flex; flex-direction: column; justify-content: center;
   padding: 1in .6in 1in calc(.7in + var(--bleed)); }

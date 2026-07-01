@@ -21,8 +21,9 @@ def _divider_subject(ch, bible: BookBible, subjects: dict[int, str]) -> str:
     topic = f"{bible.title} {ch.title}".lower()
     if any(w in topic for w in _FOOD_HINTS):
         return (
-            f"a warm inviting kitchen with home-cooked food related to {ch.title}, "
-            f"soft natural daylight, tidy counters, no people, no text"
+            f"a single inviting bowl or plate of home-cooked food for {ch.title}, "
+            f"centered in frame on a wooden table, soft daylight, shallow depth, "
+            f"tidy kitchen background, no people, no text"
         )
     if bible.theme_name == "pest_guard":
         return (

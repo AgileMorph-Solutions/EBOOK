@@ -97,7 +97,7 @@ def _negation(bible) -> str:
     return f" Strictly exclude from the image: {neg}." if neg else ""
 
 
-def _build_prompt(brief, bible) -> str:
+def _build_prompt(brief, bible, *, placement: Placement | None = None) -> str:
     """Wrap the subject in a research-backed art-direction recipe.
 
     photo: describe the *capture* (camera/lens/film/light) + food styling; keep it
@@ -126,10 +126,17 @@ def _build_prompt(brief, bible) -> str:
     else:
         prompt = f"{prompt} {_NO_TEXT}."
     prompt = f"{prompt}{neg}"
-    # Compose for editorial overlay: keep the lower third visually calm so a
-    # title card can sit there without fighting the subject. Avoid bright
-    # highlights, smoke, or busy detail in the bottom band.
-    if brief.aspect in ("full_bleed", "portrait"):
+    if placement == "divider":
+        # Right-strip panel: tall portrait, no text overlay — keep subject centered
+        # and fully inside the frame so cover-crop does not clip edges.
+        prompt += (
+            " Shot as a tall vertical portrait for a magazine right-panel strip. "
+            "Place the main subject dead center with generous margin on all four sides; "
+            "the entire scene must fit inside the frame with nothing cut off at the edges. "
+            "Even lighting from top to bottom; avoid wide panoramic shelf shots."
+        )
+    elif brief.aspect in ("full_bleed", "portrait"):
+        # Cover / full-bleed: calm lower third for title band overlay.
         prompt += (" Compose with the main subject in the upper two-thirds; "
                    "keep the lower third quiet and uncluttered (a calm dark "
                    "surface or shadow area) so an editorial title card can "
@@ -189,7 +196,8 @@ def generate_for_brief(
 ) -> GeneratedImage | None:
     """Lean single-image generation for a content block's image_brief."""
     gi = generate_image(
-        _build_prompt(brief, bible), brief.aspect, key, placement=placement,
+        _build_prompt(brief, bible, placement=placement),
+        brief.aspect, key, placement=placement,
     )
     if gi:
         gi.block_ref = key

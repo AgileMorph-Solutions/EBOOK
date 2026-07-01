@@ -68,9 +68,10 @@ Produce:
 negative_prompt must include "no text, no clutter, no faces".
 - voice: second person, short sentences, everyday words; banned_patterns list.
 - base_sections: 6-10 topic areas from the source (e.g. "Kitchen Cleaning"). \
-Each has title, one-paragraph summary, and divider_subject — a CLEAN scene to \
-photograph for the section opener (no pests drawn, no scary imagery; describe \
-a tidy prevented/clean home scene, not the problem itself).
+Each has title, one-paragraph summary, and divider_subject — a CLEAN vertical \
+portrait scene for the section opener photo panel (centered subject with margin \
+on all sides; one bowl, plate, or tidy scene — NOT a wide pantry shelf that \
+gets cropped). No pests, no scary imagery.
 - how_to: heading, lead (25-40 words), exactly 4 bullet points for the welcome page.
 - safety_key: "hp" if hydrogen peroxide / cleaning chemicals dominate; "pest" if \
 pest control dominates; else "general".

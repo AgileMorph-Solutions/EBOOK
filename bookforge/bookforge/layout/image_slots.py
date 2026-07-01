@@ -9,17 +9,19 @@ from typing import Literal
 
 Placement = Literal["card", "divider", "cover"]
 
-# (width_px, height_px) at 300 DPI
+# Text panel width on section dividers (trim inches); photo fills the rest.
+DIVIDER_PANEL_IN = 3.45
+
+# (width_px, height_px) at 300 DPI — divider width = page trim − panel + bleed
 _SLOT_PX: dict[Placement, tuple[int, int]] = {
-    "card": (1200, 1200),       # square entry-card hero
-    "divider": (1380, 3300),    # right strip on section divider (~4.6in × 11in)
-    "cover": (2550, 1800),      # top photo band on split cover
+    "card": (1200, 1200),
+    "divider": (1575, 3375),    # ~5.25in × 11.25in bleed box
+    "cover": (2550, 1800),
 }
 
-# CSS aspect-ratio strings matching each slot (for documentation / future tooling)
 _SLOT_RATIO: dict[Placement, str] = {
     "card": "1 / 1",
-    "divider": "4.6 / 11",
+    "divider": "5.05 / 11",
     "cover": "17 / 12",
 }
 

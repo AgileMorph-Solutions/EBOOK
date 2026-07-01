@@ -110,7 +110,7 @@ class GuideDirector:
     # ---- section pages ---- #
     def divider(self, number: int, title: str, kicker: str,
                 hero_uri: str | None = None) -> None:
-        img = f'<img src="{hero_uri}"/>' if hero_uri else ""
+        img = f'<div class="dphoto-inner"><img src="{hero_uri}"/></div>' if hero_uri else ""
         cls = "page gdivider has-img" if hero_uri else "page gdivider"
         self.pages.append(
             f'<section class="{cls}"><div class="dphoto">{img}</div>'

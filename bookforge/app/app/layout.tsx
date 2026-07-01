@@ -1,5 +1,25 @@
 import type { Metadata } from "next";
+import { EB_Garamond, Inter, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
+import { PageShell } from "@/components/layout/Header";
+
+const display = EB_Garamond({
+  subsets: ["latin"],
+  variable: "--font-display",
+  weight: ["400", "500", "600", "700"],
+});
+
+const body = Inter({
+  subsets: ["latin"],
+  variable: "--font-body",
+  weight: ["300", "400", "500", "600"],
+});
+
+const label = JetBrains_Mono({
+  subsets: ["latin"],
+  variable: "--font-label",
+  weight: ["400", "500"],
+});
 
 export const metadata: Metadata = {
   title: "BookForge",
@@ -12,17 +32,17 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en">
-      <body className="min-h-screen font-sans">
-        <header className="border-b border-ink/10 bg-paper/80 backdrop-blur-sm sticky top-0 z-10">
-          <div className="mx-auto flex max-w-5xl items-center justify-between px-6 py-4">
-            <a href="/" className="font-serif text-xl tracking-tight text-ink">
-              Book<span className="text-accent">Forge</span>
-            </a>
-            <span className="text-sm text-muted">AI ebook pipeline</span>
-          </div>
-        </header>
-        <main className="mx-auto max-w-5xl px-6 py-10">{children}</main>
+    <html lang="en" className="light">
+      <head>
+        <link
+          href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap"
+          rel="stylesheet"
+        />
+      </head>
+      <body
+        className={`${display.variable} ${body.variable} ${label.variable} min-h-screen selection:bg-primary-fixed selection:text-on-primary-fixed`}
+      >
+        <PageShell>{children}</PageShell>
       </body>
     </html>
   );

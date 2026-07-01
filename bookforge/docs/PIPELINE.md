@@ -9,28 +9,40 @@ spike (`pipeline/orchestrator.py`) and the production Celery path
 
 ```
 GET  /books              # list recent jobs (newest first)
-POST /books              # submit a job; returns book_id
+POST /books              # submit a job (JSON); returns book_id
+POST /books/upload       # submit via multipart file upload
 GET  /books/{book_id}    # poll status: queued | running | done | failed
 GET  /books/{book_id}/download   # download final interior.pdf
 ```
 
 The web UI at `http://localhost:3000` (`bookforge/app/`) maps its create form
-1:1 to the `POST /books` body below (paste text, file upload → `text`, or
-`youtube_url`).
+to `POST /books` (paste text, small files) or `POST /books/upload` (large
+files). YouTube URLs use JSON `youtube_url`.
 
-Submission body:
+Submission body (`POST /books`):
 
 ```json
 {
   "topic": "string (required)",
   "text": "string (optional - pasted source)",
   "youtube_url": "string (optional - YouTube URL)",
-  "chapter_limit": 1
+  "target_pages": 100,
+  "chapter_limit": null,
+  "section_limit": null,
+  "book_kind": "practical_guide"
 }
 ```
 
-Exactly one of `text` or `youtube_url` is required. `chapter_limit` is
-optional; without it the bible planner chooses chapter count.
+Multipart upload (`POST /books/upload`):
+
+- `topic` (required), `file` (required)
+- Optional form fields: `target_pages`, `chapter_limit`, `section_limit`, `book_kind`
+- Max source size: `MAX_SOURCE_SIZE_MB` (default 10 MB); returns **413** if exceeded
+
+Status polling may include a `stage` field while `status` is `running`:
+`ingest` → `bible` → `content` → `images` → `qa` (narrative) → `layout`.
+
+Exactly one of `text` or `youtube_url` is required for JSON submission. `chapter_limit` / `section_limit` are optional.
 
 ## Stage Flow
 
@@ -263,6 +275,19 @@ Storage is **local fs only** (`BOOKFORGE_USE_S3=0`,
   charges into it; exceeding `PER_BOOK_BUDGET_USD` raises mid-pipeline.
 - `GROUNDEDNESS_THRESHOLD` (default 1.0) gates `qa.passed`.
 - `MAX_FILE_SIZE_MB` gates the assembled PDF.
+- `MAX_SOURCE_SIZE_MB` gates uploaded source files (API upload endpoint).
+
+## UI manual regression checklist
+
+After UI or API changes, verify:
+
+1. Paste text → create → poll status → download PDF
+2. Small `.txt` upload (under 512 KB) via JSON path
+3. Large `.txt` upload (over 512 KB) via multipart `/books/upload`
+4. YouTube URL submission with valid watch URL
+5. Failed job shows `error` on status page
+6. Job list updates while jobs are running
+7. Docker compose: UI at `:3000`, API at `:8000`, header health dot green
 
 ## Key Design Decisions
 

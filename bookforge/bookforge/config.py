@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     per_book_budget_usd: float = Field(50.0, alias="PER_BOOK_BUDGET_USD")
     image_candidates_per_page: int = Field(2, alias="IMAGE_CANDIDATES_PER_PAGE")
     max_file_size_mb: int = Field(80, alias="MAX_FILE_SIZE_MB")
+    max_source_size_mb: int = Field(10, alias="MAX_SOURCE_SIZE_MB")
     groundedness_threshold: float = Field(1.0, alias="GROUNDEDNESS_THRESHOLD")
     layout_qa_enabled: bool = Field(True, alias="LAYOUT_QA_ENABLED")
     layout_qa_block: bool = Field(False, alias="LAYOUT_QA_BLOCK")

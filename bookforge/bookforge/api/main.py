@@ -4,6 +4,7 @@ GET  /books                    → list recent jobs (newest first)
 POST /books                    → start a pipeline job, returns book_id (topic slug)
 GET  /books/{book_id}          → poll status: queued | running | done | failed
 GET  /books/{book_id}/download → stream the finished PDF
+POST /books/upload             → multipart file upload (alternative to JSON text)
 GET  /health                   → liveness probe
 
 Job state is persisted to {ARTIFACTS_ROOT}/books/{book_id}/status.json so it
@@ -20,12 +21,13 @@ from pathlib import Path
 from threading import Lock
 from typing import Any, Literal
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, model_validator
 
 from bookforge.clients import storage
+from bookforge.config import get_settings
 
 app = FastAPI(title="BookForge API", version="0.2.0")
 
@@ -105,6 +107,7 @@ def _list_jobs() -> list[dict[str, Any]]:
             "created_at": state.get("created_at", ""),
             "target_pages": state.get("target_pages"),
             "chapter_limit": state.get("chapter_limit"),
+            "book_kind": state.get("book_kind"),
         })
     jobs.sort(key=lambda j: j.get("created_at") or "", reverse=True)
     return jobs
@@ -130,6 +133,30 @@ class CreateBook(BaseModel):
         return self
 
 
+def _enqueue_book(
+    req: CreateBook,
+    background_tasks: BackgroundTasks,
+    *,
+    source_filename: str | None = None,
+) -> dict[str, str]:
+    book_id = _make_book_id(req.topic)
+    state: dict[str, Any] = {
+        "status": "queued",
+        "topic": req.topic,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "target_pages": req.target_pages,
+        "chapter_limit": req.chapter_limit,
+        "section_limit": req.section_limit,
+        "book_kind": req.book_kind,
+        "source_type": "youtube" if req.youtube_url else "text",
+    }
+    if source_filename:
+        state["source_filename"] = source_filename
+    _set_state(book_id, **state)
+    background_tasks.add_task(_run_pipeline, book_id, req)
+    return {"book_id": book_id, "status": "queued"}
+
+
 # --------------------------------------------------------------------------- #
 # Routes
 # --------------------------------------------------------------------------- #
@@ -151,20 +178,50 @@ def create_book(req: CreateBook, background_tasks: BackgroundTasks):
 
     Poll GET /books/{book_id} for progress, then GET /books/{book_id}/download.
     """
-    book_id = _make_book_id(req.topic)
-    _set_state(
-        book_id,
-        status="queued",
-        topic=req.topic,
-        created_at=datetime.now(timezone.utc).isoformat(),
-        target_pages=req.target_pages,
-        chapter_limit=req.chapter_limit,
-        section_limit=req.section_limit,
-        book_kind=req.book_kind,
-        source_type="youtube" if req.youtube_url else "text",
+    return _enqueue_book(req, background_tasks)
+
+
+@app.post("/books/upload", status_code=202)
+async def create_book_upload(
+    background_tasks: BackgroundTasks,
+    topic: str = Form(...),
+    file: UploadFile = File(...),
+    target_pages: int = Form(100),
+    chapter_limit: int | None = Form(None),
+    section_limit: int | None = Form(None),
+    book_kind: Literal["practical_guide", "narrative"] = Form("practical_guide"),
+):
+    """Submit a book job via multipart file upload."""
+    if not topic.strip():
+        raise HTTPException(status_code=422, detail="topic is required")
+
+    raw = await file.read()
+    max_bytes = get_settings().max_source_size_mb * 1024 * 1024
+    if len(raw) > max_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File exceeds maximum size of {get_settings().max_source_size_mb} MB",
+        )
+    if not raw:
+        raise HTTPException(status_code=422, detail="Uploaded file is empty")
+
+    text = raw.decode("utf-8", errors="replace")
+    if not text.strip():
+        raise HTTPException(status_code=422, detail="File has no readable text content")
+
+    req = CreateBook(
+        topic=topic.strip(),
+        text=text,
+        target_pages=target_pages,
+        chapter_limit=chapter_limit,
+        section_limit=section_limit,
+        book_kind=book_kind,
     )
-    background_tasks.add_task(_run_pipeline, book_id, req)
-    return {"book_id": book_id, "status": "queued"}
+    return _enqueue_book(
+        req,
+        background_tasks,
+        source_filename=file.filename or "upload.txt",
+    )
 
 
 @app.get("/books/{book_id}")
@@ -204,6 +261,10 @@ def download(book_id: str):
 
 def _run_pipeline(book_id: str, req: CreateBook) -> None:
     _set_state(book_id, status="running")
+
+    def on_stage(stage: str) -> None:
+        _set_state(book_id, stage=stage)
+
     try:
         from bookforge.pipeline.orchestrator import run_book
 
@@ -216,6 +277,7 @@ def _run_pipeline(book_id: str, req: CreateBook) -> None:
             chapter_limit=req.chapter_limit,
             section_limit=req.section_limit,
             book_kind=req.book_kind,
+            on_stage=on_stage,
         )
         _set_state(book_id, status="done", artifact=artifact.model_dump())
     except Exception as exc:

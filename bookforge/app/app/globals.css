@@ -4,6 +4,43 @@
 
 @layer base {
   body {
-    @apply bg-paper text-ink antialiased;
+    @apply bg-background text-on-background antialiased font-body text-body-md;
+  }
+}
+
+@layer utilities {
+  .glass-panel {
+    background: rgba(255, 255, 255, 0.7);
+    backdrop-filter: blur(12px);
+    border: 1px solid rgba(138, 114, 104, 0.1);
+  }
+
+  .editorial-shadow {
+    box-shadow: 0px 4px 20px rgba(26, 22, 18, 0.05);
+  }
+
+  .success-accent-border {
+    border-left: 4px solid #45624f;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar {
+    width: 4px;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-thumb {
+    background: #ddc1b5;
+    border-radius: 10px;
+  }
+
+  .material-symbols-outlined {
+    font-variation-settings: "FILL" 0, "wght" 300, "GRAD" 0, "opsz" 24;
+  }
+
+  .material-symbols-outlined.filled {
+    font-variation-settings: "FILL" 1, "wght" 400, "GRAD" 0, "opsz" 24;
   }
 }

@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from bookforge.clients import llm
 from bookforge.layout import theme
+from bookforge.pipeline.content_guardrails import parse_promised_count, planned_use_count
 from bookforge.schemas import (
     ArtStyle, BookBible, ChapterPlan, HowToPage, SectionPlan, SourceDoc,
     SpecialPlan, VoiceStyle,
@@ -86,6 +87,13 @@ No text, no faces.
 - specials: 2-3 special pages — each has after_section (1-based index into \
 base_sections, NOT the expanded tier list), kind ("chart" or "checklist"), heading, and for charts: columns \
 (3 strings) + rows (5-8); for checklists: about (one sentence) + items (8-12).
+
+TITLE/SUBTITLE RULES:
+- If the subtitle promises a tip count (e.g. "250 ways"), that number must be \
+realistic for ~{pages} pages and the section count you plan — do NOT promise \
+"700 ways" or "800 tips" unless the book will actually contain that many.
+- Use correct spelling in titles, headings, and product names.
+- Headings must accurately describe the section topic.
 
 Be specific. Every base_section must reflect the source, not generic filler."""
 
@@ -308,6 +316,10 @@ def build_bible(
         pro_topic=draft.pro_topic or source.topic,
         specials=specials,
     )
+    planned = planned_use_count(sections)
+    promised = parse_promised_count(bible.title, bible.subtitle)
+    bible.promised_uses = promised or planned
     log.info("bible_built", kind="practical_guide", title=bible.title,
-             sections=len(bible.sections))
+             sections=len(bible.sections), promised_uses=bible.promised_uses,
+             planned_uses=planned)
     return bible

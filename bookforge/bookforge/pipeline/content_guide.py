@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from bookforge import safety
 from bookforge.clients import llm
 from bookforge.layout.labels import section_eyebrow
+from bookforge.pipeline.content_guardrails import coherence_rules
 from bookforge.schemas import (
     BlockType, BookBible, Chapter, ChecklistModel, ContentBlock, ImageBrief,
     Passage, SectionPlan, TableModel, UseEntry,
@@ -45,7 +46,8 @@ def _voice(bible: BookBible) -> str:
         f"Persona: {v.narrator_persona}. Voice: {v.tone_register}. "
         f"Write in the second person ('you'), one clear idea per sentence, plain "
         f"everyday words, no jargon and no idioms. Never use these: {banned}. "
-        f"Be warm, practical, and reassuring."
+        f"Be warm, practical, and reassuring.\n"
+        f"{coherence_rules(bible)}"
     )
 
 
@@ -82,7 +84,8 @@ Produce a section like this:
 
 {safety}
 
-{product_line} Stay UNDER the length limits — short is better than long."""
+{product_line} Stay UNDER the length limits — short is better than long.
+Do not mention inflated tip totals that contradict the book title or subtitle."""
 
 
 def _format_passages(passages: list[Passage]) -> str:
@@ -159,7 +162,7 @@ Columns (exactly these, in order): {columns}
 Produce EXACTLY {rows} rows. Each cell is 2-6 words. The first column names a store
 product or service with its rough price. The middle column is the cheap at-home method.
 The last column is a rough yearly dollar saving (e.g. "$24").
-Keep everything realistic and safe."""
+Keep everything realistic and safe. Do not inflate tip or savings counts."""
 
 
 def make_chart(section: str, heading: str, columns: list[str], rows: int,
@@ -182,7 +185,8 @@ _CHECK_PROMPT = """Make a simple home checklist titled "{heading}" for seniors, 
 {about}
 
 Produce {items} short checklist items, each 4-9 words, a single clear task. Give each a
-cadence of "weekly" or "monthly". Keep them safe and easy."""
+cadence of "weekly" or "monthly". Keep them safe and easy.
+Headings must match the checklist topic exactly."""
 
 
 def make_checklist(heading: str, about: str, items: int, bible: BookBible) -> ContentBlock:
@@ -204,7 +208,7 @@ guide about {topic}.
 - lead: 2 sentences, 25-40 words.
 - signs: 4-6 warning signs, each 6-16 words, when a professional is the safer choice.
 - reassure: 1-2 warm sentences, 20-35 words, that it is fine to ask for help.
-Keep it calm and plain."""
+Keep it calm and plain. Do not mention inflated tip totals."""
 
 
 def make_pro(topic: str, bible: BookBible) -> dict:

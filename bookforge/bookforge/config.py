@@ -23,9 +23,11 @@ class Settings(BaseSettings):
     draft_model: str = Field("claude-haiku-4-5-20251001", alias="DRAFT_MODEL")
     vision_qa_model: str = Field("claude-opus-4-8", alias="VISION_QA_MODEL")
 
-    # --- Images (openai gpt-image-1 default; gemini Imagen alternative) ---
-    image_primary_provider: str = Field("openai", alias="IMAGE_PRIMARY_PROVIDER")
-    image_primary_model: str = Field("gpt-image-1", alias="IMAGE_PRIMARY_MODEL")
+    # --- Images (gemini Imagen default; openai gpt-image-1 alternative) ---
+    image_primary_provider: str = Field("gemini", alias="IMAGE_PRIMARY_PROVIDER")
+    image_primary_model: str = Field("imagen-4.0-generate-001", alias="IMAGE_PRIMARY_MODEL")
+    image_allow_provider_fallback: bool = Field(False, alias="IMAGE_ALLOW_PROVIDER_FALLBACK")
+    image_reject_text_artifacts: bool = Field(True, alias="IMAGE_REJECT_TEXT_ARTIFACTS")
 
     # --- Transcription / search ---
     deepgram_api_key: str = Field("", alias="DEEPGRAM_API_KEY")

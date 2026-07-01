@@ -1,11 +1,11 @@
 """Image-generation client.
 
-Providers (no Fal): uses the keys you already have.
-  * openai  -> gpt-image-1   (high quality + best in-image text rendering)  [default]
-  * gemini  -> Imagen 3      (high quality photoreal)
+Providers:
+  * gemini  -> Imagen 4/3   (high quality photoreal)  [default]
+  * openai  -> gpt-image-1  (high quality + best in-image text rendering)
 
-Routing: `IMAGE_PRIMARY_PROVIDER` selects the engine. gpt-image-1 handles both
-regular art and in-image text, so no separate text model is required.
+Routing: `IMAGE_PRIMARY_PROVIDER` and `IMAGE_PRIMARY_MODEL` select the engine.
+`IMAGE_ALLOW_PROVIDER_FALLBACK` controls whether Imagen failures fall back to OpenAI.
 Returns raw image bytes; right-sizing/upscaling happens in pipeline.images.
 """
 from __future__ import annotations
@@ -20,7 +20,7 @@ from bookforge.cost import budget
 
 log = structlog.get_logger(__name__)
 
-# Rough per-image USD (gpt-image-1 hi-res ~ this); for the budget guardrail.
+# Rough per-image USD; for the budget guardrail.
 _IMG_COST = 0.17
 
 # Aspect -> OpenAI size strings (gpt-image-1 supports these three).
@@ -52,12 +52,20 @@ def _openai():
     return _openai_client
 
 
+def _validate_provider(provider: str) -> None:
+    if provider == "gemini" and not settings.gemini_api_key:
+        raise RuntimeError("GEMINI_API_KEY is not set — populate .env")
+    if provider == "openai" and not settings.openai_api_key:
+        raise RuntimeError("OPENAI_API_KEY is not set — populate .env")
+
+
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=20))
 def _gen_openai(prompt: str, aspect: str, negative_prompt: str = "") -> bytes:
+    model = settings.image_primary_model or "gpt-image-1"
     # gpt-image-1 has no negative-prompt slot — fold it into the positive prompt.
     full = f"{prompt} Avoid: {negative_prompt}." if negative_prompt else prompt
     resp = _openai().images.generate(
-        model="gpt-image-1",
+        model=model,
         prompt=full,
         size=_OPENAI_SIZE.get(aspect, _OPENAI_SIZE["full_bleed"]),
         quality="high",
@@ -107,16 +115,28 @@ def _gen_gemini(prompt: str, aspect: str, negative_prompt: str = "") -> bytes:
 def generate(prompt: str, *, aspect: str = "full_bleed", in_image_text: bool = False,
              negative_prompt: str = "") -> bytes:
     """Generate one image. `in_image_text` is informational — gpt-image-1 renders
-    text well natively, so we keep using the primary provider either way."""
+    text well natively; Imagen should avoid baked-in text."""
     budget.assert_ok()
     provider = settings.image_primary_provider.lower()
+    model = settings.image_primary_model
+    _validate_provider(provider)
+    fallback_used = False
+
     if provider == "gemini":
         try:
             data = _gen_gemini(prompt, aspect, negative_prompt=negative_prompt)
-        except Exception as exc:  # google-genai missing or Imagen unavailable
-            log.warning("gemini_fallback_openai", err=str(exc)[:160])
-            data = _gen_openai(prompt, aspect, negative_prompt=negative_prompt)
-    else:  # default: openai
+        except Exception as exc:
+            if settings.image_allow_provider_fallback:
+                log.warning("gemini_fallback_openai", err=str(exc)[:160])
+                _validate_provider("openai")
+                data = _gen_openai(prompt, aspect, negative_prompt=negative_prompt)
+                provider, model, fallback_used = "openai", settings.image_primary_model, True
+            else:
+                raise
+    else:
         data = _gen_openai(prompt, aspect, negative_prompt=negative_prompt)
+
     budget.charge(_IMG_COST)
+    log.info("image_generated", provider=provider, model=model, fallback_used=fallback_used,
+             in_image_text=in_image_text)
     return data

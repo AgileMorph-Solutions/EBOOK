@@ -9,7 +9,7 @@ import structlog
 from pydantic import BaseModel
 
 from bookforge.clients import llm
-from bookforge.pipeline import content_guide, grounding, layout_budget
+from bookforge.pipeline import content_guide, content_guardrails, grounding, layout_budget
 from bookforge.schemas import BookBible, Chapter, ChapterPlan, Claim, SourceDoc, SpecialPlan
 
 log = structlog.get_logger(__name__)
@@ -90,7 +90,11 @@ def write_guide(
         for sp in bible.specials_for(section.index):
             ch.blocks.append(_make_special(sp, section.title, bible))
         chapters.append(layout_budget.trim_chapter(ch))
-    log.info("guide_written", sections=len(chapters), uses=n - 1)
+    drift = content_guardrails.scan_chapters_for_count_drift(chapters, bible)
+    for issue in drift:
+        log.warning("count_drift", issue=issue)
+    log.info("guide_written", sections=len(chapters), uses=n - 1,
+             count_drift=len(drift))
     return chapters
 
 

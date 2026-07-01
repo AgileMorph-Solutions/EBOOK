@@ -62,6 +62,7 @@ def get() -> GuideBook:
         how_to=how_to,
         list_lead="Quick jobs you can do in a minute or two with the same brown bottle.",
         pro_topic="home cleaning with hydrogen peroxide",
+        promised_uses=250,
         specials=[
             SpecialPlan(after_section=1, kind="chart", heading="Replace These Kitchen Products",
                         columns=["Store product", "Cheap peroxide method", "~Yearly saving"], rows=6),

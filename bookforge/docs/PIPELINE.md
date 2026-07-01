@@ -124,7 +124,22 @@ Per chapter (parallelized in Celery, sequential in the CLI):
 
 Output: `Chapter(index, title, blocks=[ContentBlock(..., image_brief?, claims)])`.
 
+Practical guides use `content_guide.py` instead of the narrative edit chain.
+`content_guardrails.py` injects coherence rules (tip-count alignment with
+title/subtitle, spelling) and logs warnings when generated prose cites inflated
+totals (e.g. "800 ways" when the subtitle promises 250).
+
 ### Stage 3 — Images (`pipeline/images.py`)
+
+Configured via environment (see `.env.example`):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `IMAGE_PRIMARY_PROVIDER` | `gemini` | `gemini` (Imagen) or `openai` (gpt-image-1) |
+| `IMAGE_PRIMARY_MODEL` | `imagen-4.0-generate-001` | Model id for the chosen provider |
+| `IMAGE_ALLOW_PROVIDER_FALLBACK` | `false` | Fall back to OpenAI when Imagen fails |
+| `IMAGE_REJECT_TEXT_ARTIFACTS` | `true` | Vision scorer rejects garbled in-image text |
+| `IMAGE_CANDIDATES_PER_PAGE` | `2` | Candidates per image slot (guide + narrative) |
 
 For every `ContentBlock` carrying an `image_brief`:
 
@@ -133,19 +148,15 @@ For every `ContentBlock` carrying an `image_brief`:
     (camera/lens/light for photos; locked style for illustrations).
   - Folds `bible.art_style.negative_prompt` and `bible.voice.banned_patterns`
     into the negative.
-  - If `brief.needs_in_image_text` and `brief.caption` are set, injects a
-    literal-text directive ("Render the words ... clearly"). Otherwise
-    appends the hard `no text / no logos / no labels` clause that kills the
-    #1 AI-illustration tell.
-- Generate `image_candidates_per_page` candidates via the configured
-  provider (`gpt-image-1` or Imagen).
-- Vision-score each candidate (relevance 60% + aesthetic 40%); reject NSFW;
-  keep the highest-ranked even if minor artifacts (so a page is never
-  imageless over a strict score).
-- Right-size to the placed box at 300 DPI (per-aspect box dims so feature
-  band photos are not portrait-sized).
-- Apply filmic post-process (`postprocess.finish`): subtle grade + grain +
-  vignette for cohesive look across all generated art.
+  - If `brief.needs_in_image_text` and `brief.caption` are set **and**
+    `IMAGE_PRIMARY_PROVIDER=openai`, injects a literal-text directive.
+    With Imagen, text is rendered in HTML instead (no baked-in labels).
+  - Otherwise appends the hard `no text / no logos / no labels` clause.
+- Generate `IMAGE_CANDIDATES_PER_PAGE` candidates via the configured provider.
+- Vision-score each candidate (relevance 60% + aesthetic 40%); reject NSFW and
+  garbled text when `IMAGE_REJECT_TEXT_ARTIFACTS=true`.
+- Right-size to the placed box at 300 DPI.
+- Apply filmic post-process (`postprocess.finish`).
 
 Output: `list[GeneratedImage(block_ref, storage_key, w, h, score, flagged_for_review)]`.
 

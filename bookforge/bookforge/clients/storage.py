@@ -53,3 +53,10 @@ def local_path(key: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(get(key))
     return path
+
+
+def guides_out(name: str) -> Path:
+    """Absolute output dir for gen_guide PDFs/manifests (matches image storage root)."""
+    out = _LOCAL_ROOT / "guides" / name
+    out.mkdir(parents=True, exist_ok=True)
+    return out

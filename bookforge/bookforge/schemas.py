@@ -133,6 +133,7 @@ class BookBible(BaseModel):
     list_lead: str = ""
     pro_topic: str = ""
     specials: list[SpecialPlan] = Field(default_factory=list)
+    promised_uses: int | None = None  # marketing count from title/subtitle
 
     def specials_for(self, section_index: int) -> list[SpecialPlan]:
         return [s for s in self.specials if s.after_section == section_index]

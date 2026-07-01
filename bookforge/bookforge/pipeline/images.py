@@ -8,6 +8,7 @@ the best, then right-size to exactly the pixels the placed box needs at target D
 from __future__ import annotations
 
 import io
+from typing import Any
 
 import structlog
 from PIL import Image
@@ -27,8 +28,18 @@ log = structlog.get_logger(__name__)
 class _Score(BaseModel):
     relevance: float = 0.6  # 0-1: matches the brief/caption
     aesthetic: float = 0.6  # 0-1: composition, lighting, polish
-    has_artifacts: bool = False  # garbled text, extra fingers, melted shapes
+    has_artifacts: bool = False  # extra fingers, melted shapes
+    has_garbled_text: bool = False  # illegible words, signage, labels, watermarks
     nsfw: bool = False
+
+
+_VISION_PROMPT = """Score this image as a hero illustration for: '{brief}'.
+Be a harsh art director. Check for:
+- relevance to the brief and aesthetic quality
+- garbled or misspelled text, labels, signage, logos, or watermarks anywhere in the image
+- visual artifacts (melted shapes, extra limbs, obvious AI glitches)
+- NSFW content
+Set has_garbled_text=true if ANY unwanted or illegible text appears in the image."""
 
 
 def _sniff_media_type(data: bytes) -> str:
@@ -38,13 +49,12 @@ def _sniff_media_type(data: bytes) -> str:
         return "image/jpeg"
     if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
         return "image/webp"
-    return "image/png"  # gpt-image-1 default
+    return "image/png"
 
 
 def _score(image_bytes: bytes, brief_prompt: str) -> _Score:
     return llm.vision_json(
-        f"Score this image as a hero illustration for: '{brief_prompt}'. "
-        "Be a harsh art director.",
+        _VISION_PROMPT.format(brief=brief_prompt),
         image_bytes, _Score, media_type=_sniff_media_type(image_bytes),
     )
 
@@ -89,21 +99,27 @@ _NO_TEXT = ("absolutely no text, no words, no letters, no labels, no captions, "
 
 
 def _negation(bible) -> str:
-    """Fold the book's negative_prompt into the POSITIVE prompt. Imagen ignores a
-    separate negative_prompt param on the versions we use, so the only reliable
-    way to suppress (e.g.) insects/pests/clutter is to state the exclusion in the
-    main prompt — otherwise a strong subject cue ('Roach Prevention') wins."""
+    """Fold the book's negative_prompt into the POSITIVE prompt."""
     neg = (bible.art_style.negative_prompt or "").strip().rstrip(".")
     return f" Strictly exclude from the image: {neg}." if neg else ""
 
 
-def _build_prompt(brief, bible, *, placement: Placement | None = None) -> str:
-    """Wrap the subject in a research-backed art-direction recipe.
+def _baked_text_allowed(brief: Any) -> bool:
+    """Imagen cannot spell reliably — only OpenAI may bake text into pixels."""
+    if not getattr(brief, "needs_in_image_text", False):
+        return False
+    if settings.image_primary_provider.lower() != "openai":
+        log.warning(
+            "in_image_text_skipped",
+            reason="Imagen cannot render legible text; use HTML overlay instead",
+            caption=getattr(brief, "caption", ""),
+        )
+        return False
+    return bool(getattr(brief, "caption", ""))
 
-    photo: describe the *capture* (camera/lens/film/light) + food styling; keep it
-    ordinary and real — no 'beautiful/award-winning' booster words (refuted).
-    illustration: a single locked illustration style for cohesion across the set.
-    """
+
+def _build_prompt(brief, bible, *, placement: Placement | None = None) -> str:
+    """Wrap the subject in a research-backed art-direction recipe."""
     subject = brief.prompt.strip().rstrip(".")
     palette = bible.art_style.palette
     neg = _negation(bible)
@@ -112,7 +128,6 @@ def _build_prompt(brief, bible, *, placement: Placement | None = None) -> str:
         prompt = (f"{subject}. {style}, cohesive {palette} palette, textured paper feel, "
                   f"editorial spot illustration.")
     else:
-        # photoreal hero — generic, driven by the book's art style (any topic)
         style = bible.art_style.style_suffix or "bright clean editorial photography"
         prompt = (
             f"A high-quality, realistic photograph of {subject}. {style}. "
@@ -120,15 +135,13 @@ def _build_prompt(brief, bible, *, placement: Placement | None = None) -> str:
             f"background, {palette} color story, real textures, clean and uncluttered "
             f"composition, modern and professional, no people's faces."
         )
-    if brief.needs_in_image_text and brief.caption:
+    if _baked_text_allowed(brief):
         prompt = (f'Render the words "{brief.caption}" clearly and legibly in '
                   f"a single tasteful caption area. {prompt}")
     else:
         prompt = f"{prompt} {_NO_TEXT}."
     prompt = f"{prompt}{neg}"
     if placement == "divider":
-        # Right-strip panel: tall portrait, no text overlay — keep subject centered
-        # and fully inside the frame so cover-crop does not clip edges.
         prompt += (
             " Shot as a tall vertical portrait for a magazine right-panel strip. "
             "Place the main subject dead center with generous margin on all four sides; "
@@ -136,7 +149,6 @@ def _build_prompt(brief, bible, *, placement: Placement | None = None) -> str:
             "Even lighting from top to bottom; avoid wide panoramic shelf shots."
         )
     elif brief.aspect in ("full_bleed", "portrait"):
-        # Cover / full-bleed: calm lower third for title band overlay.
         prompt += (" Compose with the main subject in the upper two-thirds; "
                    "keep the lower third quiet and uncluttered (a calm dark "
                    "surface or shadow area) so an editorial title card can "
@@ -146,7 +158,7 @@ def _build_prompt(brief, bible, *, placement: Placement | None = None) -> str:
 
 
 def _negative_for(bible) -> str:
-    parts: list[str] = []
+    parts: list[str] = [_NO_TEXT]
     neg = (bible.art_style.negative_prompt or "").strip()
     if neg:
         parts.append(neg)
@@ -158,11 +170,59 @@ def _negative_for(bible) -> str:
 
 # Placed-box pixel targets per aspect at 300 DPI (rough page boxes).
 _ASPECT_BOX = {
-    "full_bleed": (1850, 2775),   # full page bleed
+    "full_bleed": (1850, 2775),
     "portrait":   (1600, 2200),
-    "wide":       (1850, 1400),   # feature band photo strip
+    "wide":       (1850, 1400),
     "square":     (1600, 1600),
 }
+
+
+def _generate_best(
+    prompt: str,
+    aspect: str,
+    bible: BookBible,
+    *,
+    brief_prompt: str = "",
+    in_image_text: bool = False,
+) -> tuple[bytes, float, bool] | None:
+    """Generate N candidates, vision-score, return (bytes, rank, flagged)."""
+    negative = _negative_for(bible)
+    subject = brief_prompt or prompt[:120]
+    best: tuple[float, bytes, bool] | None = None
+
+    for _ in range(max(1, settings.image_candidates_per_page)):
+        try:
+            cand = img_client.generate(
+                prompt, aspect=aspect,
+                in_image_text=in_image_text,
+                negative_prompt=negative,
+            )
+        except Exception as exc:
+            log.warning("image_gen_failed", err=str(exc)[:200])
+            continue
+        try:
+            s = _score(cand, subject)
+        except Exception as exc:
+            log.warning("image_score_failed", err=str(exc)[:200])
+            best = (0.5, cand, True)
+            continue
+        if s.nsfw:
+            continue
+        if s.has_garbled_text:
+            if settings.image_reject_text_artifacts:
+                log.info("image_rejected_garbled_text", brief=subject[:80])
+                continue
+        if settings.image_reject_text_artifacts and s.has_artifacts:
+            log.info("image_rejected_artifacts", brief=subject[:80])
+            continue
+        rank = 0.6 * s.relevance + 0.4 * s.aesthetic
+        flagged = rank < 0.6 or s.has_artifacts or s.has_garbled_text
+        if best is None or rank > best[0]:
+            best = (rank, cand, flagged)
+
+    if best is None:
+        return None
+    return best[1], best[0], best[2]
 
 
 def generate_image(
@@ -170,21 +230,38 @@ def generate_image(
     aspect: str,
     key: str,
     *,
+    bible: BookBible | None = None,
+    brief_prompt: str = "",
     placement: Placement | None = None,
 ) -> GeneratedImage | None:
-    """Generate ONE image (lean guide path), center-crop to slot, store, return."""
+    """Generate image(s), center-crop to slot, store, return."""
     page_w, page_h = settings.page_px
     box_w, box_h = image_slots.box_for_brief(aspect, placement=placement)
     box_w = min(box_w, page_w)
     box_h = min(box_h, page_h)
-    try:
-        raw = img_client.generate(prompt, aspect=aspect)
-    except Exception as exc:
-        log.warning("image_gen_failed", key=key, err=str(exc)[:200])
-        return None
+
+    if bible is not None:
+        result = _generate_best(
+            prompt, aspect, bible, brief_prompt=brief_prompt or prompt[:120],
+        )
+        if result is None:
+            log.warning("image_gen_failed", key=key)
+            return None
+        raw, score, flagged = result
+    else:
+        try:
+            raw = img_client.generate(prompt, aspect=aspect, negative_prompt=_NO_TEXT)
+            score, flagged = 0.9, False
+        except Exception as exc:
+            log.warning("image_gen_failed", key=key, err=str(exc)[:200])
+            return None
+
     sized, w, h = _crop_to_box(raw, box_w, box_h)
     storage.put(key, sized, "image/jpeg")
-    return GeneratedImage(block_ref=key, storage_key=key, width=w, height=h, score=0.9)
+    return GeneratedImage(
+        block_ref=key, storage_key=key, width=w, height=h,
+        score=score, flagged_for_review=flagged,
+    )
 
 
 def generate_for_brief(
@@ -194,10 +271,13 @@ def generate_for_brief(
     *,
     placement: Placement | None = None,
 ) -> GeneratedImage | None:
-    """Lean single-image generation for a content block's image_brief."""
+    """Single-image generation for a content block's image_brief."""
     gi = generate_image(
         _build_prompt(brief, bible, placement=placement),
-        brief.aspect, key, placement=placement,
+        brief.aspect, key,
+        bible=bible,
+        brief_prompt=brief.prompt,
+        placement=placement,
     )
     if gi:
         gi.block_ref = key
@@ -210,13 +290,13 @@ def generate_cover(subject: str, bible: BookBible, key: str) -> GeneratedImage |
     prompt = (f"A high-quality, realistic photograph for a book cover background: "
               f"{subject}. {style}. Soft daylight, {bible.art_style.palette} color story, "
               f"clean composition with empty space for a title, modern and inviting. {_NO_TEXT}.")
-    return generate_image(prompt, "wide", key, placement="cover")
+    return generate_image(prompt, "wide", key, bible=bible, brief_prompt=subject,
+                          placement="cover")
 
 
 def generate_for_chapter(chapter: Chapter, bible: BookBible) -> list[GeneratedImage]:
     out: list[GeneratedImage] = []
-    page_w, page_h = settings.page_px  # full-bleed fallback at 300 DPI
-    negative = _negative_for(bible)
+    page_w, page_h = settings.page_px
 
     for bi, block in enumerate(chapter.blocks):
         if not block.image_brief:
@@ -225,44 +305,23 @@ def generate_for_chapter(chapter: Chapter, bible: BookBible) -> list[GeneratedIm
         prompt = _build_prompt(brief, bible)
         box_w, box_h = _ASPECT_BOX.get(brief.aspect, (page_w, page_h))
 
-        # Generate candidates, hard-reject only NSFW; among the rest keep the
-        # highest-ranked even if the scorer flags minor artifacts (so a page is
-        # never left imageless over a strict score). Low scores -> review flag.
-        best: tuple[float, bytes, bool] | None = None  # (rank, bytes, artifacts)
-        for _ in range(max(1, settings.image_candidates_per_page)):
-            try:
-                cand = img_client.generate(
-                    prompt, aspect=brief.aspect,
-                    in_image_text=brief.needs_in_image_text,
-                    negative_prompt=negative,
-                )
-            except Exception as exc:
-                log.warning("image_gen_failed", err=str(exc)[:200])
-                continue
-            try:
-                s = _score(cand, brief.prompt)
-            except Exception as exc:
-                log.warning("image_score_failed", err=str(exc)[:200])
-                # scoring is non-critical — keep the image, flag for review
-                best = (0.5, cand, True)
-                continue
-            if s.nsfw:
-                continue
-            rank = 0.6 * s.relevance + 0.4 * s.aesthetic
-            if best is None or rank > best[0]:
-                best = (rank, cand, s.has_artifacts)
-
-        if best is None:
+        result = _generate_best(
+            prompt, brief.aspect, bible,
+            brief_prompt=brief.prompt,
+            in_image_text=brief.needs_in_image_text,
+        )
+        if result is None:
             log.warning("no_usable_image", chapter=chapter.index, block=bi)
             continue
 
-        sized, w, h = _rightsize(best[1], box_w, box_h)
+        raw, score, flagged = result
+        sized, w, h = _rightsize(raw, box_w, box_h)
         key = f"books/{bible.title[:32]}/ch{chapter.index}_b{bi}.jpg".replace(" ", "_")
         storage.put(key, sized, "image/jpeg")
         out.append(GeneratedImage(
             block_ref=f"{chapter.index}.{bi}", storage_key=key,
-            width=w, height=h, score=best[0],
-            flagged_for_review=best[0] < 0.6 or best[2],
+            width=w, height=h, score=score,
+            flagged_for_review=flagged,
         ))
     log.info("images_done", chapter=chapter.index, count=len(out))
     return out

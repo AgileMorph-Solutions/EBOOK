@@ -11,15 +11,17 @@ from pathlib import Path
 import structlog
 
 from bookforge import books, safety
+from bookforge.clients import storage
 from bookforge.cost import budget
 from bookforge.layout import guide, render
-from bookforge.pipeline import content_guide, guide_images
+from bookforge.pipeline import content_guide, content_guardrails, guide_images
 from bookforge.schemas import Chapter, GeneratedImage
 
 log = structlog.get_logger(__name__)
 
 
 def _save_manifest(manifest: Path, chapters, images, cover_key, pro, total_uses) -> None:
+    manifest.parent.mkdir(parents=True, exist_ok=True)
     manifest.write_text(json.dumps({
         "chapters": [c.model_dump() for c in chapters],
         "images": [i.model_dump() for i in images],
@@ -48,6 +50,8 @@ def _generate(book, bible, name, limit_sections, with_images, with_pro):
                     sp.heading, sp.about, sp.items, bible))
         chapters.append(ch)
     total_uses = n - 1
+    for issue in content_guardrails.scan_chapters_for_count_drift(chapters, bible):
+        log.warning("count_drift", issue=issue)
     log.info("content_done", sections=len(chapters), uses=total_uses,
              spent=round(budget.spent, 2))
 
@@ -67,13 +71,13 @@ def run_practical_book(
     limit_sections: int | None = None,
     with_images: bool = True,
     with_pro: bool = True,
-    out_dir: str | Path = "artifacts/guides",
+    out_dir: str | Path | None = None,
     render_pngs: bool = False,
     reuse: bool = False,
 ) -> dict:
     book = books.load(name)
     bible = book.bible
-    out = Path(out_dir) / name
+    out = storage.guides_out(name) if out_dir is None else Path(out_dir) / name
     out.mkdir(parents=True, exist_ok=True)
     manifest = out / "manifest.json"
 

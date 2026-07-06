@@ -35,7 +35,7 @@ boto3>=1.34
 
 # --- Auth ---
 python-jose[cryptography]>=3.3
-passlib[bcrypt]>=1.7
+bcrypt>=4.0
 
 # --- Imaging / PDF ---
 Pillow>=10.3

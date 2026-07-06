@@ -14,7 +14,54 @@ import { Button } from "@/components/ui/Button";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { Skeleton } from "@/components/ui/Spinner";
 import { Icon } from "@/components/ui/Icon";
-import { deleteBook, type BookStatus } from "@/lib/api";
+import { deleteBook, type BookStatus, type ErrorKind } from "@/lib/api";
+
+const FAILURE_TITLES: Record<ErrorKind, string> = {
+  quota_llm: "Out of LLM credits",
+  quota_images: "Image generation quota exhausted",
+  rate_limit: "Rate limited by upstream provider",
+  auth: "Provider authentication failed",
+  network: "Network error reaching an upstream service",
+  unknown: "Generation failed",
+};
+
+function FailureAlert({
+  kind,
+  message,
+  detail,
+}: {
+  kind?: ErrorKind;
+  message?: string;
+  detail?: string;
+}) {
+  const [showDetail, setShowDetail] = useState(false);
+  const k: ErrorKind = kind ?? "unknown";
+  const title = FAILURE_TITLES[k];
+  return (
+    <Alert variant="error">
+      <p className="font-medium">{title}</p>
+      <p className="mt-2 font-body text-body-sm">
+        {message ?? "Something went wrong during pipeline execution."}
+      </p>
+      {detail && detail !== message && (
+        <div className="mt-3">
+          <button
+            type="button"
+            onClick={() => setShowDetail((v) => !v)}
+            className="font-label text-label-sm text-secondary underline"
+          >
+            {showDetail ? "Hide technical details" : "Show technical details"}
+          </button>
+          {showDetail && (
+            <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap rounded bg-surface-container-highest p-3 font-body text-body-sm text-secondary">
+              {detail}
+            </pre>
+          )}
+        </div>
+      )}
+    </Alert>
+  );
+}
 import { formatBookDate, shortBookId } from "@/lib/config";
 
 function formatElapsed(startIso?: string) {
@@ -140,12 +187,11 @@ export function BookStatusPanel({
 
       {book?.status === "failed" && (
         <div className="md:col-span-12">
-          <Alert variant="error">
-            <p className="font-medium">Generation failed</p>
-            <pre className="mt-2 whitespace-pre-wrap font-body text-body-sm">
-              {book.error}
-            </pre>
-          </Alert>
+          <FailureAlert
+            kind={book.error_kind}
+            message={book.error}
+            detail={book.error_detail}
+          />
           <Link href="/" className="mt-6 inline-block">
             <Button variant="outline" type="button">
               Create new book

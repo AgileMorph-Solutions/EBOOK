@@ -37,6 +37,7 @@ from bookforge.api.auth import (
     require_admin,
     verify_password,
 )
+from bookforge.api.error_kinds import classify as classify_pipeline_error
 from bookforge.clients import storage
 from bookforge.config import get_settings
 from bookforge.db import get_db
@@ -403,6 +404,19 @@ async def create_book_upload(
     )
 
 
+def _reclassify_legacy_error(state: dict[str, Any]) -> dict[str, Any]:
+    """Older failed jobs stored only the raw `error` string. Re-classify on read
+    so the UI shows the same friendly message without needing to re-run them."""
+    if state.get("status") != "failed" or state.get("error_kind"):
+        return state
+    raw = state.get("error") or ""
+    if not raw:
+        return state
+    classified = classify_pipeline_error(Exception(raw))
+    return {**state, "error": classified.message, "error_kind": classified.kind,
+            "error_detail": classified.detail or raw}
+
+
 @app.get("/books/{book_id}")
 def get_book(
     book_id: str,
@@ -414,7 +428,7 @@ def get_book(
     state = _read_state(book_id)
     if state is None:
         raise HTTPException(status_code=404, detail="book not found")
-    return {"book_id": book_id, **state}
+    return {"book_id": book_id, **_reclassify_legacy_error(state)}
 
 
 @app.get("/books/{book_id}/download")
@@ -492,4 +506,11 @@ def _run_pipeline(book_id: str, req: CreateBook) -> None:
             _set_state(book_id, status="done", artifact=artifact.model_dump())
         except Exception as exc:
             log.exception("pipeline_failed", book_id=book_id)
-            _set_state(book_id, status="failed", error=str(exc))
+            classified = classify_pipeline_error(exc)
+            _set_state(
+                book_id,
+                status="failed",
+                error=classified.message,
+                error_kind=classified.kind,
+                error_detail=classified.detail,
+            )

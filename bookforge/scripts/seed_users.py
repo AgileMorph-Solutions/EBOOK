@@ -26,7 +26,7 @@ DEFAULT_USER_EMAIL = "user@bookforge.local"
 DEFAULT_ADMIN_PASSWORD = "admin-dev-password"
 DEFAULT_USER_PASSWORD = "user-dev-password"
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[1]
 ARTIFACTS_ROOT = Path(os.environ.get("BOOKFORGE_LOCAL_STORE", REPO_ROOT / "artifacts")).resolve()
 
 

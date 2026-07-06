@@ -57,6 +57,14 @@ export type BookArtifact = {
   qa?: QAResult | null;
 };
 
+export type ErrorKind =
+  | "quota_llm"
+  | "quota_images"
+  | "rate_limit"
+  | "auth"
+  | "network"
+  | "unknown";
+
 export type BookStatus = {
   book_id: string;
   status: "queued" | "running" | "done" | "failed";
@@ -71,6 +79,8 @@ export type BookStatus = {
   stage?: string;
   artifact?: BookArtifact;
   error?: string;
+  error_kind?: ErrorKind;
+  error_detail?: string;
 };
 
 export type BookSummary = {

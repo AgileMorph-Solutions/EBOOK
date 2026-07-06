@@ -80,11 +80,52 @@ curl -X POST localhost:8000/books -H 'content-type: application/json' \
   -d '{"topic":"Forgotten British Meals","text":"...","chapter_limit":1}'
 ```
 
+## Authentication
+
+The API is gated by JWT auth (self-hosted; `python-jose` + bcrypt), and every
+`/books*` endpoint is scoped to the authenticated user. Users with
+`is_admin=true` see all books.
+
+**One-time setup** (from `bookforge/`):
+
+```bash
+docker compose -f infra/docker-compose.yml up -d postgres redis
+alembic upgrade head
+python -m scripts.seed_users
+```
+
+Seeds two dev accounts (rotate before non-local use):
+
+| Role  | Email                     | Password              |
+|-------|---------------------------|-----------------------|
+| admin | `admin@bookforge.local`   | `admin-dev-password`  |
+| user  | `user@bookforge.local`    | `user-dev-password`   |
+
+Override with `--admin-email`, `--admin-password`, `--user-email`,
+`--user-password`, or via `SEED_ADMIN_PASSWORD` / `SEED_USER_PASSWORD`.
+Legacy books (created pre-auth) are backfilled to the admin.
+
+**Auth endpoints:**
+- `POST /auth/login` `{email, password}` → `{access_token}`
+- `GET /auth/me` (bearer) → current user
+- `POST /auth/register` (admin-only) → create a new user
+
+```bash
+TOKEN=$(curl -s -X POST localhost:8010/auth/login \
+  -H 'content-type: application/json' \
+  -d '{"email":"user@bookforge.local","password":"user-dev-password"}' | jq -r .access_token)
+
+curl -H "Authorization: Bearer $TOKEN" localhost:8010/books
+```
+
+Set `AUTH_ENABLED=false` in `.env` to disable auth (CLI spike / local debug).
+
 ## 🔴 Security
 
 The API keys pasted during setup are **compromised** — revoke them and put
 **rotated** keys in `.env` (gitignored). Never commit `.env` or paste keys into
-chat. All services read secrets from env only.
+chat. All services read secrets from env only. `JWT_SECRET` **must** be rotated
+to a long random string before any deployment.
 
 ## Accuracy guarantee
 

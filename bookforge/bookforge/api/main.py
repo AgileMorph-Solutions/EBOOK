@@ -24,13 +24,23 @@ from threading import BoundedSemaphore, Lock
 from typing import Any, Literal
 
 import structlog
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, field_validator, model_validator
+from sqlalchemy.orm import Session
 
+from bookforge.api.auth import (
+    create_access_token,
+    get_current_user,
+    hash_password,
+    require_admin,
+    verify_password,
+)
 from bookforge.clients import storage
 from bookforge.config import get_settings
+from bookforge.db import get_db
+from bookforge.models import BookRecord, User
 
 log = structlog.get_logger(__name__)
 
@@ -127,18 +137,23 @@ def _make_book_id(topic: str) -> str:
     return f"{slug}-{uuid.uuid4().hex[:6]}"
 
 
-def _list_jobs() -> list[dict[str, Any]]:
-    """Scan artifact dirs for status.json files, newest first."""
+def _list_jobs(allowed_ids: set[str] | None = None) -> list[dict[str, Any]]:
+    """Scan artifact dirs for status.json files, newest first.
+
+    If ``allowed_ids`` is provided, restrict the listing to those book_ids.
+    """
     books_dir = _ARTIFACTS / "books"
     if not books_dir.is_dir():
         return []
     jobs: list[dict[str, Any]] = []
     for path in books_dir.glob("*/status.json"):
+        book_id = path.parent.name
+        if allowed_ids is not None and book_id not in allowed_ids:
+            continue
         try:
             state = json.loads(path.read_text())
         except Exception:
             continue
-        book_id = path.parent.name
         jobs.append({
             "book_id": book_id,
             "topic": state.get("topic", ""),
@@ -150,6 +165,22 @@ def _list_jobs() -> list[dict[str, Any]]:
         })
     jobs.sort(key=lambda j: j.get("created_at") or "", reverse=True)
     return jobs
+
+
+def _assert_can_access(db: Session, user: User, book_id: str) -> BookRecord | None:
+    """Return the BookRecord if the user may access it, else raise.
+
+    A missing record is treated as legacy — allowed only for admins so we don't
+    accidentally leak books that pre-date auth.
+    """
+    record = db.get(BookRecord, book_id)
+    if record is None:
+        if not user.is_admin:
+            raise HTTPException(status_code=404, detail="book not found")
+        return None
+    if record.user_id != user.id and not user.is_admin:
+        raise HTTPException(status_code=403, detail="forbidden")
+    return record
 
 
 # --------------------------------------------------------------------------- #
@@ -172,9 +203,62 @@ class CreateBook(BaseModel):
         return self
 
 
+def _normalize_email(value: str) -> str:
+    v = (value or "").strip().lower()
+    # Lightweight check — full RFC validation would reject dev-only TLDs like `.local`.
+    if "@" not in v or v.startswith("@") or v.endswith("@") or " " in v:
+        raise ValueError("must be a valid email address")
+    return v
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+    @field_validator("email")
+    @classmethod
+    def _v_email(cls, v: str) -> str:
+        return _normalize_email(v)
+
+
+class RegisterRequest(BaseModel):
+    email: str
+    password: str
+    is_admin: bool = False
+
+    @field_validator("email")
+    @classmethod
+    def _v_email(cls, v: str) -> str:
+        return _normalize_email(v)
+
+    @field_validator("password")
+    @classmethod
+    def _v_password(cls, v: str) -> str:
+        if len(v) < 8:
+            raise ValueError("must be at least 8 characters")
+        return v
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+
+class UserOut(BaseModel):
+    id: str
+    email: str
+    is_admin: bool
+
+    @classmethod
+    def from_user(cls, user: User) -> "UserOut":
+        return cls(id=str(user.id), email=user.email, is_admin=user.is_admin)
+
+
 def _enqueue_book(
     req: CreateBook,
     background_tasks: BackgroundTasks,
+    user: User,
+    db: Session,
     *,
     source_filename: str | None = None,
 ) -> dict[str, str]:
@@ -188,10 +272,17 @@ def _enqueue_book(
         "section_limit": req.section_limit,
         "book_kind": req.book_kind,
         "source_type": "youtube" if req.youtube_url else "text",
+        "owner_id": str(user.id),
     }
     if source_filename:
         state["source_filename"] = source_filename
     _set_state(book_id, **state)
+
+    # Persist ownership (skipped for the anonymous admin used when AUTH_ENABLED=false).
+    if get_settings().auth_enabled:
+        db.add(BookRecord(book_id=book_id, user_id=user.id, topic=req.topic))
+        db.commit()
+
     background_tasks.add_task(_run_pipeline, book_id, req)
     return {"book_id": book_id, "status": "queued"}
 
@@ -214,19 +305,55 @@ def health():
     }
 
 
+@app.post("/auth/login", response_model=TokenResponse)
+def login(req: LoginRequest, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.email == req.email).one_or_none()
+    if user is None or not user.is_active or not verify_password(req.password, user.hashed_password):
+        raise HTTPException(status_code=401, detail="invalid credentials")
+    return TokenResponse(access_token=create_access_token(user))
+
+
+@app.post("/auth/register", response_model=UserOut, status_code=201)
+def register(
+    req: RegisterRequest,
+    db: Session = Depends(get_db),
+    _admin: User = Depends(require_admin),
+):
+    """Admin-only: create a new user."""
+    if db.query(User).filter(User.email == req.email).one_or_none():
+        raise HTTPException(status_code=409, detail="email already registered")
+    user = User(email=req.email, hashed_password=hash_password(req.password), is_admin=req.is_admin)
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return UserOut.from_user(user)
+
+
+@app.get("/auth/me", response_model=UserOut)
+def me(user: User = Depends(get_current_user)):
+    return UserOut.from_user(user)
+
+
 @app.get("/books")
-def list_books():
-    """Recent book jobs, newest first."""
-    return {"books": _list_jobs()}
+def list_books(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Recent book jobs, newest first (filtered to the current user unless admin)."""
+    if user.is_admin:
+        return {"books": _list_jobs()}
+    if not get_settings().auth_enabled:
+        return {"books": _list_jobs()}
+    owned = {r.book_id for r in db.query(BookRecord.book_id).filter(BookRecord.user_id == user.id)}
+    return {"books": _list_jobs(allowed_ids=owned)}
 
 
 @app.post("/books", status_code=202)
-def create_book(req: CreateBook, background_tasks: BackgroundTasks):
-    """Submit a book job. Returns immediately with a readable book_id.
-
-    Poll GET /books/{book_id} for progress, then GET /books/{book_id}/download.
-    """
-    return _enqueue_book(req, background_tasks)
+def create_book(
+    req: CreateBook,
+    background_tasks: BackgroundTasks,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Submit a book job. Returns immediately with a readable book_id."""
+    return _enqueue_book(req, background_tasks, user, db)
 
 
 @app.post("/books/upload", status_code=202)
@@ -238,6 +365,8 @@ async def create_book_upload(
     chapter_limit: int | None = Form(None),
     section_limit: int | None = Form(None),
     book_kind: Literal["practical_guide", "narrative"] = Form("practical_guide"),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     """Submit a book job via multipart file upload."""
     if not topic.strip():
@@ -268,13 +397,20 @@ async def create_book_upload(
     return _enqueue_book(
         req,
         background_tasks,
+        user,
+        db,
         source_filename=file.filename or "upload.txt",
     )
 
 
 @app.get("/books/{book_id}")
-def get_book(book_id: str):
+def get_book(
+    book_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """Current job status and, when done, artifact metadata."""
+    _assert_can_access(db, user, book_id)
     state = _read_state(book_id)
     if state is None:
         raise HTTPException(status_code=404, detail="book not found")
@@ -282,8 +418,13 @@ def get_book(book_id: str):
 
 
 @app.get("/books/{book_id}/download")
-def download(book_id: str):
+def download(
+    book_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """Download the finished PDF. Returns 409 if the job isn't done yet."""
+    _assert_can_access(db, user, book_id)
     state = _read_state(book_id)
     if state is None:
         raise HTTPException(status_code=404, detail="book not found")
@@ -304,13 +445,21 @@ def download(book_id: str):
 
 
 @app.delete("/books/{book_id}", status_code=204)
-def delete_book(book_id: str):
+def delete_book(
+    book_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """Archive (delete) a job and its artifacts. 404 if it never existed."""
-    if _read_state(book_id) is None:
+    record = _assert_can_access(db, user, book_id)
+    if _read_state(book_id) is None and record is None:
         raise HTTPException(status_code=404, detail="book not found")
     book_dir = _ARTIFACTS / "books" / book_id
     if book_dir.is_dir():
         shutil.rmtree(book_dir, ignore_errors=True)
+    if record is not None:
+        db.delete(record)
+        db.commit()
     log.info("book_deleted", book_id=book_id)
     return Response(status_code=204)
 

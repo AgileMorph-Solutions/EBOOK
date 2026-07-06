@@ -1,5 +1,10 @@
 # BookForge full stack — `docker compose -f infra/docker-compose.yml up`
 # Secrets come from ../.env (never baked into images). GPU not required.
+#
+# Dev hot-reload:
+#   - api:     source is bind-mounted, uvicorn runs with --reload → picks up .py changes
+#   - worker/beat: source bind-mounted; celery has no auto-reload → `docker compose restart worker`
+#   - ui:      runs `next dev` against the bind-mounted source → HMR in browser
 name: bookforge
 
 x-python-env: &python-env
@@ -8,18 +13,30 @@ x-python-env: &python-env
     BOOKFORGE_USE_S3: "0"
     RENDER_URL: "http://render:4000"
     BOOKFORGE_LOCAL_STORE: "/home/forge/artifacts"
-    CORS_ORIGINS: "http://localhost:3000,http://127.0.0.1:3000"
+    CORS_ORIGINS: "http://localhost:3010,http://127.0.0.1:3010"
+    PYTHONDONTWRITEBYTECODE: "1"
   depends_on:
     redis: { condition: service_healthy }
     postgres: { condition: service_healthy }
 
+# Shared bind mounts for the Python services so edits on the host propagate live.
+# The `bookforge` package is what uvicorn/celery actually import; `scripts`,
+# `alembic*`, and `requirements.txt` are mounted so `docker compose exec` can run
+# migrations / seed scripts against the same tree without rebuilding the image.
+x-python-src: &python-src
+  - ../bookforge:/app/bookforge
+  - ../scripts:/app/scripts
+  - ../alembic:/app/alembic
+  - ../alembic.ini:/app/alembic.ini
+  - artifacts:/home/forge/artifacts
+
 services:
   api:
     build: { context: .., dockerfile: infra/Dockerfile.python }
-    command: uvicorn bookforge.api.main:app --host 0.0.0.0 --port 8000
+    command: uvicorn bookforge.api.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir /app/bookforge
     <<: *python-env
-    ports: ["8000:8000"]
-    volumes: ["artifacts:/home/forge/artifacts"]
+    ports: ["8010:8000"]
+    volumes: *python-src
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 10s
@@ -30,17 +47,21 @@ services:
     build: { context: .., dockerfile: infra/Dockerfile.python }
     command: celery -A bookforge.workflow.celery_app worker -Q content,images,celery -l info --concurrency 4
     <<: *python-env
-    volumes: ["artifacts:/home/forge/artifacts"]
+    volumes: *python-src
     deploy: { replicas: 2 }
 
   beat:
     build: { context: .., dockerfile: infra/Dockerfile.python }
     command: celery -A bookforge.workflow.celery_app beat -l info
     <<: *python-env
+    volumes: *python-src
 
   render:
     build: { context: ../render, dockerfile: ../infra/Dockerfile.render }
-    ports: ["4000:4000"]
+    ports: ["4010:4000"]
+    volumes:
+      - ../render:/app
+      - /app/node_modules
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:4000/health').then(()=>process.exit(0)).catch(()=>process.exit(1))"]
       interval: 10s
@@ -48,15 +69,22 @@ services:
       retries: 5
 
   ui:
-    build:
-      context: ../app
-      dockerfile: ../infra/Dockerfile.ui
-      args:
-        NEXT_PUBLIC_API_URL: "http://localhost:8000"
+    # Run `next dev` directly against the bind-mounted source for HMR.
+    # Uses the plain node image so we don't need a dev-specific Dockerfile stage.
+    image: node:20-slim
+    working_dir: /app
+    command: sh -c "npm install && npm run dev -- --hostname 0.0.0.0 --port 3000"
     environment:
-      NEXT_PUBLIC_API_URL: "http://localhost:8000"
-      API_URL: "http://localhost:8000"
-    ports: ["3000:3000"]
+      NEXT_PUBLIC_API_URL: "http://localhost:8010"
+      API_URL: "http://localhost:8010"
+      NEXT_TELEMETRY_DISABLED: "1"
+      NODE_ENV: "development"
+    ports: ["3010:3000"]
+    volumes:
+      - ../app:/app
+      # Anonymous volumes shield container-installed deps/build cache from the host mount.
+      - /app/node_modules
+      - /app/.next
     depends_on:
       api: { condition: service_healthy }
 

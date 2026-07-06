@@ -63,6 +63,12 @@ class Settings(BaseSettings):
     bleed_in: float = Field(0.125, alias="BLEED_IN")
     target_dpi: int = Field(300, alias="TARGET_DPI")
 
+    # --- Auth ---
+    auth_enabled: bool = Field(True, alias="AUTH_ENABLED")
+    jwt_secret: str = Field("change-me", alias="JWT_SECRET")
+    jwt_algorithm: str = Field("HS256", alias="JWT_ALGORITHM")
+    jwt_expires_min: int = Field(60 * 24, alias="JWT_EXPIRES_MIN")
+
     # --- Observability ---
     langfuse_public_key: str = Field("", alias="LANGFUSE_PUBLIC_KEY")
     langfuse_secret_key: str = Field("", alias="LANGFUSE_SECRET_KEY")

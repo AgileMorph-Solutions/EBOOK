@@ -84,6 +84,18 @@ export type BookSummary = {
 };
 
 import { formatApiError } from "./errors";
+import { clearAuth, getToken, redirectToLogin } from "./auth";
+
+function withAuth(headers: Record<string, string>): Record<string, string> {
+  const token = getToken();
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  return headers;
+}
+
+function handleUnauthorized(): void {
+  clearAuth();
+  redirectToLogin();
+}
 
 async function apiFetch<T>(
   path: string,
@@ -100,8 +112,12 @@ async function apiFetch<T>(
 
   const res = await fetch(`${apiUrl}${path}`, {
     ...init,
-    headers,
+    headers: withAuth(headers),
   });
+
+  if (res.status === 401) {
+    handleUnauthorized();
+  }
 
   if (!res.ok) {
     let detail: unknown = res.statusText;
@@ -114,6 +130,19 @@ async function apiFetch<T>(
     throw new Error(formatApiError(detail));
   }
   return res.json() as Promise<T>;
+}
+
+export type LoginResponse = { access_token: string; token_type: string };
+
+export async function login(email: string, password: string): Promise<LoginResponse> {
+  return apiFetch<LoginResponse>("/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ email, password }),
+  });
+}
+
+export async function fetchMe(): Promise<{ id: string; email: string; is_admin: boolean }> {
+  return apiFetch("/auth/me");
 }
 
 export async function checkHealth(): Promise<boolean> {
@@ -137,7 +166,10 @@ export async function downloadBookPdf(
   filename: string
 ): Promise<void> {
   const apiUrl = await getApiUrl();
-  const res = await fetch(`${apiUrl}/books/${bookId}/download`);
+  const res = await fetch(`${apiUrl}/books/${bookId}/download`, {
+    headers: withAuth({}),
+  });
+  if (res.status === 401) handleUnauthorized();
   if (!res.ok) {
     let detail: unknown = res.statusText;
     try {
@@ -192,7 +224,11 @@ export async function listBooks(): Promise<BookSummary[]> {
 
 export async function deleteBook(bookId: string): Promise<void> {
   const apiUrl = await getApiUrl();
-  const res = await fetch(`${apiUrl}/books/${bookId}`, { method: "DELETE" });
+  const res = await fetch(`${apiUrl}/books/${bookId}`, {
+    method: "DELETE",
+    headers: withAuth({}),
+  });
+  if (res.status === 401) handleUnauthorized();
   if (!res.ok && res.status !== 404) {
     throw new Error(formatApiError(res.statusText));
   }

@@ -1,10 +1,11 @@
-"""Safety canon for the practical home guides.
+"""LEGACY safety canon — pre-profile books only.
 
-A single source of truth for the safety facts that MUST be honored by both the
-content prompts (so the model writes safe instructions) and the QA gate (so a
-dangerous instruction is caught before a PDF is ever produced). These are
-written for a senior audience and reflect mainstream poison-control / EPA / CDC
-guidance for ordinary household products.
+New books carry an LLM-generated, topic-specific safety brief on their
+EditorialProfile (safety_rules / safety_cards / danger_patterns), planned by
+the strongest model per book — no static per-domain canon can anticipate the
+next topic. This module remains ONLY so old bibles/manifests (whose safety_key
+is "hp"/"pest"/"general") keep rendering and QA-scanning exactly as they did.
+Do not add new domains here; extend the profile planning prompt instead.
 """
 from __future__ import annotations
 
@@ -68,8 +69,9 @@ PEST_NEVER_MIX = [
      "calling for help."),
 ]
 
-# Deterministic danger checks the QA gate scans for (lowercased substrings that,
-# co-occurring within one entry/block, indicate an unsafe instruction).
+# Deterministic danger checks the QA gate scans for on LEGACY books
+# (lowercased substrings that, co-occurring within one entry/block, indicate an
+# unsafe instruction). New books carry LLM-generated profile.danger_patterns.
 DANGER_PATTERNS = [
     ("hydrogen peroxide", "vinegar", "closed"),
     ("hydrogen peroxide", "vinegar", "sealed"),
@@ -84,7 +86,8 @@ DANGER_PATTERNS = [
 
 
 def rules_for(book_kind_key: str) -> str:
-    """Return the safety rule block to inject into content prompts."""
+    """LEGACY: safety rule block for pre-profile books (safety_key hp/pest/
+    general). New books inject profile.safety_rules instead."""
     if book_kind_key == "pest":
         return HP_RULES + "\n\n" + PEST_RULES
     if book_kind_key == "hp":
@@ -113,8 +116,33 @@ GENERAL_NEVER_MIX = [
 
 
 def never_mix_for(safety_key: str) -> list[tuple[str, str]]:
+    """LEGACY: safety-page card pairs for pre-profile books. New books render
+    profile.safety_cards instead."""
     if safety_key == "pest":
         return PEST_NEVER_MIX
     if safety_key == "hp":
         return HP_NEVER_MIX
     return GENERAL_NEVER_MIX
+
+
+# --------------------------------------------------------------------------- #
+# Bible-aware accessors — the ONLY entry points the pipeline should use.
+# Profile-carrying books get their LLM-generated, topic-specific safety brief;
+# legacy books (profile=None) fall back to the static canon above.
+# --------------------------------------------------------------------------- #
+def rules_for_bible(bible) -> str:
+    if bible.profile is not None:
+        return bible.profile.safety_rules or ""
+    return rules_for(bible.safety_key)
+
+
+def cards_for_bible(bible) -> list[tuple[str, str]]:
+    if bible.profile is not None:
+        return [(c.pair, c.why) for c in bible.profile.safety_cards]
+    return never_mix_for(bible.safety_key)
+
+
+def danger_patterns_for_bible(bible) -> list[tuple]:
+    if bible.profile is not None:
+        return [tuple(p) for p in bible.profile.danger_patterns if p]
+    return [tuple(p) for p in DANGER_PATTERNS]

@@ -57,17 +57,9 @@ export type BookArtifact = {
   qa?: QAResult | null;
 };
 
-export type ErrorKind =
-  | "quota_llm"
-  | "quota_images"
-  | "rate_limit"
-  | "auth"
-  | "network"
-  | "unknown";
-
 export type BookStatus = {
   book_id: string;
-  status: "queued" | "running" | "done" | "failed";
+  status: "queued" | "running" | "waiting" | "done" | "failed";
   topic?: string;
   created_at?: string;
   target_pages?: number;
@@ -77,13 +69,17 @@ export type BookStatus = {
   source_type?: string;
   source_filename?: string;
   stage?: string;
+  progress?: number;
+  eta_seconds?: number;
+  elapsed_seconds?: number;
+  stage_index?: number;
+  stage_total?: number;
   artifact?: BookArtifact;
   error?: string;
-  error_kind?: ErrorKind;
-  error_detail?: string;
-  failed_stage?: string;
-  retry_count?: number;
-  last_retry_at?: string;
+  next_retry_at?: string;
+  attempts?: number;
+  wait_reason?: string;
+  unfunded?: boolean;
 };
 
 export type BookSummary = {
@@ -93,23 +89,10 @@ export type BookSummary = {
   created_at: string;
   target_pages?: number;
   chapter_limit?: number | null;
-  section_limit?: number | null;
   book_kind?: BookKind;
 };
 
 import { formatApiError } from "./errors";
-import { clearAuth, getToken, redirectToLogin } from "./auth";
-
-function withAuth(headers: Record<string, string>): Record<string, string> {
-  const token = getToken();
-  if (token) headers["Authorization"] = `Bearer ${token}`;
-  return headers;
-}
-
-function handleUnauthorized(): void {
-  clearAuth();
-  redirectToLogin();
-}
 
 async function apiFetch<T>(
   path: string,
@@ -126,12 +109,8 @@ async function apiFetch<T>(
 
   const res = await fetch(`${apiUrl}${path}`, {
     ...init,
-    headers: withAuth(headers),
+    headers,
   });
-
-  if (res.status === 401) {
-    handleUnauthorized();
-  }
 
   if (!res.ok) {
     let detail: unknown = res.statusText;
@@ -146,29 +125,37 @@ async function apiFetch<T>(
   return res.json() as Promise<T>;
 }
 
-export type LoginResponse = { access_token: string; token_type: string };
+export type HealthInfo = {
+  ok: boolean;
+  providerOk: boolean | null; // can we actually call the AI? null = no key
+  unfunded: boolean; // AI credit balance too low
+  detail?: string;
+};
 
-export async function login(email: string, password: string): Promise<LoginResponse> {
-  return apiFetch<LoginResponse>("/auth/login", {
-    method: "POST",
-    body: JSON.stringify({ email, password }),
-  });
-}
-
-export async function fetchMe(): Promise<{ id: string; email: string; is_admin: boolean }> {
-  return apiFetch("/auth/me");
-}
-
-export async function checkHealth(): Promise<boolean> {
+export async function getHealth(): Promise<HealthInfo> {
   try {
     const apiUrl = await getApiUrl();
     const res = await fetch(`${apiUrl}/health`, { cache: "no-store" });
-    if (!res.ok) return false;
-    const data = (await res.json()) as { ok?: boolean };
-    return data.ok === true;
+    if (!res.ok) return { ok: false, providerOk: false, unfunded: false };
+    const d = (await res.json()) as {
+      ok?: boolean;
+      provider_ok?: boolean | null;
+      unfunded?: boolean;
+      provider_detail?: string;
+    };
+    return {
+      ok: d.ok === true,
+      providerOk: d.provider_ok ?? null,
+      unfunded: d.unfunded === true,
+      detail: d.provider_detail,
+    };
   } catch {
-    return false;
+    return { ok: false, providerOk: false, unfunded: false };
   }
+}
+
+export async function checkHealth(): Promise<boolean> {
+  return (await getHealth()).ok;
 }
 
 export function downloadUrl(bookId: string): string {
@@ -180,10 +167,7 @@ export async function downloadBookPdf(
   filename: string
 ): Promise<void> {
   const apiUrl = await getApiUrl();
-  const res = await fetch(`${apiUrl}/books/${bookId}/download`, {
-    headers: withAuth({}),
-  });
-  if (res.status === 401) handleUnauthorized();
+  const res = await fetch(`${apiUrl}/books/${bookId}/download`);
   if (!res.ok) {
     let detail: unknown = res.statusText;
     try {
@@ -236,19 +220,9 @@ export async function listBooks(): Promise<BookSummary[]> {
   return data.books;
 }
 
-export async function retryBook(
-  bookId: string
-): Promise<{ book_id: string; status: string; retry_count: number }> {
-  return apiFetch(`/books/${bookId}/retry`, { method: "POST" });
-}
-
 export async function deleteBook(bookId: string): Promise<void> {
   const apiUrl = await getApiUrl();
-  const res = await fetch(`${apiUrl}/books/${bookId}`, {
-    method: "DELETE",
-    headers: withAuth({}),
-  });
-  if (res.status === 401) handleUnauthorized();
+  const res = await fetch(`${apiUrl}/books/${bookId}`, { method: "DELETE" });
   if (!res.ok && res.status !== 404) {
     throw new Error(formatApiError(res.statusText));
   }

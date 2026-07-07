@@ -11,12 +11,23 @@
    ============================================================================ */
 @page { size: var(--page-w) var(--page-h); margin: 0; }
 * { box-sizing: border-box; margin: 0; padding: 0; }
-html { -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
+html { -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+  /* Disable the display fonts' default slashed zero so prices/counts read as
+     "$150"/"200", not "$15Ø"/"2ØØ". */
+  font-feature-settings: "zero" 0; font-variant-numeric: lining-nums; }
 
 .page {
   position: relative; width: var(--page-w); height: var(--page-h);
   overflow: visible; background: var(--paper); color: var(--ink);
   font-family: var(--body); page-break-after: always; break-after: page;
+  /* Mirrored print margins: verso (even) pages carry the gutter on the RIGHT */
+  --safe-l: var(--safe-outer, var(--safe));
+  --safe-r: var(--safe-inner, var(--safe));
+}
+/* recto (odd) pages carry the gutter on the LEFT */
+.page:nth-of-type(odd) {
+  --safe-l: var(--safe-inner, var(--safe));
+  --safe-r: var(--safe-outer, var(--safe));
 }
 .page:last-child { page-break-after: auto; }
 
@@ -25,16 +36,21 @@ html { -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; 
   object-fit: cover; }
 
 /* ---- running chrome (body pages) ---- */
-.grunhead { position: absolute; top: calc(var(--bleed) + .40in); left: var(--safe);
-  right: var(--safe); text-align: center; font-family: var(--cond);
+.grunhead { position: absolute; top: calc(var(--bleed) + .40in); left: var(--safe-l);
+  right: var(--safe-r); text-align: center; font-family: var(--cond);
   text-transform: uppercase; letter-spacing: .16em; font-size: 10pt; color: var(--muted); }
-.gfolio { position: absolute; bottom: calc(var(--bleed) + .34in); left: 0; right: 0;
-  text-align: center; font-family: var(--cond); font-size: 12pt; letter-spacing: .22em;
+/* folio sits ≥0.375in above trim (KDP no-content zone for bleed books) */
+.gfolio { position: absolute; bottom: calc(var(--bleed) + .42in); left: 0; right: 0;
+  text-align: center; font-family: var(--cond); font-size: 12pt;
+  /* digits only: kill the Oswald alpha tracking (rendered "4 2" / "1 1 5") and
+     use tabular figures so multi-digit folios sit evenly. Tracking stays on the
+     alpha running head / eyebrows. */
+  letter-spacing: normal; font-variant-numeric: tabular-nums;
   color: var(--accent); font-weight: 600; }
 
 /* content box for body pages: reserves room for runhead (top) + folio (bottom) */
-.gbody-box { position: absolute; left: var(--safe); right: var(--safe);
-  top: calc(var(--bleed) + .92in); bottom: calc(var(--bleed) + .78in);
+.gbody-box { position: absolute; left: var(--safe-l); right: var(--safe-r);
+  top: calc(var(--bleed) + .92in); bottom: calc(var(--bleed) + .82in);
   display: flex; flex-direction: column; }
 
 /* the fit region — render.py tunes its font-size; children size in em */
@@ -48,7 +64,10 @@ html { -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; 
   flex: 1 1 auto; min-height: 0; }
 .fill-row { display: flex; flex-direction: row; gap: .5in; flex: 1 1 auto; min-height: 0; }
 .fill-row > * { flex: 1 1 0; min-width: 0; }
-.fill-center { display: flex; flex-direction: column; justify-content: center;
+/* `safe center` = center when there is spare room, but fall back to top-alignment
+   if content is tall enough to overflow, so vertical centering can never clip the
+   first line off the top of the page. */
+.fill-center { display: flex; flex-direction: column; justify-content: safe center;
   flex: 1 1 auto; min-height: 0; }
 
 /* during measurement, everything collapses to natural top-aligned flow so the
@@ -64,7 +83,10 @@ html { -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; 
 .gfit.measuring .entry-mid { align-items: flex-start !important; }
 .gfit.measuring .fill-spread,
 .gfit.measuring .fill-row,
-.gfit.measuring .fill-center { display: block !important; height: auto !important; }
+.gfit.measuring .fill-center,
+/* entry-fit centers its stack post-fit; collapse to natural top-aligned flow
+   while measuring so the fit engine reads the card's TRUE content height */
+.gfit.measuring .entry-fit { display: block !important; height: auto !important; }
 
 p { line-height: 1.5; }
 b, strong { font-weight: 700; }
@@ -103,11 +125,13 @@ b, strong { font-weight: 700; }
   line-height: 1.32; color: rgba(255,255,255,.96); max-width: 6.1in;
   border-top: 2px solid var(--gold); padding-top: .24in; margin-top: .24in; }
 .gcover .cfoot { font-family: var(--cond); text-transform: uppercase;
-  letter-spacing: .22em; font-size: 11.5pt; color: rgba(255,255,255,.85);
+  letter-spacing: .22em; font-size: 11.5pt; color: rgba(255,255,255,.95);
   margin-top: .34in; }
 
 /* ============================ TITLE PAGE ============================ */
-.gtitle .wrap { position: absolute; inset: var(--safe); display: flex; flex-direction: column;
+.gtitle .wrap { position: absolute;
+  top: var(--safe); bottom: var(--safe); left: var(--safe-l); right: var(--safe-r);
+  display: flex; flex-direction: column;
   align-items: center; justify-content: center; text-align: center; }
 .gtitle .t { font-family: var(--display); font-weight: 800; color: var(--accent);
   font-size: 42pt; line-height: 1.05; max-width: 6.4in; }
@@ -133,16 +157,22 @@ b, strong { font-weight: 700; }
   top: 50%; transform: translateY(-50%); width: 1.7em; height: 1.7em; border-radius: 50%;
   background: var(--accent); color: #fff; font-family: var(--cond); font-weight: 700;
   font-size: .82em; display: flex; align-items: center; justify-content: center; }
+/* level-1 repair: same design, tighter — long bullets fit before we ever split */
+.howto-compact .gh2 { font-size: 1.7em; margin: .02in 0 .08in; }
+.howto-compact ol { gap: .14in; }
+.howto-compact ol li { padding: .18in .3in .18in .95in; line-height: 1.4; }
+.howto .gh2 .cont { font-size: .5em; font-weight: 600; color: var(--muted); }
 
 /* ============================ SAFETY PAGE ============================ */
 .gsafety { background: var(--paper); }
 .gsafety .band { position: absolute; top: 0; left: 0; right: 0; height: 1.7in;
-  background: var(--danger); display: flex; align-items: center; padding: 0 var(--safe); }
+  background: var(--danger); display: flex; align-items: center;
+  padding: 0 var(--safe-r) 0 var(--safe-l); }
 .gsafety .band .bk { font-family: var(--cond); text-transform: uppercase; letter-spacing: .26em;
   font-size: 13pt; font-weight: 600; color: #fff; opacity: .92; }
 .gsafety .band h2 { font-family: var(--display); font-weight: 800; font-size: 40pt; line-height: 1;
   color: #fff; }
-.gsafety .body { position: absolute; top: 2.0in; left: var(--safe); right: var(--safe);
+.gsafety .body { position: absolute; top: 2.0in; left: var(--safe-l); right: var(--safe-r);
   bottom: calc(var(--bleed) + .6in); display: flex; flex-direction: column; }
 .gsafety .lead { font-size: 15.5pt; line-height: 1.5; margin-bottom: .2in; }
 .gsafety .nevermix-label { font-family: var(--cond); text-transform: uppercase;
@@ -150,26 +180,34 @@ b, strong { font-weight: 700; }
 .gsafety .nm-grid { flex: 1 1 auto; display: grid; grid-template-columns: 1fr 1fr;
   grid-auto-rows: 1fr; gap: .2in; }
 .gsafety .nm { background: rgba(179,38,30,.08); border: 2px solid var(--danger); border-radius: 12px;
-  padding: .22in .24in; display: flex; flex-direction: column; justify-content: center; }
+  /* top-aligned: centered content made cards with different text lengths look
+     misaligned as a set (vision-QA finding) */
+  padding: .24in .24in; display: flex; flex-direction: column; justify-content: flex-start; }
 .gsafety .nm .pair { font-family: var(--display); font-weight: 800; font-size: 18pt;
   color: var(--danger); margin-bottom: .08in; }
 .gsafety .nm .why { font-size: 14pt; line-height: 1.4; color: var(--ink); }
 
 /* ============================ TABLE OF CONTENTS ============================ */
-.toc .head { position: absolute; top: calc(var(--bleed) + .85in); left: var(--safe); right: var(--safe); }
+.toc .head { position: absolute; top: calc(var(--bleed) + .85in); left: var(--safe-l); right: var(--safe-r); }
 .toc .kick { font-family: var(--cond); text-transform: uppercase; letter-spacing: .24em;
   font-size: 13pt; color: var(--accent); font-weight: 600; }
 .toc .head h2 { font-family: var(--display); font-weight: 800; color: var(--ink);
   font-size: 46pt; line-height: 1; margin-top: .06in; }
 .toc .rule { height: 3px; background: var(--gold); width: 100%; margin-top: .18in; }
-.toc .cols { position: absolute; top: 2.6in; left: var(--safe); right: var(--safe);
-  bottom: calc(var(--bleed) + .7in); column-count: 2; column-gap: .5in; }
-.toc .grp { break-inside: avoid; margin-bottom: .3in; }
+.toc .cols { position: absolute; top: 2.6in; left: var(--safe-l); right: var(--safe-r);
+  bottom: calc(var(--bleed) + .7in); column-count: 2; column-gap: .5in;
+  overflow: hidden; }
+/* a group may span columns, but a ROW never fragments — page numbers can't
+   orphan onto their own line (the page-5 defect in the shipped book) */
+.toc .grp { margin-bottom: .3in; }
+.toc .row { break-inside: avoid; page-break-inside: avoid; }
 .toc .grp .gt { font-family: var(--cond); text-transform: uppercase; letter-spacing: .08em;
   font-weight: 700; font-size: 14pt; color: var(--accent); margin-bottom: .1in;
-  border-bottom: 2px solid var(--panel); padding-bottom: .05in; }
+  border-bottom: 2px solid var(--panel); padding-bottom: .05in;
+  /* long part titles WRAP (were clipped by the column's overflow:hidden) */
+  white-space: normal; overflow-wrap: break-word; hyphens: auto; }
 .toc .row { display: flex; align-items: baseline; font-size: 14pt; line-height: 1.85; }
-.toc .row .tt { color: var(--ink); }
+.toc .row .tt { color: var(--ink); overflow-wrap: break-word; min-width: 0; }
 .toc .row .dots { flex: 1 1 auto; border-bottom: 1.5px dotted var(--muted); margin: 0 .12in;
   transform: translateY(-.04in); }
 .toc .row .pg { font-family: var(--cond); color: var(--muted); font-weight: 600; }
@@ -190,15 +228,30 @@ b, strong { font-weight: 700; }
   left: calc(-1 * var(--bleed)); bottom: calc(-1 * var(--bleed));
   width: calc(3.45in + var(--bleed)); background: var(--accent); color: #fff;
   overflow: hidden; z-index: 2;
-  display: flex; flex-direction: column; justify-content: center;
+  /* `safe` keeps an over-tall stack top-aligned instead of clipping it at BOTH
+     page edges, and makes scrollHeight a reliable overflow signal for the fitter */
+  display: flex; flex-direction: column; justify-content: safe center;
   padding: 1in .6in 1in calc(.7in + var(--bleed)); }
 .gdivider:not(.has-img) .dpanel { width: auto; right: calc(-1 * var(--bleed)); }
 .gdivider .dpanel-inner { max-width: 100%; min-width: 0; }
 .gdivider .num { font-family: var(--cond); text-transform: uppercase; letter-spacing: .3em;
   font-size: 13pt; color: var(--gold); font-weight: 600; margin-bottom: .2in; }
+.gdivider .part { font-family: var(--cond); text-transform: uppercase;
+  letter-spacing: .24em; font-size: 11pt; color: rgba(255,255,255,.75);
+  font-weight: 600; margin-bottom: .12in; }
 .gdivider .t { font-family: var(--display); font-weight: 800;
-  font-size: clamp(22pt, 6.5cqi, 34pt); line-height: 1.05; color: #fff;
-  overflow-wrap: anywhere; max-width: 100%; }
+  /* fixed pt: no container-type is declared, so `cqi` was an undefined unit.
+     render.py shrink-to-fits this between 14-34pt anyway, so a fixed 32pt is the
+     correct starting size. */
+  font-size: 32pt; line-height: 1.05; color: #fff;
+  /* wrap at spaces ONLY: `break-word` split words mid-glyph with no hyphen
+     (Chromium headless has no hyphenation dictionaries, so `hyphens: auto` is a
+     no-op). A too-long word must overflow horizontally so the fitter can see it
+     and shrink the type instead. */
+  overflow-wrap: normal; max-width: 100%; }
+/* last resort, applied by the fitter only when a single word is wider than the
+   panel column even at the floor size */
+.gdivider .t.force-break { overflow-wrap: break-word; }
 .gdivider .rule { width: 1.5in; height: 3px; background: var(--gold); margin: .34in 0; }
 .gdivider .k { font-family: var(--body); font-size: 15pt; line-height: 1.5;
   color: rgba(255,255,255,.95); }
@@ -206,24 +259,51 @@ b, strong { font-weight: 700; }
 /* ============================ ENTRY CARD (workhorse) ============================ */
 .entry-fit-root { }
 .entry-fit > * + * { margin-top: .14in; }
-.entry-fit { height: 100%; display: flex; flex-direction: column; }
+/* center the card body stack vertically so a short, image-less card sits balanced
+   on the page instead of top-loaded with a blank lower third; `safe` keeps a tall
+   card top-aligned so its title can never clip off the top edge */
+.entry-fit { height: 100%; display: flex; flex-direction: column;
+  justify-content: safe center; }
+/* CONSTANT title size — a fixed pt so it does NOT ride the per-page .gfit shrink
+   (page A and page B, dense and light entries, all show the same title size). */
 .entry-title { font-family: var(--display); font-weight: 800; color: var(--accent);
-  font-size: 2.0em; line-height: 1.04; overflow-wrap: anywhere; }
+  font-size: 26pt; line-height: 1.06; hyphens: auto; overflow-wrap: break-word;
+  display: flex; align-items: flex-start; gap: .14in; }
+.entry-title .entry-title-text { flex: 1 1 auto; min-width: 0; }
+/* the entry number is a fixed-pt badge rendered separately from the title text,
+   so it never inherits the 2em title scale × per-page fit (was giant/inconsistent) */
+.entry-num { flex: 0 0 auto; font-family: var(--cond); font-weight: 700;
+  font-size: 15pt; line-height: 1; color: #fff; background: var(--accent);
+  border-radius: 8px; padding: .07in .13in; margin-top: .05in; }
+.entry-meta { font-family: var(--cond); text-transform: uppercase;
+  letter-spacing: .12em; font-size: .88em; color: var(--muted); font-weight: 600;
+  border-bottom: 1px solid var(--panel); padding-bottom: .08in; }
 .entry-intro { font-size: 1.02em; line-height: 1.5; color: var(--ink); }
-.entry-mid { display: flex; gap: .22in; flex: 1 1 auto; min-height: 1.8in; }
+.entry-foot { font-size: .9em; line-height: 1.45; color: var(--onpaper_soft);
+  border-top: 1px solid var(--panel); padding-top: .1in; }
+.entry-foot .ef-label { font-family: var(--cond); text-transform: uppercase;
+  letter-spacing: .08em; font-weight: 700; font-size: .82em; color: var(--accent); }
+.entry-foot .ef-src { font-style: italic; color: var(--muted); }
+/* sizes to content: no reserved photo well and no bottom-anchoring, so an
+   image-less entry (or an empty need list) leaves no giant half-empty box */
+.entry-mid { display: flex; gap: .22in; flex: 0 0 auto; align-items: flex-start; }
 .entry-hero { flex: 1 1 52%; border-radius: 12px; overflow: hidden;
   background: var(--panel); aspect-ratio: 1 / 1; min-width: 0; min-height: 0;
   max-height: 2.4in; align-self: flex-start; }
 .entry-hero img { width: 100%; height: 100%; object-fit: cover;
   object-position: center; display: block; }
 .entry-need { flex: 1 1 48%; background: var(--panel); border-radius: 12px; padding: .2in .24in;
-  display: flex; flex-direction: column; min-width: 0; }
+  display: flex; flex-direction: column; justify-content: flex-start; min-width: 0; }
 .need-label, .steps-label { font-family: var(--cond); text-transform: uppercase;
   letter-spacing: .12em; font-weight: 700; font-size: 1.0em; color: var(--accent); }
 .need-list { list-style: none; margin-top: .12in; }
 .need-list li { font-size: 1.0em; line-height: 1.38; margin-bottom: .1in;
   padding-left: 1.1em; text-indent: -1.1em; }
 .need-list li::before { content: "•"; color: var(--accent); font-weight: 800; margin-right: .5em; }
+/* 7-9 quantified items read as two columns so a big recipe list still fits
+   beside the hero photo */
+.need-list.cols2 { column-count: 2; column-gap: .28in; }
+.need-list.cols2 li { break-inside: avoid; }
 .entry-steps { background: var(--panel_dark, #143842); color: #fff; border-radius: 12px;
   padding: .24in .28in; }
 .entry-steps .steps-label { color: #fff; }
@@ -247,7 +327,14 @@ b, strong { font-weight: 700; }
 .callout.danger .cl-label { color: var(--danger, #B3261E); }
 
 /* ============================ COMPACT LIST PAGE ============================ */
-.list-col { display: flex; flex-direction: column; justify-content: space-between; height: 100%; }
+/* quick-list columns flow top-down naturally; NO space-between (which flung 4
+   items to the page corners with a huge empty middle) */
+.list-col { display: flex; flex-direction: column; justify-content: flex-start; }
+/* short quick-list: one centered, roomy column so a 2-item list reads as a
+   compact designed panel, not two lines stranded above white space */
+.list-compact { align-items: center; }
+.list-compact .list-col { width: 100%; max-width: var(--measure, 5.4in); }
+.list-compact .list-item { padding: .16in 0; }
 .list-item { font-size: 1.0em; line-height: 1.4; padding: .06in 0; }
 .list-item .ln { display: flex; gap: .45em; }
 .list-item .num { font-family: var(--cond); font-weight: 700; color: var(--accent); min-width: 1.7em; }
@@ -271,6 +358,12 @@ b, strong { font-weight: 700; }
 .chartpage .gbodyfill { justify-content: flex-start; }
 .chartpage .gtable { flex: 1 1 auto; }
 .chartpage .gtable tbody td { padding-top: .22in; padding-bottom: .22in; }
+/* tracker grids: an empty cell becomes an actual tickable checkbox square, so a
+   "tick each square" page renders a real grid instead of blank cells */
+.gtable td.tick, .gtable tbody td.tick:last-child { text-align: center;
+  color: inherit; font-weight: inherit; white-space: normal; }
+.gtable td.tick .check-box { display: inline-block; width: 1.0em; height: 1.0em;
+  border: 2.5px solid var(--accent); border-radius: 4px; vertical-align: middle; }
 
 /* ============================ CHECKLIST PAGE ============================ */
 .check-grp { min-width: 0; display: flex; flex-direction: column; }
@@ -308,6 +401,47 @@ b, strong { font-weight: 700; }
 /* generic text/continuation page */
 .gtext .gh2 { font-size: 1.8em; margin-bottom: .16in; }
 .gtext p { font-size: 1.0em; line-height: 1.55; margin-bottom: .12in; }
+
+/* ============================ CHAPTER-OPENER ESSAY ============================ */
+.essaypage .essay-body { max-width: var(--measure); }
+.essaypage p { font-size: 1.06em; line-height: 1.62; margin-bottom: .14in; }
+.essaypage .gh3 { font-family: var(--display); font-weight: 700; color: var(--accent);
+  font-size: 1.3em; line-height: 1.1; }
+.essaypage .gh3 .cont { font-family: var(--cond); text-transform: uppercase;
+  letter-spacing: .12em; font-size: .55em; color: var(--muted); font-weight: 600; }
+
+/* two-page recipe/project spread — the continuation page shows a small
+   "(continued)" tag, never a second full-size title heading */
+.entry-cont { font-family: var(--cond); text-transform: uppercase;
+  letter-spacing: .1em; font-weight: 700; font-size: 12pt; color: var(--muted); }
+.entry-cont .ec-tag { color: var(--accent); }
+.spread-hero { max-height: 4.2in; }
+.entry-mid .spread-hero { flex: 1 1 55%; }
+/* drop cap ONLY on the first page of an essay (.dropcap); continuation pages
+   (.essaypage without .dropcap) must not get a second drop cap */
+.essaypage.dropcap .essay-body > p:first-of-type::first-letter {
+  font-family: var(--display); font-weight: 800; color: var(--accent);
+  float: left; font-size: 3.5em; line-height: 0.8; padding: 0.05em 0.1em 0 0; }
+
+/* ============================ FEATURE PAGE (sidebars + quote) ================= */
+.feature-stack { gap: .3in; display: flex; flex-direction: column; }
+.feature-quote { font-family: var(--display); font-style: italic; font-weight: 500;
+  color: var(--accent); font-size: 1.7em; line-height: 1.3; padding: .2in .3in;
+  border-left: 5px solid var(--gold); }
+.feature-box { background: var(--panel); border-radius: 14px; padding: .32in .4in;
+  border: 1px solid rgba(16,38,46,.10); flex: 1 1 0;
+  display: flex; flex-direction: column; justify-content: center; }
+/* lone sidebar: a deliberate centered panel that sizes to its content (with
+   generous padding + slightly larger body) rather than a small box or a box
+   stretched to full page height */
+.feature-solo .feature-box { flex: 0 0 auto; padding: .5in .55in; }
+.feature-solo .feature-box .fb-body { font-size: 1.12em; }
+/* two boxes: grow to fill and space evenly down the page */
+.feature-multi .feature-box { flex: 1 1 0; }
+.feature-box .fb-head { font-family: var(--cond); text-transform: uppercase;
+  letter-spacing: .14em; font-weight: 700; font-size: 1.0em; color: var(--accent);
+  margin-bottom: .1in; }
+.feature-box .fb-body { font-size: 1.05em; line-height: 1.55; }
 .gtext.dropcap > p:first-of-type::first-letter { font-family: var(--display); font-weight: 800;
   color: var(--accent); float: left; font-size: 3.5em; line-height: 0.8; padding: 0.05em 0.1em 0 0; }
 .gtext blockquote { font-family: var(--display); font-style: italic; font-weight: 500;

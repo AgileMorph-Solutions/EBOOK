@@ -111,6 +111,150 @@ class SectionPlan(BaseModel):
     # makes it draw roaches) — describe the clean/prevented scene instead. When
     # empty, the orchestrator falls back to a title-based subject.
     divider_subject: str = ""
+    # Optional part grouping (from the profile's structural template): parts give
+    # the TOC a narrative arc ("Part II — The Cold Revolution").
+    part_index: int = 0
+    part_title: str = ""
+    # Entry-level outline ("Title — one-line brief") planned at bible time; the
+    # writer realizes exactly these, which is what makes chapters non-generic.
+    planned_entries: list[str] = Field(default_factory=list)
+
+
+class EntrySchema(BaseModel):
+    """Shape and labels of the book's repeating unit (recipe, tip, project…).
+
+    Defaults reproduce the legacy senior home-guide card exactly, so a bible
+    without a profile renders byte-identically.
+    """
+
+    entry_noun: str = "tip"                 # "recipe", "project", "profile"…
+    need_label: str = "What You Need"       # cookbook: "Ingredients"
+    steps_label: str = "Steps"              # cookbook: "Method"
+    requires_materials: bool = True         # False → omit "What You Need" entirely
+                                            # (habit/mindset guides need nothing physical)
+    require_quantities: bool = False        # every need item carries an amount
+    show_savings: bool = True               # render/require the $-savings callout
+    show_meta: bool = False                 # "Serves 4 · 45 min" strip
+    min_steps: int = 3
+    max_steps: int = 5
+    headnote_lo: int = 20   # entry intro (headnote) word range
+    headnote_hi: int = 35
+
+
+class SafetyCard(BaseModel):
+    """One 'never do this' pair for the book's Safety First page."""
+
+    pair: str  # e.g. the two things never to combine / the act never to do
+    why: str
+
+
+class EditorialProfile(BaseModel):
+    """Per-book editorial brief derived at planning time (Opus).
+
+    Carries everything that used to be hardcoded to the senior/cleaning domain:
+    audience, angle, labels, safety brief, structure, density, and the
+    grounding policy. `None` on a bible means "legacy senior home guide".
+    The safety brief is GENERATED per topic — there is no per-domain canon.
+    """
+
+    genre: str = "home_guide"
+    audience: str = "general adult readers"
+    angle: str = ""            # editorial angle, e.g. "forgotten American food history"
+    persona: str = ""          # author persona a top publisher would hire
+    safety_domain: Literal["chemical", "pest", "food", "general_home", "none"] = (
+        "general_home"
+    )
+    # --- LLM-generated safety brief (topic-specific, replaces any static canon) ---
+    safety_rules: str = ""     # prompt block injected into every writer call
+    safety_cards: list[SafetyCard] = Field(default_factory=list)  # Safety First page
+    danger_patterns: list[list[str]] = Field(default_factory=list)
+    # ^ lowercase substring co-occurrence patterns for the deterministic QA scan
+    entry_schema: EntrySchema = Field(default_factory=EntrySchema)
+    # --- structure ---
+    structure_template: Literal[
+        "tips_cards",        # legacy senior card book (T-legacy)
+        "essay_entries",     # T1 narrative-forward: chapter essay + entries
+        "reference_bible",   # T2 high-density compendium
+        "field_guide",       # T3 rigidly parallel taxonomy entries
+        "framework",         # T4 problem→framework→application
+        "project_based",     # T5 skills primer + difficulty-ordered projects
+        "narrative_history", # T6 prose chapters with artifact entries
+    ] = "tips_cards"
+    narrative_share: float = 0.0   # 0.0-0.8: how much of the book is essay/prose
+    pages_per_entry: float = 1.0   # cookbook ≈ 2.0 (full recipe page + photo)
+    tiers: int = 2                 # 1 = no "More Uses" tier expansion
+    tier_names: list[str] = Field(
+        default_factory=lambda: ["Essentials", "More Uses"])
+    list_section_heading: str = "More {topic} Uses"
+    quick_list_weight: float = 1.0  # scales the quick-list quota (cookbook ~0.15)
+    image_density: Literal["sparse", "standard", "every_entry"] = "sparse"
+    feature_menu: list[str] = Field(default_factory=list)  # allowed sidebar kinds
+    # --- cover & matter ---
+    cover_kicker: str = ""
+    cover_foot: str = ""
+    back_matter_heading: str = "When to Call a Professional"
+    back_matter_angle: str = ""
+    # --- grounding policy ---
+    grounded_content: str = ""  # what MUST trace to the source (history, dates…)
+    authored_content: str = ""  # what the model is commissioned to CREATE
+    style_sheet: list[str] = Field(default_factory=list)  # term canon rules
+
+
+class DesignKit(BaseModel):
+    """A bespoke, per-book design system planned at bible time (by Opus).
+
+    Replaces "pick one of 4 look-alike presets" with a topic-specific palette +
+    type pairing + art direction, so no two books look the same. `None` on a bible
+    means "use the legacy preset menu" (old manifests render identically).
+
+    Colour tokens mirror the keys `layout/theme.py` presets emit as CSS variables;
+    `validate_kit()` there enforces contrast and fills any gap from a preset.
+    """
+
+    # --- palette (hex) — same token names the guide CSS consumes as vars ---
+    paper: str          # page background
+    panel: str          # tinted card/box background (light)
+    panel_dark: str     # dark step-box background
+    ink: str            # body text on paper
+    accent: str         # primary brand/heading colour
+    deep: str           # darkest brand shade (dividers, bands)
+    gold: str           # secondary/metallic accent (rules, step numbers)
+    muted: str          # eyebrows, folios, captions
+    onpaper_soft: str   # soft body variant
+    savings: str = "#2E7D5B"
+    caution: str = "#B5651D"
+    danger: str = "#B3261E"
+    # --- typography — role → font-family stack (from theme.FONT_LIBRARY) ---
+    display: str        # headings (a distinctive display/serif)
+    body: str           # body text (a legible text face; plain zero glyph)
+    cond: str           # eyebrows/labels/folios (a condensed/grotesque)
+    # --- direction ---
+    mood: str = ""              # e.g. "clinical, energetic, modern-athletic"
+    cover_art_direction: str = ""  # steers the cover + interior image style
+    motif: str = ""             # a recurring visual motif for the book
+
+
+def legacy_profile() -> EditorialProfile:
+    """The implicit profile of every pre-profile book: the senior home guide.
+
+    This module is the ONLY sanctioned home for the legacy senior/money-saving
+    vocabulary — prompts and layout must read it from here, never inline it.
+    """
+    return EditorialProfile(
+        genre="home_guide",
+        audience="Seniors (65+), large-print friendly",
+        angle="cheap, safe, step-by-step home tips",
+        safety_domain="general_home",
+        entry_schema=EntrySchema(),  # defaults == legacy card
+        structure_template="tips_cards",
+        cover_kicker="A Senior's Money-Saving Guide",
+        cover_foot="Simple steps · Big savings · Plain English",
+    )
+
+
+def profile_of(bible: "BookBible") -> EditorialProfile:
+    """The bible's profile, or the legacy senior profile for old manifests."""
+    return bible.profile or legacy_profile()
 
 
 class BookBible(BaseModel):
@@ -128,6 +272,12 @@ class BookBible(BaseModel):
     sections: list[SectionPlan] = Field(default_factory=list)
     theme_name: str = "home_clean"
     safety_key: str = "general"
+    # Editorial brief derived at planning time. None == legacy senior guide
+    # (old manifests deserialize and rerender identically via profile_of()).
+    profile: EditorialProfile | None = None
+    # Bespoke per-book design system (palette + fonts + art direction), planned
+    # by Opus. None → fall back to the legacy preset menu (theme.pick).
+    design: DesignKit | None = None
     cover_subject: str = ""
     how_to: HowToPage | None = None
     list_lead: str = ""
@@ -194,11 +344,17 @@ class UseEntry(BaseModel):
 
     number: int = 0  # stable global id (1..250 for book 1)
     title: str
-    intro: str = ""  # short lead; empty in compact-list form
-    what_you_need: list[str] = Field(default_factory=list)
+    intro: str = ""  # short lead / recipe headnote; empty in compact-list form
+    what_you_need: list[str] = Field(default_factory=list)  # doubles as ingredients
     steps: list[StepItem] = Field(default_factory=list)
     caution: str | None = None  # short inline safety note
     savings: str | None = None  # "Replaces bleach pens (~$6/yr)"
+    # --- recipe/project metadata (additive; legacy entries leave these "") ---
+    serves: str = ""      # yield, phrased identically book-wide ("Serves 4")
+    time: str = ""        # "20 min prep · 45 min bake"
+    variation: str = ""   # one-line riff ("Make it your own…")
+    note: str = ""        # make-ahead / storage note
+    source_line: str = ""  # attribution ("Adapted from …") when sourced
 
 
 class TableModel(BaseModel):

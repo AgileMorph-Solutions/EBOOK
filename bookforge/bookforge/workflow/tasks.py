@@ -74,7 +74,16 @@ def write_and_illustrate(self, plan_d, bible_d, source_d):
 
 @app.task(bind=True, name="bookforge.assemble_book")
 def assemble_book(self, results, book_id, bible_d, source_d):
-    """Barrier: QA gate + layout + PDF once all chapters are done."""
+    """Barrier: QA gate + layout + PDF once all chapters are done.
+
+    NOTE (spike↔prod parity): this Celery path is narrative-only today — it uses
+    ``write_chapter`` + ``run_gate`` and has no practical-guide branch, so it never
+    runs the guide QA gate. The canonical guide behaviour — the QA fix-loop that
+    regenerates offending sections and always ships (never raises ContentQAError) —
+    lives in ``pipeline/orchestrator.py``, as does the layout-revise loop
+    (``_assemble_with_layout_revise``: audit defects → regenerate offending
+    blocks with hard length budgets). When this path gains the guide branch,
+    port both loops here to keep the two paths identical."""
     bible = BookBible.model_validate(bible_d)
     source = SourceDoc.model_validate(source_d)
     results = [r for r in results if r]

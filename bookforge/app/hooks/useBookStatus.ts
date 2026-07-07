@@ -50,7 +50,10 @@ export function useBookStatus(bookId: string) {
     }
   }, [bookId, addToast]);
 
-  const isActive = book?.status === "queued" || book?.status === "running";
+  const isActive =
+    book?.status === "queued" ||
+    book?.status === "running" ||
+    book?.status === "waiting";
 
   useEffect(() => {
     void fetchStatus();

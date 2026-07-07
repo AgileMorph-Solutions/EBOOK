@@ -3,6 +3,7 @@ import { cn } from "@/lib/cn";
 const variants = {
   default: "bg-surface-container-high text-on-surface-variant border-white/[0.06]",
   queued: "bg-amber-400/15 text-amber-300 border-amber-400/30",
+  waiting: "bg-amber-400/15 text-amber-300 border-amber-400/30",
   running: "bg-primary/15 text-primary border-primary/40",
   done: "bg-tertiary/15 text-tertiary border-tertiary/30",
   failed: "bg-error/15 text-error border-error/30",
@@ -37,13 +38,14 @@ export function Badge({
 
 const statusLabels: Record<string, string> = {
   queued: "Queued",
+  waiting: "Preparing",
   running: "Running",
   done: "Done",
   failed: "Failed",
 };
 
 export function StatusBadge({ status }: { status: string }) {
-  const variant = (["queued", "running", "done", "failed"].includes(status)
+  const variant = (["queued", "waiting", "running", "done", "failed"].includes(status)
     ? status
     : "default") as BadgeVariant;
   return (

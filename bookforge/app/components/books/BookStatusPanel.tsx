@@ -14,71 +14,17 @@ import { Button } from "@/components/ui/Button";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { Skeleton } from "@/components/ui/Spinner";
 import { Icon } from "@/components/ui/Icon";
-import { deleteBook, retryBook, type BookStatus, type ErrorKind } from "@/lib/api";
-import { useToast } from "@/components/ui/Toast";
-
-const FAILURE_TITLES: Record<ErrorKind, string> = {
-  quota_llm: "Writing credits temporarily unavailable",
-  quota_images: "Images couldn't be created",
-  rate_limit: "Service temporarily busy",
-  auth: "Connection issue — contact support",
-  network: "Connection interrupted",
-  unknown: "Something went wrong",
-};
-
-// Errors where retrying immediately is pointless — quota resets on their own schedule.
-const NON_RETRYABLE: Set<ErrorKind> = new Set(["quota_llm", "quota_images", "auth"]);
-
-function FailureAlert({
-  kind,
-  message,
-  detail,
-  failedStage,
-}: {
-  kind?: ErrorKind;
-  message?: string;
-  detail?: string;
-  failedStage?: string;
-}) {
-  const [showDetail, setShowDetail] = useState(false);
-  const k: ErrorKind = kind ?? "unknown";
-  const title = FAILURE_TITLES[k];
-  return (
-    <Alert variant="error">
-      <p className="font-medium">{title}</p>
-      <p className="mt-2 font-body text-body-sm">
-        {message ?? "Something went wrong during pipeline execution."}
-      </p>
-      {failedStage && (
-        <p className="mt-1 font-label text-label-sm text-secondary">
-          Failed during: <span className="font-medium">{failedStage}</span>
-        </p>
-      )}
-      {detail && detail !== message && (
-        <div className="mt-3">
-          <button
-            type="button"
-            onClick={() => setShowDetail((v) => !v)}
-            className="font-label text-label-sm text-secondary underline"
-          >
-            {showDetail ? "Hide technical details" : "Show technical details"}
-          </button>
-          {showDetail && (
-            <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap rounded bg-surface-container-highest p-3 font-body text-body-sm text-secondary">
-              {detail}
-            </pre>
-          )}
-        </div>
-      )}
-    </Alert>
-  );
-}
+import { deleteBook, type BookStatus } from "@/lib/api";
 import { formatBookDate, shortBookId } from "@/lib/config";
 
-function formatElapsed(startIso?: string) {
-  if (!startIso) return "";
-  const start = new Date(startIso).getTime();
-  const sec = Math.floor((Date.now() - start) / 1000);
+function formatElapsed(startIso?: string, elapsedSeconds?: number) {
+  const sec =
+    elapsedSeconds != null && Number.isFinite(elapsedSeconds)
+      ? Math.max(0, Math.round(elapsedSeconds))
+      : startIso
+        ? Math.floor((Date.now() - new Date(startIso).getTime()) / 1000)
+        : null;
+  if (sec == null) return "";
   if (sec < 60) return `${sec}s`;
   const min = Math.floor(sec / 60);
   return `${min}m ${sec % 60}s`;
@@ -100,26 +46,8 @@ export function BookStatusPanel({
   isActive,
 }: BookStatusPanelProps) {
   const router = useRouter();
-  const { addToast } = useToast();
   const [archiving, setArchiving] = useState(false);
   const [archiveError, setArchiveError] = useState<string | null>(null);
-  const [retrying, setRetrying] = useState(false);
-  const [retryError, setRetryError] = useState<string | null>(null);
-
-  async function handleRetry() {
-    if (retrying) return;
-    setRetrying(true);
-    setRetryError(null);
-    try {
-      await retryBook(bookId);
-      router.refresh();
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "Retry failed";
-      setRetryError(msg);
-      addToast({ variant: "error", title: "Retry failed", message: msg });
-      setRetrying(false);
-    }
-  }
 
   async function handleArchive() {
     if (archiving) return;
@@ -190,6 +118,16 @@ export function BookStatusPanel({
         </div>
       )}
 
+      {book?.status === "waiting" && (
+        <div className="md:col-span-12">
+          <Alert variant={book.unfunded ? "error" : "info"}>
+            {book.unfunded && <p className="font-medium">Out of credits</p>}
+            {book.error ??
+              "We're preparing your book — this is taking a little longer than usual. It will finish automatically, no action needed."}
+          </Alert>
+        </div>
+      )}
+
       {book && isActive && (
         <>
           <div className="md:col-span-8">
@@ -197,7 +135,9 @@ export function BookStatusPanel({
               status={book.status}
               stage={book.stage}
               bookKind={book.book_kind}
-              elapsed={formatElapsed(book.created_at)}
+              elapsed={formatElapsed(book.created_at, book.elapsed_seconds)}
+              progress={book.progress}
+              etaSeconds={book.eta_seconds}
             />
           </div>
           <div className="md:col-span-4">
@@ -216,54 +156,29 @@ export function BookStatusPanel({
 
       {book?.status === "failed" && (
         <div className="md:col-span-12">
-          {(book.failed_stage ?? book.stage) && (
-            <div className="mb-4">
-              <PipelineProgress
-                status="failed"
-                stage={book.failed_stage ?? book.stage}
-                bookKind={book.book_kind}
-                failedStage={book.failed_stage}
-              />
-            </div>
-          )}
-          <FailureAlert
-            kind={book.error_kind}
-            message={book.error}
-            detail={book.error_detail}
-            failedStage={book.failed_stage}
-          />
-          {book.retry_count && book.retry_count > 0 ? (
-            <p className="mt-3 font-label text-label-sm text-secondary">
-              Previous attempts: {book.retry_count}
+          <Alert variant="error">
+            <p className="font-medium">
+              {book.unfunded ? "AI credit balance is low" : "Generation failed"}
             </p>
-          ) : null}
-          {retryError && (
-            <Alert variant="error" className="mt-4">
-              {retryError}
-            </Alert>
-          )}
-          <div className="mt-6 flex flex-wrap items-center gap-3">
-            {!NON_RETRYABLE.has(book.error_kind ?? "unknown") && (
-              <Button
-                type="button"
-                onClick={handleRetry}
-                disabled={retrying}
+            <p className="mt-2 whitespace-pre-wrap font-body text-body-sm">
+              {book.error}
+            </p>
+            {book.unfunded && (
+              <a
+                href="https://console.anthropic.com/settings/billing"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="mt-2 inline-block font-label text-label-sm font-semibold underline underline-offset-2"
               >
-                {retrying ? "Retrying…" : "Retry pipeline"}
-              </Button>
+                Recharge credits →
+              </a>
             )}
-            <Link href="/">
-              <Button variant="outline" type="button">
-                Create new book
-              </Button>
-            </Link>
-          </div>
-          {!NON_RETRYABLE.has(book.error_kind ?? "unknown") && (
-            <p className="mt-2 font-label text-label-sm text-secondary">
-              Retry reuses bible, chapters, and any generated images from the last attempt —
-              only the failing stage and everything after it re-runs.
-            </p>
-          )}
+          </Alert>
+          <Link href="/" className="mt-6 inline-block">
+            <Button variant="outline" type="button">
+              Create new book
+            </Button>
+          </Link>
         </div>
       )}
 

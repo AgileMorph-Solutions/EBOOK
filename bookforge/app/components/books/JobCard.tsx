@@ -43,7 +43,9 @@ function slugify(s: string) {
 
 export function JobCard({ book }: JobCardProps) {
   const isRunning =
-    book.status === "running" || book.status === "queued";
+    book.status === "running" ||
+    book.status === "queued" ||
+    book.status === "waiting";
   const isDone = book.status === "done";
   const [downloading, setDownloading] = useState(false);
 

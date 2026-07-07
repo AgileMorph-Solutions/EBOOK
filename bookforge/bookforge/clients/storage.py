@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 
 import structlog
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 from bookforge.config import settings
 
@@ -14,6 +15,13 @@ log = structlog.get_logger(__name__)
 
 _LOCAL_ROOT = Path(os.environ.get("BOOKFORGE_LOCAL_STORE", "./artifacts")).resolve()
 _USE_S3 = os.environ.get("BOOKFORGE_USE_S3", "0") == "1"
+
+# Transient S3/disk hiccups shouldn't lose a finished PDF or a generated image.
+# Retry a few times with short backoff; a persistent failure still raises so the
+# caller can degrade (image → skip) or the job can retry (final PDF put).
+_storage_retry = retry(
+    stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8), reraise=True,
+)
 
 
 def _s3():
@@ -28,6 +36,7 @@ def _s3():
     )
 
 
+@_storage_retry
 def put(key: str, data: bytes, content_type: str = "application/octet-stream") -> str:
     if _USE_S3:
         _s3().put_object(Bucket=settings.s3_bucket, Key=key, Body=data,
@@ -39,6 +48,7 @@ def put(key: str, data: bytes, content_type: str = "application/octet-stream") -
     return str(path)
 
 
+@_storage_retry
 def get(key: str) -> bytes:
     if _USE_S3:
         return _s3().get_object(Bucket=settings.s3_bucket, Key=key)["Body"].read()

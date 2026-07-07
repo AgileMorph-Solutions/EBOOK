@@ -5,6 +5,8 @@ Practical guides: section plan with card/list quotas for the senior card layout.
 """
 from __future__ import annotations
 
+import re
+
 import structlog
 from pydantic import BaseModel, Field, model_validator
 
@@ -45,6 +47,9 @@ banned_patterns list of clichés/AI-tells to never use.
 beats, and a page_budget. The page_budgets should sum to roughly {pages}. \
 For very short books (under ~10 pages), use a single short chapter; never plan \
 more chapters or page_budget than the target can support.
+- If the topic or title promises a numbered list (e.g. "Top 50 Ways…", "9 Things…"), \
+the chapter beats must cover exactly that many distinct items across the book — \
+no more, no fewer — and the title must not promise a count the plan cannot deliver.
 - recurring_motifs that tie the book together.
 
 Be specific and editorial. No filler."""
@@ -297,6 +302,83 @@ def _infer_theme(topic: str, excerpt: str, explicit: str) -> str:
     return infer_guide_theme(topic, excerpt, explicit)
 
 
+_COUNT_IN_TITLE_RE = re.compile(
+    r"\b(\d{1,4})\b(?:\s+\w+){0,4}\s*(?:\+?\s*)?"
+    r"(?:ways?|tips?|uses?|tricks?|methods?|ideas?|hacks?|things?)\b",
+    re.IGNORECASE,
+)
+
+
+def _rewrite_promised_number(title: str, subtitle: str, new_count: int) -> tuple[str, str]:
+    """Replace the marketing count in title/subtitle with new_count."""
+    def _sub(text: str) -> str:
+        if not text:
+            return text
+        return _COUNT_IN_TITLE_RE.sub(lambda m: m.group(0).replace(m.group(1), str(new_count), 1), text, count=1)
+
+    return _sub(title), _sub(subtitle)
+
+
+def _adjust_list_quotas(sections: list[SectionPlan], delta: int) -> list[SectionPlan]:
+    """Shift list_quota across sections (round-robin) by delta; clamp >= 0."""
+    if delta == 0 or not sections:
+        return sections
+    out = [s.model_copy() for s in sections]
+    n = len(out)
+    idx = 0
+    remaining = abs(delta)
+    sign = 1 if delta > 0 else -1
+    while remaining > 0:
+        i = idx % n
+        if sign > 0:
+            out[i] = out[i].model_copy(update={"list_quota": out[i].list_quota + 1})
+            remaining -= 1
+        elif out[i].list_quota > 0:
+            out[i] = out[i].model_copy(update={"list_quota": out[i].list_quota - 1})
+            remaining -= 1
+        idx += 1
+        if sign < 0 and idx > n * 1000:
+            break
+    return out
+
+
+def _reconcile_promise(bible: BookBible) -> BookBible:
+    """Align marketed tip count with planned section quotas (exact match when possible)."""
+    sections = list(bible.sections)
+    planned = planned_use_count(sections)
+    promised = parse_promised_count(bible.title, bible.subtitle)
+
+    if promised is None:
+        bible.promised_uses = planned
+        return bible
+
+    delta = promised - planned
+    density_cap = max(12, bible.target_pages * 8)
+
+    # Unreachable upward promise — rewrite title/subtitle to the planned total.
+    if promised > density_cap or (delta > 0 and delta > planned):
+        title, subtitle = _rewrite_promised_number(bible.title, bible.subtitle, planned)
+        log.info(
+            "promise_rewritten",
+            was=promised,
+            now=planned,
+            title=title,
+        )
+        bible.title = title
+        bible.subtitle = subtitle
+        bible.promised_uses = planned
+        return bible
+
+    if delta != 0:
+        sections = _adjust_list_quotas(sections, delta)
+        bible.sections = sections
+        planned = planned_use_count(sections)
+        log.info("promise_reconciled", promised=promised, adjusted=planned, delta=delta)
+
+    bible.promised_uses = promised
+    return bible
+
+
 def build_bible(
     source: SourceDoc,
     *,
@@ -367,10 +449,13 @@ def build_bible(
         pro_topic=draft.pro_topic or source.topic,
         specials=specials,
     )
-    planned = planned_use_count(sections)
-    promised = parse_promised_count(bible.title, bible.subtitle)
-    bible.promised_uses = promised or planned
-    log.info("bible_built", kind="practical_guide", title=bible.title,
-             sections=len(bible.sections), promised_uses=bible.promised_uses,
-             planned_uses=planned)
+    bible = _reconcile_promise(bible)
+    log.info(
+        "bible_built",
+        kind="practical_guide",
+        title=bible.title,
+        sections=len(bible.sections),
+        promised_uses=bible.promised_uses,
+        planned_uses=planned_use_count(bible.sections),
+    )
     return bible

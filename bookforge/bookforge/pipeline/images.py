@@ -144,7 +144,9 @@ def _build_prompt(brief, bible, *, placement: Placement | None = None) -> str:
             f"Natural soft daylight, shallow depth of field with a gently blurred "
             f"background, {palette} color story, real textures, clean and uncluttered "
             f"composition, modern and professional, no people's faces. "
-            f"Sharp focus on the subject, print-ready quality, no visual artifacts."
+            f"Crisp fine detail, high dynamic range, professional magazine quality. "
+            f"Sharp focus on the subject, print-ready quality, no visual artifacts. "
+            f"No low-resolution, oversaturated, or plastic-looking surfaces."
         )
     if _baked_text_allowed(brief):
         prompt = (f'Render the words "{brief.caption}" clearly and legibly in '
@@ -160,11 +162,13 @@ def _build_prompt(brief, bible, *, placement: Placement | None = None) -> str:
             "Even lighting from top to bottom; avoid wide panoramic shelf shots."
         )
     elif brief.aspect in ("full_bleed", "portrait"):
-        prompt += (" Compose with the main subject in the upper two-thirds; "
-                   "keep the lower third quiet and uncluttered (a calm dark "
-                   "surface or shadow area) so an editorial title card can "
-                   "be overlaid there. No steam, smoke, bright highlights, "
-                   "or busy detail in the bottom third.")
+        prompt += (
+            " Compose with the main subject in the upper two-thirds. "
+            "The lower third MUST be a dark, even, low-detail zone — a calm shadow, "
+            "plain dark surface, or soft out-of-focus area with no bright highlights, "
+            "steam, smoke, or busy detail — because an editorial title card with white "
+            "text will be overlaid there. Keep the bottom third quiet and legible."
+        )
     return prompt
 
 
@@ -237,7 +241,7 @@ def _generate_best(
                 best_rejected = (rank, cand, True)
             continue
         rank = 0.6 * s.relevance + 0.4 * s.aesthetic
-        if rank < 0.25:
+        if rank < 0.35:
             log.info("image_rejected_low_score", brief=subject[:80], rank=round(rank, 2))
             continue
         flagged = rank < 0.6 or s.has_artifacts or s.has_garbled_text

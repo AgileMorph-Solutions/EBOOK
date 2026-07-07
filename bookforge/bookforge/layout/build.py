@@ -3,7 +3,7 @@
 Maps content to a small library of polished page templates with rhythm/variety:
   cover -> [per chapter: divider -> feature/quote/text pages]
 Templates:
-  * cover            full-bleed photo + title block + badge
+  * cover            full-bleed photo + title block
   * divider          color-field chapter opener (stripe + big serif title)
   * feature(overlay) full-bleed photo + title overlaid + body  (chapter's 1st photo)
   * feature(band)    accent title band + photo + 2-col body     (workhorse)
@@ -90,13 +90,19 @@ class _Director:
                 f'<div class="folio">{self.folio}</div>')
 
     # ---- templates ---- #
-    def cover(self, uri: str, title: str, sub: str, badge: str, kicker: str) -> None:
+    def cover(self, uri: str, title: str, sub: str, kicker: str = "") -> None:
         kick = f'<div class="kick">{_esc(kicker)}</div>' if kicker else ""
         sub_html = f'<div class="sub">{_esc(sub)}</div>' if sub else ""
+        tlen = len(title)
+        if tlen <= 24:
+            fs = "58pt"
+        elif tlen <= 40:
+            fs = "46pt"
+        else:
+            fs = "38pt"
         self.pages.append(f"""<section class="page cover">
           <img class="bleed-img" src="{uri}"/><div class="scrim-b"></div>
-          <div class="badge">{_esc(badge)}</div>
-          <div class="block">{kick}<h1>{_esc(title)}</h1>{sub_html}</div></section>""")
+          <div class="block">{kick}<h1 style="font-size:{fs}">{_esc(title)}</h1>{sub_html}</div></section>""")
 
     def divider(self, number: int, title: str, kicker: str) -> None:
         self.pages.append(f"""<section class="page divider">
@@ -147,8 +153,7 @@ def build_html(bible: BookBible, chapters: list[Chapter],
     cover_uri = _uri(cover_key) if cover_key else (
         next(iter(img_map.values()), None))
     if cover_uri:
-        d.cover(cover_uri, bible.title, bible.subtitle, "Forgotten\n& Found",
-                kicker="A Field Guide" if bible.subtitle else "")
+        d.cover(cover_uri, bible.title, bible.subtitle)
 
     for ch_no, ch in enumerate(chapters, start=1):
         ch_start = len(d.pages)

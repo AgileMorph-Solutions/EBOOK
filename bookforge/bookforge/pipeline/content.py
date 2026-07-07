@@ -55,7 +55,9 @@ needs_in_image_text=true only for labels/cards with words baked in.
 - `blocks` must NEVER be empty or missing — even a very short 1-page chapter \
 must return at least one `intro` block with a short paragraph.
 - Stay within the LENGTH BUDGET above — do not pad with extra blocks or beats \
-just because more source material is available."""
+just because more source material is available.
+- If the book title promises a numbered total (e.g. "50 ways", "9 things"), never \
+state a different count in prose; cover the planned beats exactly — no more, no fewer."""
 
 _DEV_EDIT = """Developmental edit of this chapter draft. Improve structure and arc: \
 does each block earn its place? Is there a hook, momentum, and a satisfying close? \

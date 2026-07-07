@@ -57,7 +57,9 @@ must return at least one `intro` block with a short paragraph.
 - Stay within the LENGTH BUDGET above — do not pad with extra blocks or beats \
 just because more source material is available.
 - If the book title promises a numbered total (e.g. "50 ways", "9 things"), never \
-state a different count in prose; cover the planned beats exactly — no more, no fewer."""
+state a different count in prose; cover the planned beats exactly — no more, no fewer.
+- Prose in `intro`, `body`, and `history` blocks must be plain flowing paragraphs — \
+no bullet lists, no leading bullet characters (•, -, *)."""
 
 _DEV_EDIT = """Developmental edit of this chapter draft. Improve structure and arc: \
 does each block earn its place? Is there a hook, momentum, and a satisfying close? \
@@ -70,7 +72,9 @@ DRAFT:
 
 _LINE_EDIT = """Line edit this chapter. Sharpen sentence rhythm, sensory detail, and \
 imagery; vary sentence openings; cut flab. Preserve meaning, claims, and citations. \
-Then remove every banned AI-tell/cliché. Return the polished chapter.
+Correct every spelling, grammar, and punctuation error; verify proper nouns and \
+dish/product names are spelled correctly. Never output bullet characters (•, -, *) \
+inside prose paragraphs. Then remove every banned AI-tell/cliché. Return the polished chapter.
 
 CHAPTER:
 {chapter}"""

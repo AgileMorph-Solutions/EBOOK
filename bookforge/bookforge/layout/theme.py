@@ -29,26 +29,26 @@ _SENIOR_FONTS = {
 PRESETS: dict[str, dict[str, str]] = {
     # Mid-century American food/history — warm cream, tomato red, pine green.
     "americana": {
-        "paper": "#F2E8D0", "panel": "#E7D8B6", "ink": "#241F18",
-        "accent": "#B5392A", "deep": "#274E45", "gold": "#C68A3C",
-        "muted": "#7C6A4C", "onpaper_soft": "#5C5240",
+        "paper": "#F7F1E5", "panel": "#EDE5D4", "ink": "#221E19",
+        "accent": "#B3402E", "deep": "#2C4A42", "gold": "#C68A3C",
+        "muted": "#6E6250", "onpaper_soft": "#524A40",
         "display": "'Playfair Display', Georgia, serif",
         "cond": "'Oswald', 'Arial Narrow', sans-serif",
         "body": "'EB Garamond', Georgia, serif",
     },
     # Warm vintage cookbook — closest to the reference.
     "vintage_cookbook": {
-        "paper": "#ECDCB5", "panel": "#E3CF9E", "ink": "#2B2218",
-        "accent": "#8B2B17", "deep": "#5A3A1E", "gold": "#B5832E",
-        "muted": "#7A6A4E", "onpaper_soft": "#5A4E38",
+        "paper": "#F6EFE3", "panel": "#EDE3CF", "ink": "#26201A",
+        "accent": "#8A3324", "deep": "#3E2C22", "gold": "#B08A3E",
+        "muted": "#6E6250", "onpaper_soft": "#524640",
         "display": "'Playfair Display', Georgia, serif",
         "cond": "'Oswald', 'Arial Narrow', sans-serif",
         "body": "'EB Garamond', Georgia, serif",
     },
     # Clean modern editorial — pale paper, bold ink, single hot accent.
     "modern_editorial": {
-        "paper": "#F6F4EF", "panel": "#ECE8DF", "ink": "#1A1A1A",
-        "accent": "#D2402F", "deep": "#222222", "gold": "#9A8C6A",
+        "paper": "#F6F4EF", "panel": "#ECE8DF", "ink": "#161616",
+        "accent": "#C93A2B", "deep": "#222222", "gold": "#9A8C6A",
         "muted": "#8A8578", "onpaper_soft": "#4A4A48",
         "display": "'Playfair Display', Georgia, serif",
         "cond": "'Oswald', 'Arial Narrow', sans-serif",

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import base64
 import html
+import re
 from pathlib import Path
 
 import structlog
@@ -37,8 +38,40 @@ def _esc(t: str) -> str:
     return html.escape(t or "")
 
 
+_BULLET_RE = re.compile(r"^[\s•\-\*–—]+\s*")
+
+# Merge tails shorter than this into the preceding page instead of orphaning.
+_ORPHAN_TAIL_CHARS = 400
+
+
+def _sanitize_para(p: str) -> str:
+    p = _BULLET_RE.sub("", p.strip())
+    return re.sub(r"\s+", " ", p)
+
+
 def _paras(text: str) -> str:
-    return "".join(f"<p>{_esc(p)}</p>" for p in text.split("\n\n") if p.strip())
+    parts = [_sanitize_para(p) for p in text.split("\n\n") if p.strip()]
+    return "".join(f"<p>{_esc(p)}</p>" for p in parts)
+
+
+def _split_paras(text: str, cap: int) -> tuple[str, str]:
+    """Split prose at a paragraph boundary so the head fits within `cap` chars
+    of plain text. Returns (head_text, tail_text). If text already fits, tail
+    is empty. Small tails merge into head to avoid near-empty orphan pages."""
+    if len(text) <= cap:
+        return text, ""
+    paras = [p for p in text.split("\n\n") if p.strip()]
+    head: list[str] = []
+    used = 0
+    for i, p in enumerate(paras):
+        if head and used + len(p) > cap:
+            tail = "\n\n".join(paras[i:])
+            if len(tail) < _ORPHAN_TAIL_CHARS and len(text) <= int(cap * 1.3):
+                return text, ""
+            return "\n\n".join(head), tail
+        head.append(p)
+        used += len(p) + 2
+    return text, ""
 
 
 def _list(text: str, tag: str, cls: str) -> str:
@@ -54,25 +87,8 @@ def _body_html(block) -> str:
     return _paras(block.text)
 
 
-def _split_paras(text: str, cap: int) -> tuple[str, str]:
-    """Split prose at a paragraph boundary so the head fits within `cap` chars
-    of plain text. Returns (head_text, tail_text). If text already fits, tail
-    is empty."""
-    if len(text) <= cap:
-        return text, ""
-    paras = [p for p in text.split("\n\n") if p.strip()]
-    head: list[str] = []
-    used = 0
-    for i, p in enumerate(paras):
-        if head and used + len(p) > cap:
-            return "\n\n".join(head), "\n\n".join(paras[i:])
-        head.append(p)
-        used += len(p) + 2
-    return text, ""
-
-
 # Soft caps on plain-text chars per page template (empirically tuned to fit
-# without clipping at body 11.5pt / line-height 1.6).
+# without clipping at body 12pt / line-height 1.65).
 _CAP_FEATURE_2COL = 1400
 _CAP_FEATURE_1COL = 700
 _CAP_TEXTPAGE = 2000

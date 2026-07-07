@@ -15,15 +15,19 @@ import { PageHeader } from "@/components/ui/PageHeader";
 import { Skeleton } from "@/components/ui/Spinner";
 import { Icon } from "@/components/ui/Icon";
 import { deleteBook, retryBook, type BookStatus, type ErrorKind } from "@/lib/api";
+import { useToast } from "@/components/ui/Toast";
 
 const FAILURE_TITLES: Record<ErrorKind, string> = {
-  quota_llm: "Out of LLM credits",
-  quota_images: "Image generation quota exhausted",
-  rate_limit: "Rate limited by upstream provider",
-  auth: "Provider authentication failed",
-  network: "Network error reaching an upstream service",
+  quota_llm: "Out of AI writing credits",
+  quota_images: "Image generation limit reached",
+  rate_limit: "AI service is busy",
+  auth: "Service configuration issue",
+  network: "Connection error",
   unknown: "Generation failed",
 };
+
+// Errors where retrying immediately is pointless — quota resets on their own schedule.
+const NON_RETRYABLE: Set<ErrorKind> = new Set(["quota_llm", "quota_images", "auth"]);
 
 function FailureAlert({
   kind,
@@ -89,6 +93,7 @@ export function BookStatusPanel({
   isActive,
 }: BookStatusPanelProps) {
   const router = useRouter();
+  const { addToast } = useToast();
   const [archiving, setArchiving] = useState(false);
   const [archiveError, setArchiveError] = useState<string | null>(null);
   const [retrying, setRetrying] = useState(false);
@@ -102,7 +107,9 @@ export function BookStatusPanel({
       await retryBook(bookId);
       router.refresh();
     } catch (e) {
-      setRetryError(e instanceof Error ? e.message : "Retry failed");
+      const msg = e instanceof Error ? e.message : "Retry failed";
+      setRetryError(msg);
+      addToast({ variant: "error", title: "Retry failed", message: msg });
       setRetrying(false);
     }
   }
@@ -218,23 +225,27 @@ export function BookStatusPanel({
             </Alert>
           )}
           <div className="mt-6 flex flex-wrap items-center gap-3">
-            <Button
-              type="button"
-              onClick={handleRetry}
-              disabled={retrying}
-            >
-              {retrying ? "Retrying…" : "Retry pipeline"}
-            </Button>
+            {!NON_RETRYABLE.has(book.error_kind ?? "unknown") && (
+              <Button
+                type="button"
+                onClick={handleRetry}
+                disabled={retrying}
+              >
+                {retrying ? "Retrying…" : "Retry pipeline"}
+              </Button>
+            )}
             <Link href="/">
               <Button variant="outline" type="button">
                 Create new book
               </Button>
             </Link>
           </div>
-          <p className="mt-2 font-label text-label-sm text-secondary">
-            Retry reuses bible, chapters, and any generated images from the last attempt —
-            only the failing stage and everything after it re-runs.
-          </p>
+          {!NON_RETRYABLE.has(book.error_kind ?? "unknown") && (
+            <p className="mt-2 font-label text-label-sm text-secondary">
+              Retry reuses bible, chapters, and any generated images from the last attempt —
+              only the failing stage and everything after it re-runs.
+            </p>
+          )}
         </div>
       )}
 

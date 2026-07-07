@@ -16,6 +16,7 @@ from pydantic import BaseModel
 
 from bookforge.clients import images as img_client
 from bookforge.clients import llm, storage
+from bookforge.clients.images import ImageQuotaError
 from bookforge.config import settings
 from bookforge.layout import image_slots
 from bookforge.layout.image_slots import Placement
@@ -197,6 +198,8 @@ def _generate_best(
                 in_image_text=in_image_text,
                 negative_prompt=negative,
             )
+        except ImageQuotaError:
+            raise  # propagate immediately — quota won't recover mid-run
         except Exception as exc:
             log.warning("image_gen_failed", err=str(exc)[:200])
             continue
@@ -252,6 +255,8 @@ def generate_image(
         try:
             raw = img_client.generate(prompt, aspect=aspect, negative_prompt=_NO_TEXT)
             score, flagged = 0.9, False
+        except ImageQuotaError:
+            raise  # propagate immediately — quota won't recover mid-run
         except Exception as exc:
             log.warning("image_gen_failed", key=key, err=str(exc)[:200])
             return None

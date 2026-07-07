@@ -55,45 +55,47 @@ def classify(exc: BaseException) -> ClassifiedError:
     lower = msg.lower()
     detail = (msg[:500] + "…") if len(msg) > 500 else msg
 
-    # ---------- Anthropic (LLM content generation) ----------
+    # ---------- Image provider quota (fast-path — ImageQuotaError is explicit) ----------
+    if cls_name == "ImageQuotaError":
+        return ClassifiedError(
+            kind="quota_images",
+            message="We've hit today's image generation limit. Please try again tomorrow.",
+            detail=detail,
+        )
+
+    # ---------- Anthropic (LLM / text generation) ----------
     if module.startswith("anthropic"):
         if "credit balance is too low" in lower or "billing" in lower:
             return ClassifiedError(
                 kind="quota_llm",
-                message=(
-                    "Anthropic credit balance is too low to generate this book. "
-                    "Top up at console.anthropic.com/settings/billing, then retry."
-                ),
+                message="We've run out of AI writing credits. Please try again later.",
                 detail=detail,
             )
         if cls_name == "RateLimitError" or "rate limit" in lower or " 429" in msg:
             return ClassifiedError(
                 kind="rate_limit",
-                message="Anthropic rate limit reached. Wait a moment and retry.",
+                message="The AI writing service is busy right now. Please wait a minute and try again.",
                 detail=detail,
             )
         if cls_name in ("AuthenticationError", "PermissionDeniedError") or "invalid_api_key" in lower:
             return ClassifiedError(
                 kind="auth",
-                message="Anthropic API key is invalid or unauthorized. Check ANTHROPIC_API_KEY.",
+                message="The AI service couldn't be reached due to a configuration issue. Please contact support.",
                 detail=detail,
             )
 
-    # ---------- OpenAI (image gen / content fallback) ----------
+    # ---------- OpenAI (image generation fallback) ----------
     if module.startswith("openai"):
         if cls_name == "RateLimitError" or "quota" in lower or "insufficient_quota" in lower:
             return ClassifiedError(
-                kind="quota_llm",
-                message=(
-                    "OpenAI quota exhausted. Check your plan & billing at "
-                    "platform.openai.com/account/billing, then retry."
-                ),
+                kind="quota_images",
+                message="We've hit today's image generation limit. Please try again tomorrow.",
                 detail=detail,
             )
         if cls_name in ("AuthenticationError", "PermissionDeniedError"):
             return ClassifiedError(
                 kind="auth",
-                message="OpenAI API key is invalid or unauthorized. Check OPENAI_API_KEY.",
+                message="The image service couldn't be reached due to a configuration issue. Please contact support.",
                 detail=detail,
             )
 
@@ -102,68 +104,59 @@ def classify(exc: BaseException) -> ClassifiedError:
         if "resource_exhausted" in lower or " 429" in msg or "quota" in lower:
             return ClassifiedError(
                 kind="quota_images",
-                message=(
-                    "Gemini/Imagen quota exhausted. Wait for daily reset, upgrade the plan, "
-                    "or enable IMAGE_ALLOW_PROVIDER_FALLBACK with an OPENAI_API_KEY."
-                ),
+                message="We've hit today's image generation limit. Please try again tomorrow.",
                 detail=detail,
             )
 
-    # ---------- Generic message-based fallbacks (works even when the SDK wraps differently) ----------
+    # ---------- Generic message-based fallbacks ----------
     if "credit balance is too low" in lower or "insufficient_quota" in lower:
         return ClassifiedError(
             kind="quota_llm",
-            message="LLM provider credit balance is too low. Top up billing and retry.",
+            message="We've run out of AI writing credits. Please try again later.",
             detail=detail,
         )
-    if "resource_exhausted" in lower or "quota" in lower and "exceed" in lower:
+    if "resource_exhausted" in lower or ("quota" in lower and "exceed" in lower):
         return ClassifiedError(
             kind="quota_images",
-            message="Image generation quota exhausted. Wait for reset or upgrade the plan.",
+            message="We've hit today's image generation limit. Please try again tomorrow.",
             detail=detail,
         )
     if " 429" in msg or "rate limit" in lower:
         return ClassifiedError(
             kind="rate_limit",
-            message="Upstream provider rate limit hit. Wait a moment and retry.",
+            message="The AI service is busy right now. Please wait a minute and try again.",
             detail=detail,
         )
     if "connection" in lower and ("refused" in lower or "reset" in lower or "timeout" in lower):
         return ClassifiedError(
             kind="network",
-            message="Network error reaching an upstream service. Check connectivity and retry.",
+            message="Couldn't reach the AI service. Please check your connection and try again.",
             detail=detail,
         )
 
     # ---------- Legacy-string pattern-match fallback ----------
-    # Older status.json rows only saved the RetryError wrapper (real cause lost).
-    # Give the user a useful hint tied to the wrapped exception class name.
     if "retryerror" in lower:
         if "badrequesterror" in lower or "invalidrequesterror" in lower:
             return ClassifiedError(
                 kind="quota_llm",
-                message=(
-                    "Pipeline gave up after retrying the LLM. The upstream 400 errors are "
-                    "almost always caused by exhausted Anthropic credits. "
-                    "Check console.anthropic.com/settings/billing and retry."
-                ),
+                message="We've run out of AI writing credits. Please try again later.",
                 detail=detail,
             )
         if "ratelimiterror" in lower:
             return ClassifiedError(
                 kind="rate_limit",
-                message="Pipeline gave up after repeated rate-limit responses. Wait a bit and retry.",
+                message="The AI service is busy right now. Please wait a minute and try again.",
                 detail=detail,
             )
         return ClassifiedError(
             kind="unknown",
-            message="Pipeline gave up after retrying an upstream call. Check provider quotas/keys and retry.",
+            message="Something went wrong during generation. Please try again.",
             detail=detail,
         )
 
     # ---------- Unknown ----------
     return ClassifiedError(
         kind="unknown",
-        message=msg if msg else f"{cls_name}: pipeline failed",
+        message="Something went wrong. Please try again.",
         detail=detail,
     )

@@ -1,17 +1,46 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { getBook, type BookStatus } from "@/lib/api";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { getBook, type BookStatus, type ErrorKind } from "@/lib/api";
 import { usePolling } from "./usePolling";
+import { useToast } from "@/components/ui/Toast";
+
+const FAILURE_TITLES: Record<ErrorKind, string> = {
+  quota_llm: "Out of AI writing credits",
+  quota_images: "Image generation limit reached",
+  rate_limit: "AI service is busy",
+  auth: "Service configuration issue",
+  network: "Connection error",
+  unknown: "Generation failed",
+};
 
 export function useBookStatus(bookId: string) {
   const [book, setBook] = useState<BookStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const { addToast } = useToast();
+  const prevStatusRef = useRef<string | null>(null);
 
   const fetchStatus = useCallback(async () => {
     try {
       const data = await getBook(bookId);
+
+      // Fire a toast exactly once when status transitions to "failed"
+      if (
+        prevStatusRef.current !== null &&
+        prevStatusRef.current !== "failed" &&
+        data.status === "failed"
+      ) {
+        const kind = data.error_kind ?? "unknown";
+        addToast({
+          variant: "error",
+          title: FAILURE_TITLES[kind],
+          message: data.error ?? "Something went wrong during pipeline execution.",
+          duration: 8000,
+        });
+      }
+
+      prevStatusRef.current = data.status;
       setBook(data);
       setError(null);
     } catch (e) {
@@ -19,7 +48,7 @@ export function useBookStatus(bookId: string) {
     } finally {
       setLoading(false);
     }
-  }, [bookId]);
+  }, [bookId, addToast]);
 
   const isActive = book?.status === "queued" || book?.status === "running";
 

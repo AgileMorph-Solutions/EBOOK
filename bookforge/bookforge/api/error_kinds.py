@@ -59,7 +59,21 @@ def classify(exc: BaseException) -> ClassifiedError:
     if cls_name == "ImageQuotaError":
         return ClassifiedError(
             kind="quota_images",
-            message="We've hit today's image generation limit. Please try again tomorrow.",
+            message="Your book has used up today's image allowance. Try again tomorrow and it'll pick up where it left off.",
+            detail=detail,
+        )
+
+    # ---------- Fatal image generation failure (billing, auth, all models exhausted) ----------
+    if cls_name == "ImageGenerationError":
+        if "paid plans" in lower or "invalid_argument" in lower:
+            return ClassifiedError(
+                kind="auth",
+                message="Image creation isn't available on the current plan. Please contact support and we'll get it sorted.",
+                detail=detail,
+            )
+        return ClassifiedError(
+            kind="quota_images",
+            message="BookForge couldn't create images for your book right now. Please try again — if it keeps failing, contact support.",
             detail=detail,
         )
 
@@ -68,19 +82,19 @@ def classify(exc: BaseException) -> ClassifiedError:
         if "credit balance is too low" in lower or "billing" in lower:
             return ClassifiedError(
                 kind="quota_llm",
-                message="We've run out of AI writing credits. Please try again later.",
+                message="BookForge has temporarily run out of writing credits. Please try again in a little while.",
                 detail=detail,
             )
         if cls_name == "RateLimitError" or "rate limit" in lower or " 429" in msg:
             return ClassifiedError(
                 kind="rate_limit",
-                message="The AI writing service is busy right now. Please wait a minute and try again.",
+                message="The writing service is a bit busy right now. Wait a minute, then click Retry.",
                 detail=detail,
             )
         if cls_name in ("AuthenticationError", "PermissionDeniedError") or "invalid_api_key" in lower:
             return ClassifiedError(
                 kind="auth",
-                message="The AI service couldn't be reached due to a configuration issue. Please contact support.",
+                message="BookForge couldn't connect to the writing service. Please contact support and we'll fix it quickly.",
                 detail=detail,
             )
 
@@ -89,13 +103,13 @@ def classify(exc: BaseException) -> ClassifiedError:
         if cls_name == "RateLimitError" or "quota" in lower or "insufficient_quota" in lower:
             return ClassifiedError(
                 kind="quota_images",
-                message="We've hit today's image generation limit. Please try again tomorrow.",
+                message="Your book has used up today's image allowance. Try again tomorrow and it'll pick up where it left off.",
                 detail=detail,
             )
         if cls_name in ("AuthenticationError", "PermissionDeniedError"):
             return ClassifiedError(
                 kind="auth",
-                message="The image service couldn't be reached due to a configuration issue. Please contact support.",
+                message="BookForge couldn't connect to the image service. Please contact support and we'll fix it quickly.",
                 detail=detail,
             )
 
@@ -104,7 +118,7 @@ def classify(exc: BaseException) -> ClassifiedError:
         if "resource_exhausted" in lower or " 429" in msg or "quota" in lower:
             return ClassifiedError(
                 kind="quota_images",
-                message="We've hit today's image generation limit. Please try again tomorrow.",
+                message="Your book has used up today's image allowance. Try again tomorrow and it'll pick up where it left off.",
                 detail=detail,
             )
 
@@ -112,25 +126,25 @@ def classify(exc: BaseException) -> ClassifiedError:
     if "credit balance is too low" in lower or "insufficient_quota" in lower:
         return ClassifiedError(
             kind="quota_llm",
-            message="We've run out of AI writing credits. Please try again later.",
+            message="BookForge has temporarily run out of writing credits. Please try again in a little while.",
             detail=detail,
         )
     if "resource_exhausted" in lower or ("quota" in lower and "exceed" in lower):
         return ClassifiedError(
             kind="quota_images",
-            message="We've hit today's image generation limit. Please try again tomorrow.",
+            message="Your book has used up today's image allowance. Try again tomorrow and it'll pick up where it left off.",
             detail=detail,
         )
     if " 429" in msg or "rate limit" in lower:
         return ClassifiedError(
             kind="rate_limit",
-            message="The AI service is busy right now. Please wait a minute and try again.",
+            message="The service is a bit busy right now. Wait a minute, then click Retry.",
             detail=detail,
         )
     if "connection" in lower and ("refused" in lower or "reset" in lower or "timeout" in lower):
         return ClassifiedError(
             kind="network",
-            message="Couldn't reach the AI service. Please check your connection and try again.",
+            message="BookForge lost its connection mid-way. Check your internet, then try again.",
             detail=detail,
         )
 
@@ -139,24 +153,24 @@ def classify(exc: BaseException) -> ClassifiedError:
         if "badrequesterror" in lower or "invalidrequesterror" in lower:
             return ClassifiedError(
                 kind="quota_llm",
-                message="We've run out of AI writing credits. Please try again later.",
+                message="BookForge has temporarily run out of writing credits. Please try again in a little while.",
                 detail=detail,
             )
         if "ratelimiterror" in lower:
             return ClassifiedError(
                 kind="rate_limit",
-                message="The AI service is busy right now. Please wait a minute and try again.",
+                message="The service is a bit busy right now. Wait a minute, then click Retry.",
                 detail=detail,
             )
         return ClassifiedError(
             kind="unknown",
-            message="Something went wrong during generation. Please try again.",
+            message="Something unexpected happened. Please try again — if it keeps failing, contact support.",
             detail=detail,
         )
 
     # ---------- Unknown ----------
     return ClassifiedError(
         kind="unknown",
-        message="Something went wrong. Please try again.",
+        message="Something unexpected happened. Please try again — if it keeps failing, contact support.",
         detail=detail,
     )

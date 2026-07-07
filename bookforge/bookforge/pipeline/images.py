@@ -16,7 +16,7 @@ from pydantic import BaseModel
 
 from bookforge.clients import images as img_client
 from bookforge.clients import llm, storage
-from bookforge.clients.images import ImageQuotaError
+from bookforge.clients.images import ImageGenerationError, ImageQuotaError
 from bookforge.config import settings
 from bookforge.layout import image_slots
 from bookforge.layout.image_slots import Placement
@@ -34,13 +34,19 @@ class _Score(BaseModel):
     nsfw: bool = False
 
 
-_VISION_PROMPT = """Score this image as a hero illustration for: '{brief}'.
-Be a harsh art director. Check for:
-- relevance to the brief and aesthetic quality
-- garbled or misspelled text, labels, signage, logos, or watermarks anywhere in the image
-- visual artifacts (melted shapes, extra limbs, obvious AI glitches)
-- NSFW content
-Set has_garbled_text=true if ANY unwanted or illegible text appears in the image."""
+_VISION_PROMPT = """You are a harsh editorial art director evaluating an AI-generated image for a print-published book.
+Subject brief: '{brief}'
+
+Score on a 0.0–1.0 scale:
+- relevance: Does the image clearly depict the described subject? 1.0=exact match, 0.5=loosely related, 0.0=wrong subject entirely
+- aesthetic: Is it print-ready quality? Sharp focus, natural lighting, clean composition. 1.0=publishable, 0.5=acceptable, 0.0=unusable
+
+Flag strictly:
+- has_garbled_text: true if ANY text, letters, words, numbers, labels, logos, signs, captions, or watermarks appear ANYWHERE in the image (even partially visible or blurred)
+- has_artifacts: true if ANY visual defects — extra/fused/melted limbs, distorted objects, impossible geometry, visible generation seams, blurry focal subject
+- nsfw: true if sexually explicit, graphically violent, or otherwise inappropriate for a mainstream book
+
+Be harsh. A score below 0.4 on either axis means the image is unacceptable for publication."""
 
 
 def _sniff_media_type(data: bytes) -> str:
@@ -126,15 +132,19 @@ def _build_prompt(brief, bible, *, placement: Placement | None = None) -> str:
     neg = _negation(bible)
     if brief.kind == "illustration":
         style = bible.art_style.style_suffix or "hand-painted vintage gouache illustration"
-        prompt = (f"{subject}. {style}, cohesive {palette} palette, textured paper feel, "
-                  f"editorial spot illustration.")
+        prompt = (
+            f"{subject}. {style}, cohesive {palette} palette, textured paper feel, "
+            f"editorial spot illustration. Print-ready quality, sharp lines, "
+            f"no blurry areas, no visual defects."
+        )
     else:
         style = bible.art_style.style_suffix or "bright clean editorial photography"
         prompt = (
             f"A high-quality, realistic photograph of {subject}. {style}. "
             f"Natural soft daylight, shallow depth of field with a gently blurred "
             f"background, {palette} color story, real textures, clean and uncluttered "
-            f"composition, modern and professional, no people's faces."
+            f"composition, modern and professional, no people's faces. "
+            f"Sharp focus on the subject, print-ready quality, no visual artifacts."
         )
     if _baked_text_allowed(brief):
         prompt = (f'Render the words "{brief.caption}" clearly and legibly in '
@@ -185,7 +195,7 @@ def _generate_best(
     *,
     brief_prompt: str = "",
     in_image_text: bool = False,
-) -> tuple[bytes, float, bool] | None:
+) -> tuple[bytes, float, bool]:
     """Generate N candidates, vision-score, return (bytes, rank, flagged)."""
     negative = _negative_for(bible)
     subject = brief_prompt or prompt[:120]
@@ -200,6 +210,8 @@ def _generate_best(
             )
         except ImageQuotaError:
             raise  # propagate immediately — quota won't recover mid-run
+        except ImageGenerationError:
+            raise  # fatal provider error — don't retry other candidates
         except Exception as exc:
             log.warning("image_gen_failed", err=str(exc)[:200])
             continue
@@ -219,12 +231,15 @@ def _generate_best(
             log.info("image_rejected_artifacts", brief=subject[:80])
             continue
         rank = 0.6 * s.relevance + 0.4 * s.aesthetic
+        if rank < 0.25:
+            log.info("image_rejected_low_score", brief=subject[:80], rank=round(rank, 2))
+            continue
         flagged = rank < 0.6 or s.has_artifacts or s.has_garbled_text
         if best is None or rank > best[0]:
             best = (rank, cand, flagged)
 
     if best is None:
-        return None
+        raise ImageGenerationError(f"all image candidates failed for brief: {subject[:80]}")
     return best[1], best[0], best[2]
 
 
@@ -236,7 +251,7 @@ def generate_image(
     bible: BookBible | None = None,
     brief_prompt: str = "",
     placement: Placement | None = None,
-) -> GeneratedImage | None:
+) -> GeneratedImage:
     """Generate image(s), center-crop to slot, store, return."""
     page_w, page_h = settings.page_px
     box_w, box_h = image_slots.box_for_brief(aspect, placement=placement)
@@ -244,22 +259,17 @@ def generate_image(
     box_h = min(box_h, page_h)
 
     if bible is not None:
-        result = _generate_best(
+        raw, score, flagged = _generate_best(
             prompt, aspect, bible, brief_prompt=brief_prompt or prompt[:120],
         )
-        if result is None:
-            log.warning("image_gen_failed", key=key)
-            return None
-        raw, score, flagged = result
     else:
         try:
             raw = img_client.generate(prompt, aspect=aspect, negative_prompt=_NO_TEXT)
             score, flagged = 0.9, False
-        except ImageQuotaError:
-            raise  # propagate immediately — quota won't recover mid-run
+        except (ImageQuotaError, ImageGenerationError):
+            raise
         except Exception as exc:
-            log.warning("image_gen_failed", key=key, err=str(exc)[:200])
-            return None
+            raise ImageGenerationError(f"image generation failed for {key}: {exc}") from exc
 
     sized, w, h = _crop_to_box(raw, box_w, box_h)
     storage.put(key, sized, "image/jpeg")
@@ -275,7 +285,7 @@ def generate_for_brief(
     key: str,
     *,
     placement: Placement | None = None,
-) -> GeneratedImage | None:
+) -> GeneratedImage:
     """Single-image generation for a content block's image_brief."""
     gi = generate_image(
         _build_prompt(brief, bible, placement=placement),
@@ -284,17 +294,19 @@ def generate_for_brief(
         brief_prompt=brief.prompt,
         placement=placement,
     )
-    if gi:
-        gi.block_ref = key
+    gi.block_ref = key
     return gi
 
 
-def generate_cover(subject: str, bible: BookBible, key: str) -> GeneratedImage | None:
+def generate_cover(subject: str, bible: BookBible, key: str) -> GeneratedImage:
     """Cover top-band photo (title overlaid in HTML — no text baked in)."""
     style = bible.art_style.style_suffix or "bright clean editorial photography"
-    prompt = (f"A high-quality, realistic photograph for a book cover background: "
-              f"{subject}. {style}. Soft daylight, {bible.art_style.palette} color story, "
-              f"clean composition with empty space for a title, modern and inviting. {_NO_TEXT}.")
+    prompt = (
+        f"A high-quality, realistic photograph for a book cover background: "
+        f"{subject}. {style}. Soft daylight, {bible.art_style.palette} color story, "
+        f"clean composition with generous empty space at the top for a title overlay, "
+        f"modern and inviting, print-ready, sharp focus, no people. {_NO_TEXT}."
+    )
     return generate_image(prompt, "wide", key, bible=bible, brief_prompt=subject,
                           placement="cover")
 
@@ -310,16 +322,11 @@ def generate_for_chapter(chapter: Chapter, bible: BookBible) -> list[GeneratedIm
         prompt = _build_prompt(brief, bible)
         box_w, box_h = _ASPECT_BOX.get(brief.aspect, (page_w, page_h))
 
-        result = _generate_best(
+        raw, score, flagged = _generate_best(
             prompt, brief.aspect, bible,
             brief_prompt=brief.prompt,
             in_image_text=brief.needs_in_image_text,
         )
-        if result is None:
-            log.warning("no_usable_image", chapter=chapter.index, block=bi)
-            continue
-
-        raw, score, flagged = result
         sized, w, h = _rightsize(raw, box_w, box_h)
         key = f"books/{bible.title[:32]}/ch{chapter.index}_b{bi}.jpg".replace(" ", "_")
         storage.put(key, sized, "image/jpeg")

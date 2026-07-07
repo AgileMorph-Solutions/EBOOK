@@ -81,6 +81,7 @@ export type BookStatus = {
   error?: string;
   error_kind?: ErrorKind;
   error_detail?: string;
+  failed_stage?: string;
   retry_count?: number;
   last_retry_at?: string;
 };

@@ -549,7 +549,10 @@ def delete_book(
 # --------------------------------------------------------------------------- #
 
 def _run_pipeline(book_id: str, req: CreateBook, *, resume: bool = False) -> None:
+    current_stage: list[str | None] = [None]
+
     def on_stage(stage: str) -> None:
+        current_stage[0] = stage
         _set_state(book_id, stage=stage)
 
     # Block here (still "queued") until a pipeline slot is free.
@@ -580,4 +583,5 @@ def _run_pipeline(book_id: str, req: CreateBook, *, resume: bool = False) -> Non
                 error=classified.message,
                 error_kind=classified.kind,
                 error_detail=classified.detail,
+                failed_stage=current_stage[0],
             )

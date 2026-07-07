@@ -18,12 +18,12 @@ import { deleteBook, retryBook, type BookStatus, type ErrorKind } from "@/lib/ap
 import { useToast } from "@/components/ui/Toast";
 
 const FAILURE_TITLES: Record<ErrorKind, string> = {
-  quota_llm: "Out of AI writing credits",
-  quota_images: "Image generation limit reached",
-  rate_limit: "AI service is busy",
-  auth: "Service configuration issue",
-  network: "Connection error",
-  unknown: "Generation failed",
+  quota_llm: "Writing credits temporarily unavailable",
+  quota_images: "Images couldn't be created",
+  rate_limit: "Service temporarily busy",
+  auth: "Connection issue — contact support",
+  network: "Connection interrupted",
+  unknown: "Something went wrong",
 };
 
 // Errors where retrying immediately is pointless — quota resets on their own schedule.
@@ -33,10 +33,12 @@ function FailureAlert({
   kind,
   message,
   detail,
+  failedStage,
 }: {
   kind?: ErrorKind;
   message?: string;
   detail?: string;
+  failedStage?: string;
 }) {
   const [showDetail, setShowDetail] = useState(false);
   const k: ErrorKind = kind ?? "unknown";
@@ -47,6 +49,11 @@ function FailureAlert({
       <p className="mt-2 font-body text-body-sm">
         {message ?? "Something went wrong during pipeline execution."}
       </p>
+      {failedStage && (
+        <p className="mt-1 font-label text-label-sm text-secondary">
+          Failed during: <span className="font-medium">{failedStage}</span>
+        </p>
+      )}
       {detail && detail !== message && (
         <div className="mt-3">
           <button
@@ -209,10 +216,21 @@ export function BookStatusPanel({
 
       {book?.status === "failed" && (
         <div className="md:col-span-12">
+          {(book.failed_stage ?? book.stage) && (
+            <div className="mb-4">
+              <PipelineProgress
+                status="failed"
+                stage={book.failed_stage ?? book.stage}
+                bookKind={book.book_kind}
+                failedStage={book.failed_stage}
+              />
+            </div>
+          )}
           <FailureAlert
             kind={book.error_kind}
             message={book.error}
             detail={book.error_detail}
+            failedStage={book.failed_stage}
           />
           {book.retry_count && book.retry_count > 0 ? (
             <p className="mt-3 font-label text-label-sm text-secondary">

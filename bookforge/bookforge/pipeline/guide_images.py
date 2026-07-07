@@ -4,6 +4,7 @@ from __future__ import annotations
 import structlog
 
 from bookforge.clients import storage
+from bookforge.clients.images import ImageGenerationError
 from bookforge.cost import budget
 from bookforge.pipeline import checkpoints
 from bookforge.pipeline import images as images_stage
@@ -78,10 +79,11 @@ def ensure_divider_images(
             ImageBrief(prompt=subject, kind="photo", aspect="portrait"),
             bible, target, placement="divider",
         )
-        if gi:
-            gi.block_ref = ref
-            images.append(gi)
-            added += 1
+        if gi is None:
+            raise ImageGenerationError(f"divider image generation produced no result for chapter {ch.index}")
+        gi.block_ref = ref
+        images.append(gi)
+        added += 1
     if added:
         log.info("divider_images_added", added=added, spent=round(budget.spent, 2))
     return added
@@ -112,8 +114,9 @@ def generate_all(
             log.info("image_reused", key=cover_target, kind="cover")
         else:
             cov = images_stage.generate_cover(bible.cover_subject, bible, cover_target)
-            if cov:
-                cover_key = cov.storage_key
+            if cov is None:
+                raise ImageGenerationError("cover image generation produced no result")
+            cover_key = cov.storage_key
 
     for ch in chapters:
         for bi, block in enumerate(ch.blocks):
@@ -134,10 +137,11 @@ def generate_all(
             gi = images_stage.generate_for_brief(
                 block.image_brief, bible, target, placement="card",
             )
-            if gi:
-                gi.block_ref = ref
-                images.append(gi)
-                by_ref[ref] = gi
+            if gi is None:
+                raise ImageGenerationError(f"image generation produced no result for block {ref}")
+            gi.block_ref = ref
+            images.append(gi)
+            by_ref[ref] = gi
 
     ensure_divider_images(chapters, images, bible, prefix)
     log.info("guide_images_done", count=len(images), cover=bool(cover_key))

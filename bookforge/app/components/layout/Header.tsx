@@ -3,9 +3,11 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { checkHealth } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { Icon } from "@/components/ui/Icon";
+import { clearAuth, getStoredUser, type AuthUser } from "@/lib/auth";
 
 function HealthDot({ ok }: { ok: boolean | null }) {
   return (
@@ -39,8 +41,20 @@ const NAV = [
 
 export function Header() {
   const pathname = usePathname();
+  const router = useRouter();
   const [healthy, setHealthy] = useState<boolean | null>(null);
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [user, setUser] = useState<AuthUser | null>(null);
+
+  useEffect(() => {
+    setUser(getStoredUser());
+  }, [pathname]);
+
+  function onLogout() {
+    clearAuth();
+    setUser(null);
+    router.replace("/login");
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -92,12 +106,30 @@ export function Header() {
             <HealthDot ok={healthy} />
             <span className="font-label text-label-md">API</span>
           </span>
-          <div
-            className="flex h-8 w-8 items-center justify-center overflow-hidden rounded-full border border-outline-variant bg-surface-container-highest font-label text-label-sm text-secondary"
-            aria-hidden
-          >
-            BF
-          </div>
+          {user ? (
+            <div className="flex items-center gap-3">
+              <span
+                className="font-label text-label-sm text-secondary"
+                title={user.email}
+              >
+                {user.email}
+              </span>
+              <button
+                type="button"
+                onClick={onLogout}
+                className="rounded border border-outline-variant px-3 py-1 font-label text-label-sm text-secondary hover:text-primary"
+              >
+                Logout
+              </button>
+            </div>
+          ) : (
+            <div
+              className="flex h-8 w-8 items-center justify-center overflow-hidden rounded-full border border-outline-variant bg-surface-container-highest font-label text-label-sm text-secondary"
+              aria-hidden
+            >
+              BF
+            </div>
+          )}
         </nav>
 
         <button

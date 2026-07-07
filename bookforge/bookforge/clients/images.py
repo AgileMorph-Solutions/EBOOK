@@ -13,10 +13,22 @@ from __future__ import annotations
 import base64
 
 import structlog
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_not_exception_type, stop_after_attempt, wait_exponential
 
 from bookforge.config import settings
 from bookforge.cost import budget
+
+
+class ImageQuotaError(RuntimeError):
+    """Raised when the image provider returns a quota / rate-limit (429) error.
+
+    This is not retryable — callers must propagate it so the pipeline fails
+    immediately with a clear error rather than grinding through every brief.
+    """
+
+
+class ImageGenerationError(RuntimeError):
+    """Fatal, non-retryable image generation failure (billing, auth, all models exhausted)."""
 
 log = structlog.get_logger(__name__)
 
@@ -59,18 +71,41 @@ def _validate_provider(provider: str) -> None:
         raise RuntimeError("OPENAI_API_KEY is not set — populate .env")
 
 
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=20))
+def _is_quota_error(exc: Exception) -> bool:
+    s = str(exc).lower()
+    return "429" in str(exc) or "resource_exhausted" in s or "quota" in s or "rate limit" in s
+
+
+def _is_fatal_imagen_error(exc: Exception) -> bool:
+    s = str(exc)
+    lower = s.lower()
+    # 400 INVALID_ARGUMENT — billing / paid-plan errors
+    if "400" in s or "invalid_argument" in lower:
+        return True
+    # 403 permission denied / unauthenticated
+    if "403" in s or "permission_denied" in lower or "unauthenticated" in lower:
+        return True
+    return False
+
+
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=20),
+       retry=retry_if_not_exception_type((ImageQuotaError, ImageGenerationError)))
 def _gen_openai(prompt: str, aspect: str, negative_prompt: str = "") -> bytes:
     model = settings.image_primary_model or "gpt-image-1"
     # gpt-image-1 has no negative-prompt slot — fold it into the positive prompt.
     full = f"{prompt} Avoid: {negative_prompt}." if negative_prompt else prompt
-    resp = _openai().images.generate(
-        model=model,
-        prompt=full,
-        size=_OPENAI_SIZE.get(aspect, _OPENAI_SIZE["full_bleed"]),
-        quality="high",
-        n=1,
-    )
+    try:
+        resp = _openai().images.generate(
+            model=model,
+            prompt=full,
+            size=_OPENAI_SIZE.get(aspect, _OPENAI_SIZE["full_bleed"]),
+            quality="high",
+            n=1,
+        )
+    except Exception as exc:
+        if _is_quota_error(exc):
+            raise ImageQuotaError(str(exc)) from exc
+        raise
     return base64.b64decode(resp.data[0].b64_json)
 
 
@@ -82,7 +117,8 @@ _IMAGEN_FALLBACKS = [
 ]
 
 
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=20))
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=20),
+       retry=retry_if_not_exception_type((ImageQuotaError, ImageGenerationError)))
 def _gen_gemini(prompt: str, aspect: str, negative_prompt: str = "") -> bytes:
     from google import genai
     from google.genai import types
@@ -106,10 +142,17 @@ def _gen_gemini(prompt: str, aspect: str, negative_prompt: str = "") -> bytes:
         try:
             resp = client.models.generate_images(model=model, prompt=full, config=cfg)
             return resp.generated_images[0].image.image_bytes
-        except Exception as exc:  # availability / permission / not-found
+        except Exception as exc:
+            if _is_quota_error(exc):
+                # 429 means the API key is exhausted — no point trying other models
+                # or letting tenacity retry. Raise immediately so the pipeline fails.
+                raise ImageQuotaError(str(exc)) from exc
+            if _is_fatal_imagen_error(exc):
+                # 400/403 billing or auth — no point trying other models.
+                raise ImageGenerationError(str(exc)) from exc
             last_err = exc
             log.warning("imagen_model_failed", model=model, err=str(exc)[:160])
-    raise RuntimeError(f"all Imagen models failed; last error: {last_err}")
+    raise ImageGenerationError(f"all Imagen models failed; last error: {last_err}") from last_err
 
 
 def generate(prompt: str, *, aspect: str = "full_bleed", in_image_text: bool = False,
@@ -125,6 +168,8 @@ def generate(prompt: str, *, aspect: str = "full_bleed", in_image_text: bool = F
     if provider == "gemini":
         try:
             data = _gen_gemini(prompt, aspect, negative_prompt=negative_prompt)
+        except (ImageQuotaError, ImageGenerationError):
+            raise  # fatal — don't silently skip or fall back
         except Exception as exc:
             if settings.image_allow_provider_fallback:
                 log.warning("gemini_fallback_openai", err=str(exc)[:160])

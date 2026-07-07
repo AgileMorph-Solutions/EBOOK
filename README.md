@@ -56,9 +56,66 @@ Nothing unverified ships: every atomic claim is checked against its cited source
 by an independent judge. A book only passes when groundedness meets the configured
 threshold (default 100%) and a human signs off in the review UI.
 
+## Authentication
+
+The API and UI are gated behind JWT auth (self-hosted; `python-jose` + bcrypt).
+Every `/books*` endpoint requires a bearer token, and each user only sees their
+own books. Users with `is_admin=true` see everything.
+
+**One-time setup:**
+
+```bash
+cd bookforge
+# Bring up Postgres (and Redis) so the DB is reachable
+docker compose -f infra/docker-compose.yml up -d postgres redis
+
+# Apply schema + seed a test admin + a regular user (idempotent).
+alembic upgrade head
+python -m scripts.seed_users
+```
+
+The seed script creates two dev accounts (rotate before any non-local use):
+
+| Role  | Email                     | Password              |
+|-------|---------------------------|-----------------------|
+| admin | `admin@bookforge.local`   | `admin-dev-password`  |
+| user  | `user@bookforge.local`    | `user-dev-password`   |
+
+Override via `--admin-email`, `--admin-password`, `--user-email`,
+`--user-password`, or the `SEED_ADMIN_PASSWORD` / `SEED_USER_PASSWORD` env vars.
+
+Any books that existed before auth was enabled are backfilled to the admin on
+first seed.
+
+**API usage:**
+
+```bash
+# Log in → grab a token (host port is whatever docker-compose maps; e.g. 8010)
+TOKEN=$(curl -s -X POST localhost:8010/auth/login \
+  -H 'content-type: application/json' \
+  -d '{"email":"user@bookforge.local","password":"user-dev-password"}' \
+  | jq -r .access_token)
+
+# Every /books* call needs Authorization: Bearer <token>
+curl -H "Authorization: Bearer $TOKEN" localhost:8010/books
+```
+
+Admins can invite additional users:
+
+```bash
+curl -X POST localhost:8010/auth/register \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"email":"new@example.com","password":"pw","is_admin":false}'
+```
+
+Set `AUTH_ENABLED=false` in `.env` to bypass auth entirely (useful for local
+CLI / spike work).
+
 ## Security
 
 API keys live only in `bookforge/.env`, which is gitignored — never commit secrets
 or paste them into chat. All services read secrets from the environment.
+`JWT_SECRET` **must** be rotated to a long random string before any deployment.
 
 See [`bookforge/README.md`](bookforge/README.md) for full module-level details.

@@ -45,6 +45,32 @@ def get(key: str) -> bytes:
     return (_LOCAL_ROOT / key).read_bytes()
 
 
+def exists(key: str) -> bool:
+    """Cheap existence check. Used by resume to decide whether to regenerate."""
+    if _USE_S3:
+        try:
+            _s3().head_object(Bucket=settings.s3_bucket, Key=key)
+            return True
+        except Exception:
+            return False
+    return (_LOCAL_ROOT / key).is_file()
+
+
+def delete(key: str) -> None:
+    """Best-effort delete. Missing keys are ignored."""
+    if _USE_S3:
+        try:
+            _s3().delete_object(Bucket=settings.s3_bucket, Key=key)
+        except Exception:
+            log.warning("s3_delete_failed", key=key)
+        return
+    path = _LOCAL_ROOT / key
+    try:
+        path.unlink(missing_ok=True)
+    except Exception:
+        log.warning("local_delete_failed", key=key)
+
+
 def local_path(key: str) -> Path:
     """Resolve a key to a local path (downloading from S3 if needed)."""
     if not _USE_S3:

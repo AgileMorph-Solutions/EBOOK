@@ -2,6 +2,8 @@ import type { Metadata } from "next";
 import { EB_Garamond, Inter, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 import { PageShell } from "@/components/layout/Header";
+import { AuthGate } from "@/components/layout/AuthGate";
+import { ToastProvider } from "@/components/ui/Toast";
 
 const display = EB_Garamond({
   subsets: ["latin"],
@@ -42,7 +44,11 @@ export default function RootLayout({
       <body
         className={`${display.variable} ${body.variable} ${label.variable} min-h-screen selection:bg-primary-fixed selection:text-on-primary-fixed`}
       >
-        <PageShell>{children}</PageShell>
+        <ToastProvider>
+          <AuthGate>
+            <PageShell>{children}</PageShell>
+          </AuthGate>
+        </ToastProvider>
       </body>
     </html>
   );

@@ -5,6 +5,8 @@ Practical guides: section plan with card/list quotas for the senior card layout.
 """
 from __future__ import annotations
 
+import re
+
 import structlog
 from pydantic import BaseModel, Field, model_validator
 
@@ -42,7 +44,12 @@ and a style_suffix string that will be appended to EVERY image prompt.
 - A VOICE guide: narrator persona, register, POV, pacing, vocabulary, and a \
 banned_patterns list of clichés/AI-tells to never use.
 - A chapter plan: each chapter has a title, one-paragraph summary, 3-6 concrete \
-beats, and a page_budget. The page_budgets should sum to roughly {pages}.
+beats, and a page_budget. The page_budgets should sum to roughly {pages}. \
+For very short books (under ~10 pages), use a single short chapter; never plan \
+more chapters or page_budget than the target can support.
+- If the topic or title promises a numbered list (e.g. "Top 50 Ways…", "9 Things…"), \
+the chapter beats must cover exactly that many distinct items across the book — \
+no more, no fewer — and the title must not promise a count the plan cannot deliver.
 - recurring_motifs that tie the book together.
 
 Be specific and editorial. No filler."""
@@ -156,7 +163,7 @@ class _PracticalBibleDraft(BaseModel):
     tone: str = "warm, plain, reassuring"
     art_style: ArtStyle
     voice: VoiceStyle
-    base_sections: list[_BaseSection] = Field(min_length=3)
+    base_sections: list[_BaseSection] = Field(min_length=1)
     how_to: HowToPage
     safety_key: str = "general"
     theme_name: str = "home_clean"
@@ -175,24 +182,31 @@ def _clamp(lo: int, hi: int, v: int) -> int:
 
 # Empirically (matching the hand-authored recipe books) one senior "use card"
 # fills ~1 page and a quick-tip list runs ~6 tips/page; with the section intro
-# and divider photo a dense section lands near ~14 finished pages. We therefore
-# size the SECTION COUNT to the page target and keep every section at
-# recipe-grade density (≈10 cards + ≈35 tips) rather than thinning sections out
-# — thin sections render as padded, whitespace-heavy pages.
+# and divider photo a dense section lands near ~14 finished pages. Section count
+# and per-section quotas scale with target_pages; large books keep recipe-grade
+# density while small targets produce lean sections.
 _PAGES_PER_SECTION = 14
 
 
-def _base_section_target(target_pages: int, tiers: int) -> int:
-    """How many DISTINCT base topics to ask the model for, so base×tiers
-    sections at recipe density reach ~target_pages."""
-    return _clamp(4, 14, round(target_pages / (_PAGES_PER_SECTION * tiers)))
+def _plan_dimensions(target_pages: int) -> tuple[int, int]:
+    """Pick base-topic count and tier count so expanded sections reach ~target_pages."""
+    tiers = 2 if target_pages >= 60 else 1
+    base = _clamp(1, 14, round(target_pages / (_PAGES_PER_SECTION * tiers)))
+    return base, tiers
+
+
+def _max_specials(target_pages: int) -> int:
+    if target_pages < 24:
+        return 0
+    if target_pages < 60:
+        return 1
+    return 3
 
 
 def _section_quotas(target_pages: int, num_sections: int) -> tuple[int, int, int, int]:
-    pages_per = max(8, (target_pages + num_sections - 1) // max(1, num_sections))
-    # Recipe-grade floors: never drop below a dense, well-filled card page.
-    full_cards = _clamp(7, 11, round(pages_per * 0.72))
-    list_quota = _clamp(24, 38, round(pages_per * 2.5))
+    pages_per = max(1, round(target_pages / max(1, num_sections)))
+    full_cards = _clamp(1, 11, round(pages_per * 0.72))
+    list_quota = _clamp(0, 38, round(pages_per * 2.5))
     image_quota = min(3, full_cards)
     return full_cards, list_quota, image_quota, pages_per
 
@@ -207,7 +221,10 @@ def _expand_sections(
     idx = 1
     for base in base_sections:
         for tier in tiers:
-            if tier == "Essentials":
+            if tiers_count == 1:
+                title = base.title
+                summary = base.summary
+            elif tier == "Essentials":
                 title = f"{base.title} — Essentials"
                 summary = base.summary
             elif tier == "More Uses":
@@ -285,6 +302,83 @@ def _infer_theme(topic: str, excerpt: str, explicit: str) -> str:
     return infer_guide_theme(topic, excerpt, explicit)
 
 
+_COUNT_IN_TITLE_RE = re.compile(
+    r"\b(\d{1,4})\b(?:\s+\w+){0,4}\s*(?:\+?\s*)?"
+    r"(?:ways?|tips?|uses?|tricks?|methods?|ideas?|hacks?|things?)\b",
+    re.IGNORECASE,
+)
+
+
+def _rewrite_promised_number(title: str, subtitle: str, new_count: int) -> tuple[str, str]:
+    """Replace the marketing count in title/subtitle with new_count."""
+    def _sub(text: str) -> str:
+        if not text:
+            return text
+        return _COUNT_IN_TITLE_RE.sub(lambda m: m.group(0).replace(m.group(1), str(new_count), 1), text, count=1)
+
+    return _sub(title), _sub(subtitle)
+
+
+def _adjust_list_quotas(sections: list[SectionPlan], delta: int) -> list[SectionPlan]:
+    """Shift list_quota across sections (round-robin) by delta; clamp >= 0."""
+    if delta == 0 or not sections:
+        return sections
+    out = [s.model_copy() for s in sections]
+    n = len(out)
+    idx = 0
+    remaining = abs(delta)
+    sign = 1 if delta > 0 else -1
+    while remaining > 0:
+        i = idx % n
+        if sign > 0:
+            out[i] = out[i].model_copy(update={"list_quota": out[i].list_quota + 1})
+            remaining -= 1
+        elif out[i].list_quota > 0:
+            out[i] = out[i].model_copy(update={"list_quota": out[i].list_quota - 1})
+            remaining -= 1
+        idx += 1
+        if sign < 0 and idx > n * 1000:
+            break
+    return out
+
+
+def _reconcile_promise(bible: BookBible) -> BookBible:
+    """Align marketed tip count with planned section quotas (exact match when possible)."""
+    sections = list(bible.sections)
+    planned = planned_use_count(sections)
+    promised = parse_promised_count(bible.title, bible.subtitle)
+
+    if promised is None:
+        bible.promised_uses = planned
+        return bible
+
+    delta = promised - planned
+    density_cap = max(12, bible.target_pages * 8)
+
+    # Unreachable upward promise — rewrite title/subtitle to the planned total.
+    if promised > density_cap or (delta > 0 and delta > planned):
+        title, subtitle = _rewrite_promised_number(bible.title, bible.subtitle, planned)
+        log.info(
+            "promise_rewritten",
+            was=promised,
+            now=planned,
+            title=title,
+        )
+        bible.title = title
+        bible.subtitle = subtitle
+        bible.promised_uses = planned
+        return bible
+
+    if delta != 0:
+        sections = _adjust_list_quotas(sections, delta)
+        bible.sections = sections
+        planned = planned_use_count(sections)
+        log.info("promise_reconciled", promised=promised, adjusted=planned, delta=delta)
+
+    bible.promised_uses = promised
+    return bible
+
+
 def build_bible(
     source: SourceDoc,
     *,
@@ -296,7 +390,8 @@ def build_bible(
     if book_kind == "narrative":
         bible = llm.structured(
             _NARRATIVE_PROMPT.format(
-                topic=source.topic, pages=target_pages, source=excerpt),
+                topic=source.topic, pages=target_pages, source=excerpt,
+            ),
             BookBible, system=_SYSTEM, max_tokens=8000,
         )
         bible.target_pages = target_pages
@@ -305,25 +400,34 @@ def build_bible(
                  chapters=len(bible.chapters))
         return bible
 
-    # Two dense tiers per base topic (Essentials + More Uses) matches the
-    # hand-authored recipe books; the base-topic count is what scales length.
-    tiers_per = 2
-    base_target = _base_section_target(target_pages, tiers_per)
-    base_lo = max(4, base_target - 1)
+    # Base-topic count and tier depth scale with target_pages; large books keep
+    # the two-tier Essentials + More Uses pattern from the hand-authored guides.
+    base_target, tiers_per = _plan_dimensions(target_pages)
+    base_lo = max(1, base_target - 1)
     base_hi = base_target + 2
+    max_sp = _max_specials(target_pages)
 
     draft = llm.structured(
         _GUIDE_PROMPT.format(
-            topic=source.topic, pages=target_pages, source=excerpt,
-            base_lo=base_lo, base_hi=base_hi,
+            topic=source.topic,
+            pages=target_pages,
+            source=excerpt,
+            base_lo=base_lo,
+            base_hi=base_hi,
         ),
         _PracticalBibleDraft, system=_GUIDE_SYSTEM, max_tokens=8000,
     )
     sections = _expand_sections(
         draft.base_sections, target_pages, tiers_count=tiers_per,
     )
-    raw_specials = [s.to_plan() for s in draft.specials] or _default_specials()
-    specials = _map_specials(raw_specials, len(draft.base_sections), tiers_per)
+    raw_specials = [s.to_plan() for s in draft.specials]
+    if not raw_specials and max_sp > 0:
+        raw_specials = _default_specials()
+    raw_specials = raw_specials[:max_sp]
+    specials = (
+        _map_specials(raw_specials, len(draft.base_sections), tiers_per)
+        if raw_specials else []
+    )
 
     bible = BookBible(
         title=draft.title,
@@ -345,10 +449,13 @@ def build_bible(
         pro_topic=draft.pro_topic or source.topic,
         specials=specials,
     )
-    planned = planned_use_count(sections)
-    promised = parse_promised_count(bible.title, bible.subtitle)
-    bible.promised_uses = promised or planned
-    log.info("bible_built", kind="practical_guide", title=bible.title,
-             sections=len(bible.sections), promised_uses=bible.promised_uses,
-             planned_uses=planned)
+    bible = _reconcile_promise(bible)
+    log.info(
+        "bible_built",
+        kind="practical_guide",
+        title=bible.title,
+        sections=len(bible.sections),
+        promised_uses=bible.promised_uses,
+        planned_uses=planned_use_count(bible.sections),
+    )
     return bible

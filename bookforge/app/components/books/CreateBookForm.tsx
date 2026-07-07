@@ -4,10 +4,6 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
-import {
-  DetailsCollapsible,
-  PillGroup,
-} from "@/components/ui/DetailsCollapsible";
 import { Icon } from "@/components/ui/Icon";
 import { Input, Label, Textarea } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
@@ -27,9 +23,6 @@ import {
 const YT_RE =
   /^(https?:\/\/)?(www\.)?(youtube\.com\/watch\?v=|youtu\.be\/)[\w-]{11}/;
 
-const EDITORIAL_VOICES = ["Academic", "Conversational", "Dramatic"];
-const IMAGE_STYLES = ["Vintage Engraving", "Modern Photo"];
-
 export function CreateBookForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -42,8 +35,6 @@ export function CreateBookForm() {
   const [chapterLimit, setChapterLimit] = useState("");
   const [sectionLimit, setSectionLimit] = useState("");
   const [bookKind, setBookKind] = useState<BookKind>("practical_guide");
-  const [editorialVoice, setEditorialVoice] = useState("Conversational");
-  const [imageStyle, setImageStyle] = useState("Vintage Engraving");
   const [submitting, setSubmitting] = useState(false);
   const [submitPhase, setSubmitPhase] = useState<
     "idle" | "uploading" | "starting"
@@ -58,6 +49,12 @@ export function CreateBookForm() {
         if (book.topic) setTopic(book.topic);
         if (book.book_kind) setBookKind(book.book_kind);
         if (book.target_pages) setTargetPages(book.target_pages);
+        if (book.chapter_limit != null) {
+          setChapterLimit(String(book.chapter_limit));
+        }
+        if (book.section_limit != null) {
+          setSectionLimit(String(book.section_limit));
+        }
       })
       .catch(() => {
         /* ignore */
@@ -231,55 +228,39 @@ export function CreateBookForm() {
         </div>
       </div>
 
-      <DetailsCollapsible summary="Advanced options">
-        <div className="grid grid-cols-1 gap-8 md:grid-cols-2">
-          <PillGroup
-            label="Editorial Voice"
-            options={EDITORIAL_VOICES}
-            value={editorialVoice}
-            onChange={setEditorialVoice}
-          />
-          <PillGroup
-            label="Image Style"
-            options={IMAGE_STYLES}
-            value={imageStyle}
-            onChange={setImageStyle}
-          />
-        </div>
-        <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
-          {bookKind === "narrative" ? (
-            <div className="flex flex-col gap-2">
-              <Label htmlFor="chapters">
-                Chapter limit{" "}
-                <span className="font-normal text-secondary">(optional)</span>
-              </Label>
-              <Input
-                id="chapters"
-                type="number"
-                min={1}
-                placeholder="Full book"
-                value={chapterLimit}
-                onChange={(e) => setChapterLimit(e.target.value)}
-              />
-            </div>
-          ) : (
-            <div className="flex flex-col gap-2">
-              <Label htmlFor="sections">
-                Section limit{" "}
-                <span className="font-normal text-secondary">(optional)</span>
-              </Label>
-              <Input
-                id="sections"
-                type="number"
-                min={1}
-                placeholder="Full guide"
-                value={sectionLimit}
-                onChange={(e) => setSectionLimit(e.target.value)}
-              />
-            </div>
-          )}
-        </div>
-      </DetailsCollapsible>
+      <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
+        {bookKind === "narrative" ? (
+          <div className="flex flex-col gap-2">
+            <Label htmlFor="chapters">
+              Chapter limit{" "}
+              <span className="font-normal text-secondary">(optional)</span>
+            </Label>
+            <Input
+              id="chapters"
+              type="number"
+              min={1}
+              placeholder="Full book"
+              value={chapterLimit}
+              onChange={(e) => setChapterLimit(e.target.value)}
+            />
+          </div>
+        ) : (
+          <div className="flex flex-col gap-2">
+            <Label htmlFor="sections">
+              Section limit{" "}
+              <span className="font-normal text-secondary">(optional)</span>
+            </Label>
+            <Input
+              id="sections"
+              type="number"
+              min={1}
+              placeholder="Full guide"
+              value={sectionLimit}
+              onChange={(e) => setSectionLimit(e.target.value)}
+            />
+          </div>
+        )}
+      </div>
 
       {error && <Alert variant="error">{error}</Alert>}
 

@@ -136,23 +136,39 @@ def _playwright_pdf(html: str) -> bytes:
 
 
 def html_to_pngs(html: str, out_dir, scale: float = 2.0) -> list[Path]:
-    """Render each .page to a PNG (for visual QA). Returns the PNG paths."""
-    from playwright.sync_api import sync_playwright
+    """Render each .page to a PNG (for visual QA). Returns the PNG paths.
+
+    Fails soft: if Playwright or its Chromium binary is unavailable (e.g. running
+    inside the API docker image, which delegates PDF rendering to the `render`
+    service and doesn't ship a browser), returns [] with a warning instead of
+    crashing the caller. Layout QA is non-blocking, so an empty list just skips
+    the visual pass.
+    """
+    try:
+        from playwright.sync_api import Error as PlaywrightError, sync_playwright
+    except ImportError as exc:
+        log.warning("pngs_skipped_no_playwright", err=str(exc))
+        return []
 
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     paths: list[Path] = []
-    with sync_playwright() as p:
-        browser = p.chromium.launch()
-        try:
-            page = browser.new_page(device_scale_factor=scale)
-            _setup_page(page)
-            _prepare(page, html)
-            for i, el in enumerate(page.query_selector_all(".page"), 1):
-                pth = out / f"page-{i:02d}.png"
-                el.screenshot(path=str(pth))
-                paths.append(pth)
-        finally:
-            browser.close()
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            try:
+                page = browser.new_page(device_scale_factor=scale)
+                _setup_page(page)
+                _prepare(page, html)
+                for i, el in enumerate(page.query_selector_all(".page"), 1):
+                    pth = out / f"page-{i:02d}.png"
+                    el.screenshot(path=str(pth))
+                    paths.append(pth)
+            finally:
+                browser.close()
+    except PlaywrightError as exc:
+        # Missing Chromium binary, sandbox failure, etc. — non-fatal for the pipeline.
+        log.warning("pngs_skipped_browser_unavailable", err=str(exc)[:200])
+        return []
     log.info("pngs_rendered", count=len(paths), out=str(out))
     return paths

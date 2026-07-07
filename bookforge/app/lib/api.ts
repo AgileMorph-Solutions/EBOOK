@@ -57,6 +57,14 @@ export type BookArtifact = {
   qa?: QAResult | null;
 };
 
+export type ErrorKind =
+  | "quota_llm"
+  | "quota_images"
+  | "rate_limit"
+  | "auth"
+  | "network"
+  | "unknown";
+
 export type BookStatus = {
   book_id: string;
   status: "queued" | "running" | "done" | "failed";
@@ -71,6 +79,11 @@ export type BookStatus = {
   stage?: string;
   artifact?: BookArtifact;
   error?: string;
+  error_kind?: ErrorKind;
+  error_detail?: string;
+  failed_stage?: string;
+  retry_count?: number;
+  last_retry_at?: string;
 };
 
 export type BookSummary = {
@@ -80,10 +93,23 @@ export type BookSummary = {
   created_at: string;
   target_pages?: number;
   chapter_limit?: number | null;
+  section_limit?: number | null;
   book_kind?: BookKind;
 };
 
 import { formatApiError } from "./errors";
+import { clearAuth, getToken, redirectToLogin } from "./auth";
+
+function withAuth(headers: Record<string, string>): Record<string, string> {
+  const token = getToken();
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  return headers;
+}
+
+function handleUnauthorized(): void {
+  clearAuth();
+  redirectToLogin();
+}
 
 async function apiFetch<T>(
   path: string,
@@ -100,8 +126,12 @@ async function apiFetch<T>(
 
   const res = await fetch(`${apiUrl}${path}`, {
     ...init,
-    headers,
+    headers: withAuth(headers),
   });
+
+  if (res.status === 401) {
+    handleUnauthorized();
+  }
 
   if (!res.ok) {
     let detail: unknown = res.statusText;
@@ -114,6 +144,19 @@ async function apiFetch<T>(
     throw new Error(formatApiError(detail));
   }
   return res.json() as Promise<T>;
+}
+
+export type LoginResponse = { access_token: string; token_type: string };
+
+export async function login(email: string, password: string): Promise<LoginResponse> {
+  return apiFetch<LoginResponse>("/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ email, password }),
+  });
+}
+
+export async function fetchMe(): Promise<{ id: string; email: string; is_admin: boolean }> {
+  return apiFetch("/auth/me");
 }
 
 export async function checkHealth(): Promise<boolean> {
@@ -137,7 +180,10 @@ export async function downloadBookPdf(
   filename: string
 ): Promise<void> {
   const apiUrl = await getApiUrl();
-  const res = await fetch(`${apiUrl}/books/${bookId}/download`);
+  const res = await fetch(`${apiUrl}/books/${bookId}/download`, {
+    headers: withAuth({}),
+  });
+  if (res.status === 401) handleUnauthorized();
   if (!res.ok) {
     let detail: unknown = res.statusText;
     try {
@@ -190,9 +236,19 @@ export async function listBooks(): Promise<BookSummary[]> {
   return data.books;
 }
 
+export async function retryBook(
+  bookId: string
+): Promise<{ book_id: string; status: string; retry_count: number }> {
+  return apiFetch(`/books/${bookId}/retry`, { method: "POST" });
+}
+
 export async function deleteBook(bookId: string): Promise<void> {
   const apiUrl = await getApiUrl();
-  const res = await fetch(`${apiUrl}/books/${bookId}`, { method: "DELETE" });
+  const res = await fetch(`${apiUrl}/books/${bookId}`, {
+    method: "DELETE",
+    headers: withAuth({}),
+  });
+  if (res.status === 401) handleUnauthorized();
   if (!res.ok && res.status !== 404) {
     throw new Error(formatApiError(res.statusText));
   }

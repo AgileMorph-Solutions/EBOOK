@@ -24,13 +24,24 @@ from threading import BoundedSemaphore, Lock
 from typing import Any, Literal
 
 import structlog
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, field_validator, model_validator
+from sqlalchemy.orm import Session
 
+from bookforge.api.auth import (
+    create_access_token,
+    get_current_user,
+    hash_password,
+    require_admin,
+    verify_password,
+)
+from bookforge.api.error_kinds import classify as classify_pipeline_error
 from bookforge.clients import storage
 from bookforge.config import get_settings
+from bookforge.db import get_db
+from bookforge.models import BookRecord, User
 
 log = structlog.get_logger(__name__)
 
@@ -127,18 +138,23 @@ def _make_book_id(topic: str) -> str:
     return f"{slug}-{uuid.uuid4().hex[:6]}"
 
 
-def _list_jobs() -> list[dict[str, Any]]:
-    """Scan artifact dirs for status.json files, newest first."""
+def _list_jobs(allowed_ids: set[str] | None = None) -> list[dict[str, Any]]:
+    """Scan artifact dirs for status.json files, newest first.
+
+    If ``allowed_ids`` is provided, restrict the listing to those book_ids.
+    """
     books_dir = _ARTIFACTS / "books"
     if not books_dir.is_dir():
         return []
     jobs: list[dict[str, Any]] = []
     for path in books_dir.glob("*/status.json"):
+        book_id = path.parent.name
+        if allowed_ids is not None and book_id not in allowed_ids:
+            continue
         try:
             state = json.loads(path.read_text())
         except Exception:
             continue
-        book_id = path.parent.name
         jobs.append({
             "book_id": book_id,
             "topic": state.get("topic", ""),
@@ -146,10 +162,27 @@ def _list_jobs() -> list[dict[str, Any]]:
             "created_at": state.get("created_at", ""),
             "target_pages": state.get("target_pages"),
             "chapter_limit": state.get("chapter_limit"),
+            "section_limit": state.get("section_limit"),
             "book_kind": state.get("book_kind"),
         })
     jobs.sort(key=lambda j: j.get("created_at") or "", reverse=True)
     return jobs
+
+
+def _assert_can_access(db: Session, user: User, book_id: str) -> BookRecord | None:
+    """Return the BookRecord if the user may access it, else raise.
+
+    A missing record is treated as legacy — allowed only for admins so we don't
+    accidentally leak books that pre-date auth.
+    """
+    record = db.get(BookRecord, book_id)
+    if record is None:
+        if not user.is_admin:
+            raise HTTPException(status_code=404, detail="book not found")
+        return None
+    if record.user_id != user.id and not user.is_admin:
+        raise HTTPException(status_code=403, detail="forbidden")
+    return record
 
 
 # --------------------------------------------------------------------------- #
@@ -172,9 +205,62 @@ class CreateBook(BaseModel):
         return self
 
 
+def _normalize_email(value: str) -> str:
+    v = (value or "").strip().lower()
+    # Lightweight check — full RFC validation would reject dev-only TLDs like `.local`.
+    if "@" not in v or v.startswith("@") or v.endswith("@") or " " in v:
+        raise ValueError("must be a valid email address")
+    return v
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+    @field_validator("email")
+    @classmethod
+    def _v_email(cls, v: str) -> str:
+        return _normalize_email(v)
+
+
+class RegisterRequest(BaseModel):
+    email: str
+    password: str
+    is_admin: bool = False
+
+    @field_validator("email")
+    @classmethod
+    def _v_email(cls, v: str) -> str:
+        return _normalize_email(v)
+
+    @field_validator("password")
+    @classmethod
+    def _v_password(cls, v: str) -> str:
+        if len(v) < 8:
+            raise ValueError("must be at least 8 characters")
+        return v
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+
+class UserOut(BaseModel):
+    id: str
+    email: str
+    is_admin: bool
+
+    @classmethod
+    def from_user(cls, user: User) -> "UserOut":
+        return cls(id=str(user.id), email=user.email, is_admin=user.is_admin)
+
+
 def _enqueue_book(
     req: CreateBook,
     background_tasks: BackgroundTasks,
+    user: User,
+    db: Session,
     *,
     source_filename: str | None = None,
 ) -> dict[str, str]:
@@ -188,10 +274,29 @@ def _enqueue_book(
         "section_limit": req.section_limit,
         "book_kind": req.book_kind,
         "source_type": "youtube" if req.youtube_url else "text",
+        "owner_id": str(user.id),
+        # Snapshot the request so a future /retry can reconstruct it without the
+        # user re-submitting the same text/URL.
+        "source_snapshot": {
+            "topic": req.topic,
+            "text": req.text,
+            "youtube_url": req.youtube_url,
+            "target_pages": req.target_pages,
+            "chapter_limit": req.chapter_limit,
+            "section_limit": req.section_limit,
+            "book_kind": req.book_kind,
+        },
+        "retry_count": 0,
     }
     if source_filename:
         state["source_filename"] = source_filename
     _set_state(book_id, **state)
+
+    # Persist ownership (skipped for the anonymous admin used when AUTH_ENABLED=false).
+    if get_settings().auth_enabled:
+        db.add(BookRecord(book_id=book_id, user_id=user.id, topic=req.topic))
+        db.commit()
+
     background_tasks.add_task(_run_pipeline, book_id, req)
     return {"book_id": book_id, "status": "queued"}
 
@@ -214,19 +319,55 @@ def health():
     }
 
 
+@app.post("/auth/login", response_model=TokenResponse)
+def login(req: LoginRequest, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.email == req.email).one_or_none()
+    if user is None or not user.is_active or not verify_password(req.password, user.hashed_password):
+        raise HTTPException(status_code=401, detail="invalid credentials")
+    return TokenResponse(access_token=create_access_token(user))
+
+
+@app.post("/auth/register", response_model=UserOut, status_code=201)
+def register(
+    req: RegisterRequest,
+    db: Session = Depends(get_db),
+    _admin: User = Depends(require_admin),
+):
+    """Admin-only: create a new user."""
+    if db.query(User).filter(User.email == req.email).one_or_none():
+        raise HTTPException(status_code=409, detail="email already registered")
+    user = User(email=req.email, hashed_password=hash_password(req.password), is_admin=req.is_admin)
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return UserOut.from_user(user)
+
+
+@app.get("/auth/me", response_model=UserOut)
+def me(user: User = Depends(get_current_user)):
+    return UserOut.from_user(user)
+
+
 @app.get("/books")
-def list_books():
-    """Recent book jobs, newest first."""
-    return {"books": _list_jobs()}
+def list_books(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Recent book jobs, newest first (filtered to the current user unless admin)."""
+    if user.is_admin:
+        return {"books": _list_jobs()}
+    if not get_settings().auth_enabled:
+        return {"books": _list_jobs()}
+    owned = {r.book_id for r in db.query(BookRecord.book_id).filter(BookRecord.user_id == user.id)}
+    return {"books": _list_jobs(allowed_ids=owned)}
 
 
 @app.post("/books", status_code=202)
-def create_book(req: CreateBook, background_tasks: BackgroundTasks):
-    """Submit a book job. Returns immediately with a readable book_id.
-
-    Poll GET /books/{book_id} for progress, then GET /books/{book_id}/download.
-    """
-    return _enqueue_book(req, background_tasks)
+def create_book(
+    req: CreateBook,
+    background_tasks: BackgroundTasks,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Submit a book job. Returns immediately with a readable book_id."""
+    return _enqueue_book(req, background_tasks, user, db)
 
 
 @app.post("/books/upload", status_code=202)
@@ -238,6 +379,8 @@ async def create_book_upload(
     chapter_limit: int | None = Form(None),
     section_limit: int | None = Form(None),
     book_kind: Literal["practical_guide", "narrative"] = Form("practical_guide"),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     """Submit a book job via multipart file upload."""
     if not topic.strip():
@@ -268,22 +411,47 @@ async def create_book_upload(
     return _enqueue_book(
         req,
         background_tasks,
+        user,
+        db,
         source_filename=file.filename or "upload.txt",
     )
 
 
+def _reclassify_legacy_error(state: dict[str, Any]) -> dict[str, Any]:
+    """Older failed jobs stored only the raw `error` string. Re-classify on read
+    so the UI shows the same friendly message without needing to re-run them."""
+    if state.get("status") != "failed" or state.get("error_kind"):
+        return state
+    raw = state.get("error") or ""
+    if not raw:
+        return state
+    classified = classify_pipeline_error(Exception(raw))
+    return {**state, "error": classified.message, "error_kind": classified.kind,
+            "error_detail": classified.detail or raw}
+
+
 @app.get("/books/{book_id}")
-def get_book(book_id: str):
+def get_book(
+    book_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """Current job status and, when done, artifact metadata."""
+    _assert_can_access(db, user, book_id)
     state = _read_state(book_id)
     if state is None:
         raise HTTPException(status_code=404, detail="book not found")
-    return {"book_id": book_id, **state}
+    return {"book_id": book_id, **_reclassify_legacy_error(state)}
 
 
 @app.get("/books/{book_id}/download")
-def download(book_id: str):
+def download(
+    book_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """Download the finished PDF. Returns 409 if the job isn't done yet."""
+    _assert_can_access(db, user, book_id)
     state = _read_state(book_id)
     if state is None:
         raise HTTPException(status_code=404, detail="book not found")
@@ -303,14 +471,76 @@ def download(book_id: str):
     )
 
 
+@app.post("/books/{book_id}/retry", status_code=202)
+def retry_book(
+    book_id: str,
+    background_tasks: BackgroundTasks,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Restart a failed pipeline from the last completed stage.
+
+    Reuses bible.json, chapters.json, and any images/PDFs already on disk. Only
+    the failing stage and everything downstream is re-run. The original source
+    (text / youtube_url) is read back from status.json.source_snapshot.
+    """
+    _assert_can_access(db, user, book_id)
+    state = _read_state(book_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="book not found")
+    current = state.get("status")
+    if current != "failed":
+        raise HTTPException(
+            status_code=409,
+            detail=f"book not in a retryable state — current status: {current}",
+        )
+    snap = state.get("source_snapshot")
+    if not snap:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "This book has no source snapshot from its original submission "
+                "(pre-retry-feature). Please submit a new book."
+            ),
+        )
+    try:
+        req = CreateBook(**snap)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"snapshot invalid: {exc}")
+
+    retry_count = int(state.get("retry_count") or 0) + 1
+    _set_state(
+        book_id,
+        status="queued",
+        stage=None,
+        error=None,
+        error_kind=None,
+        error_detail=None,
+        artifact=None,
+        retry_count=retry_count,
+        last_retry_at=datetime.now(timezone.utc).isoformat(),
+    )
+    background_tasks.add_task(_run_pipeline, book_id, req, resume=True)
+    log.info("book_retry_enqueued", book_id=book_id, retry_count=retry_count)
+    return {"book_id": book_id, "status": "queued", "retry_count": retry_count}
+
+
 @app.delete("/books/{book_id}", status_code=204)
-def delete_book(book_id: str):
+def delete_book(
+    book_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """Archive (delete) a job and its artifacts. 404 if it never existed."""
-    if _read_state(book_id) is None:
+    record = _assert_can_access(db, user, book_id)
+    if _read_state(book_id) is None and record is None:
         raise HTTPException(status_code=404, detail="book not found")
     book_dir = _ARTIFACTS / "books" / book_id
     if book_dir.is_dir():
         shutil.rmtree(book_dir, ignore_errors=True)
+    if record is not None:
+        db.delete(record)
+        db.commit()
     log.info("book_deleted", book_id=book_id)
     return Response(status_code=204)
 
@@ -319,8 +549,11 @@ def delete_book(book_id: str):
 # Background pipeline runner
 # --------------------------------------------------------------------------- #
 
-def _run_pipeline(book_id: str, req: CreateBook) -> None:
+def _run_pipeline(book_id: str, req: CreateBook, *, resume: bool = False) -> None:
+    current_stage: list[str | None] = [None]
+
     def on_stage(stage: str) -> None:
+        current_stage[0] = stage
         _set_state(book_id, stage=stage)
 
     # Block here (still "queued") until a pipeline slot is free.
@@ -339,8 +572,17 @@ def _run_pipeline(book_id: str, req: CreateBook) -> None:
                 section_limit=req.section_limit,
                 book_kind=req.book_kind,
                 on_stage=on_stage,
+                resume=resume,
             )
             _set_state(book_id, status="done", artifact=artifact.model_dump())
         except Exception as exc:
             log.exception("pipeline_failed", book_id=book_id)
-            _set_state(book_id, status="failed", error=str(exc))
+            classified = classify_pipeline_error(exc)
+            _set_state(
+                book_id,
+                status="failed",
+                error=classified.message,
+                error_kind=classified.kind,
+                error_detail=classified.detail,
+                failed_stage=current_stage[0],
+            )

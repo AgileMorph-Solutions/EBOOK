@@ -29,6 +29,12 @@ class Budget:
         with self._lock:
             self._spent += usd
 
+    def reset(self) -> None:
+        """Zero the accumulator. Called at the top of each pipeline attempt so
+        retries don't inherit prior spend."""
+        with self._lock:
+            self._spent = 0.0
+
     @property
     def spent(self) -> float:
         return self._spent

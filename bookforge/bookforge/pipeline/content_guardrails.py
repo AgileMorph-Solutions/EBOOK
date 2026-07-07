@@ -9,8 +9,47 @@ import re
 
 from bookforge.schemas import BookBible, Chapter, SectionPlan
 
+# NB: gap words must match hyphenated words (e.g. "200 Best-Loved Kitchen Tips") —
+# plain \w+ silently failed there, so the subtitle promise was never parsed and
+# the book shipped 1,176 entries under a "200" subtitle.
+_COUNT_NOUNS = (
+    r"ways?|tips?|uses?|tricks?|methods?|ideas?|hacks?|recipes?|dishes?|"
+    r"projects?|patterns?|exercises?|lessons?|entries|habits?|steps?|rules?|"
+    r"principles?|moves?|shifts?|strategies|strategy|secrets?|mistakes?|"
+    r"reasons?|laws?|keys?|changes?|foods?|drinks?|workouts?|stretches|poses?|"
+    r"questions?|skills?|routines?|swaps?|rituals?|practices?"
+)
+# Spelled-out cardinals (ten … ninety-nine) so "sixty habits" is caught too.
+_ONES = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+         "seven": 7, "eight": 8, "nine": 9}
+_TEENS = {"ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14,
+          "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18,
+          "nineteen": 19}
+_TENS = {"twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60,
+         "seventy": 70, "eighty": 80, "ninety": 90}
+_NUMBER_WORDS = {**_ONES, **_TEENS, **_TENS}
+_WORDS_ALT = "|".join(sorted(_NUMBER_WORDS, key=len, reverse=True))
+_WORD_COUNT_RE = re.compile(
+    r"\b((?:%s)(?:[- ](?:%s))?)\b(?:\s+[\w-]+){0,4}\s*(?:%s)\b"
+    % (_WORDS_ALT, "|".join(_ONES), _COUNT_NOUNS),
+    re.IGNORECASE,
+)
+
+
+def _word_to_int(phrase: str) -> int | None:
+    """'sixty' → 60, 'twenty-one' → 21. None if not a recognized cardinal."""
+    parts = re.split(r"[- ]", phrase.strip().lower())
+    total = 0
+    for p in parts:
+        if p in _NUMBER_WORDS:
+            total += _NUMBER_WORDS[p]
+        elif p:
+            return None
+    return total or None
+
+
 _COUNT_RE = re.compile(
-    r"\b(\d{2,4})\b(?:\s+\w+){0,4}\s*(?:\+?\s*)?(?:ways?|tips?|uses?|tricks?|methods?|ideas?|hacks?)\b",
+    r"\b(\d{2,4})\b(?:\s+[\w-]+){0,4}\s*(?:\+?\s*)?(?:%s)\b" % _COUNT_NOUNS,
     re.IGNORECASE,
 )
 _INFLATED_RE = re.compile(
@@ -18,18 +57,93 @@ _INFLATED_RE = re.compile(
     re.IGNORECASE,
 )
 _BARE_TOTAL_RE = re.compile(
-    r"\b(\d{2,4})\s+(?:numbered\s+)?(?:tips?|ways?|uses?)\b",
+    r"\b(\d{2,4})\s+(?:numbered\s+)?(?:%s)\b" % _COUNT_NOUNS,
+    re.IGNORECASE,
+)
+
+
+_TITLE_COUNT_RE = re.compile(
+    r"\b(\d{1,4})\b(?:\s+[\w-]+){0,4}\s*(?:\+?\s*)?(?:%s)\b" % _COUNT_NOUNS,
     re.IGNORECASE,
 )
 
 
 def parse_promised_count(title: str, subtitle: str) -> int | None:
-    """Extract a marketing tip count from title or subtitle (e.g. '250 ways')."""
+    """Extract a marketing count from title or subtitle — digits ('250 ways') or
+    spelled-out ('Fourteen Habits')."""
     for text in (subtitle, title):
-        m = _COUNT_RE.search(text)
+        m = _TITLE_COUNT_RE.search(text or "")
         if m:
             return int(m.group(1))
+        w = _WORD_COUNT_RE.search(text or "")
+        if w:
+            n = _word_to_int(w.group(1))
+            if n:
+                return n
     return None
+
+
+def reconcile_promise(title: str, subtitle: str, planned: int,
+                      *, tolerance: float = 0.10) -> tuple[str, str, bool]:
+    """If the title/subtitle promises a count more than `tolerance` away from
+    the planned entry total, deterministically rewrite the number in place.
+
+    Returns (title, subtitle, changed). The cheapest possible fix for the
+    "subtitle says 200, book contains 1,176" defect — applied at bible time,
+    before any content is written.
+    """
+    promised = parse_promised_count(title, subtitle)
+    if promised is None or planned <= 0:
+        return title, subtitle, False
+    if abs(promised - planned) <= tolerance * promised:
+        return title, subtitle, False
+
+    def _swap(text: str) -> str:
+        m = _COUNT_RE.search(text)
+        if not m:
+            return text
+        s, e = m.span(1)
+        return text[:s] + str(planned) + text[e:]
+
+    return _swap(title), _swap(subtitle), True
+
+
+def _rewrite_counts(text: str, target: int) -> str:
+    """Replace every count token (digit or spelled-out, e.g. '14'/'fourteen'
+    before a count noun) with `target`, so all planner-authored copy states ONE
+    number. Leaves non-count numbers untouched."""
+    if not text:
+        return text
+
+    def _swap(m: "re.Match") -> str:
+        return m.group(0).replace(m.group(1), str(target), 1)
+
+    text = _TITLE_COUNT_RE.sub(_swap, text)
+    text = _WORD_COUNT_RE.sub(_swap, text)
+    return text
+
+
+def propagate_promised_count(bible: BookBible) -> None:
+    """Make every planner-authored field state the ONE promised count — title,
+    subtitle, cover straplines, the how-to page, section/part titles, list lead.
+    The chapter BODY is handled separately by the QA fix-loop
+    (find_count_contradictions). Fixes the "title 50 / kicker 14 / part
+    'THE FOURTEEN HABITS'" incoherence."""
+    target = _promised(bible)
+    if target <= 0:
+        return
+    bible.title = _rewrite_counts(bible.title, target)
+    bible.subtitle = _rewrite_counts(bible.subtitle, target)
+    if bible.profile:
+        bible.profile.cover_kicker = _rewrite_counts(bible.profile.cover_kicker, target)
+        bible.profile.cover_foot = _rewrite_counts(bible.profile.cover_foot, target)
+    if bible.how_to:
+        bible.how_to.lead = _rewrite_counts(bible.how_to.lead, target)
+        bible.how_to.points = [_rewrite_counts(p, target) for p in bible.how_to.points]
+    for s in bible.sections:
+        s.title = _rewrite_counts(s.title, target)
+        s.part_title = _rewrite_counts(s.part_title, target)
+    bible.list_lead = _rewrite_counts(bible.list_lead, target)
 
 
 def planned_use_count(sections: list[SectionPlan]) -> int:
@@ -49,18 +163,46 @@ def _planned(bible: BookBible) -> int:
 
 def coherence_rules(bible: BookBible) -> str:
     """Prompt block injected into practical-guide writers."""
+    from bookforge.schemas import profile_of
+
     promised = _promised(bible)
     planned = _planned(bible)
+    noun = profile_of(bible).entry_schema.entry_noun
     return (
         f'BOOK COHERENCE: This book is titled "{bible.title}" with subtitle '
-        f'"{bible.subtitle}". It will contain exactly {planned} numbered tips. '
-        f"The marketed count is {promised}. "
-        f"Never claim a different total in prose (e.g. do not say '700 ways', "
-        f"'800 tips', or 'over 500 uses'). "
-        f"Section headings must match their topic. "
-        f"Use correct spelling for household product names and chemical names "
-        f"(e.g. hydrogen peroxide, baking soda). No invented words."
+        f'"{bible.subtitle}". It contains exactly {promised} {noun}s — that is the '
+        f"ONE true total. NEVER state any other count anywhere in prose, whether "
+        f"in digits or spelled out (do not write \"sixty {noun}s\" if the book has "
+        f"{promised}). Section headings must match their topic. "
+        f"Use correct, consistent spelling for every ingredient, product, and "
+        f"proper-noun name — one canonical name per thing, book-wide. "
+        f"No invented words."
     )
+
+
+def find_count_contradictions(
+    chapters: list[Chapter], bible: BookBible,
+) -> list[str]:
+    """Every prose mention of a total (digit OR spelled-out) that disagrees with
+    the book's promised count — precise faults for the QA fix-loop to rewrite."""
+    promised = _promised(bible)
+    if promised <= 0:
+        return []
+    out: list[str] = []
+    for loc, text in _collect_text(chapters):
+        seen: set[int] = set()
+        for m in _COUNT_RE.finditer(text):
+            seen.add(int(m.group(1)))
+        for m in _WORD_COUNT_RE.finditer(text):
+            n = _word_to_int(m.group(1))
+            if n:
+                seen.add(n)
+        for count in seen:
+            if count != promised and count >= 5:
+                out.append(
+                    f"{loc}: prose says {count} but the book has {promised} — "
+                    f"rewrite to the correct total: {text[:70]!r}")
+    return out
 
 
 def _collect_text(chapters: list[Chapter]) -> list[tuple[str, str]]:

@@ -1,26 +1,40 @@
 """Stage 1 — Book Bible.
 
 Narrative books: chapter plan for illustrated nonfiction.
-Practical guides: section plan with card/list quotas for the senior card layout.
+Practical guides: profile-driven planning in three steps —
+
+    1. PROFILE (Opus): derive the EditorialProfile (genre, audience, angle,
+       persona, safety domain, structural template, labels) from topic+source.
+       Nothing is keyword-matched; every editorial decision is generated per
+       book, then sanity-checked by a second LLM pass.
+    2. OUTLINE (Opus): a two-level outline — parts with a narrative arc,
+       evocative chapter titles, and entry-level briefs — sized by the
+       template's density model.
+    3. CRITIQUE (draft model): an "acquisitions editor" pass revises the
+       outline before any prose is written (the cheapest place to fix
+       structure).
 """
 from __future__ import annotations
-
-import re
 
 import structlog
 from pydantic import BaseModel, Field, model_validator
 
 from bookforge.clients import llm
+from bookforge.config import settings
 from bookforge.layout import theme
-from bookforge.pipeline.content_guardrails import parse_promised_count, planned_use_count
+from bookforge.pipeline import templates
+from bookforge.pipeline.content_guardrails import (
+    parse_promised_count, planned_use_count, propagate_promised_count,
+    reconcile_promise,
+)
 from bookforge.schemas import (
-    ArtStyle, BookBible, ChapterPlan, HowToPage, SectionPlan, SourceDoc,
-    SpecialPlan, VoiceStyle,
+    ArtStyle, BookBible, DesignKit, EditorialProfile, EntrySchema, HowToPage,
+    SafetyCard, SectionPlan, SourceDoc, SpecialPlan, VoiceStyle,
 )
 
 log = structlog.get_logger(__name__)
 
-_SYSTEM = """You are a senior commissioning editor and art director at a premium \
+_SYSTEM = """You are a veteran commissioning editor and art director at a premium \
 illustrated-nonfiction publisher. You design books that read like they were \
 written by an award-winning author and look like they were art-directed by a \
 top studio. You are precise, opinionated, and allergic to generic AI phrasing."""
@@ -44,73 +58,340 @@ and a style_suffix string that will be appended to EVERY image prompt.
 - A VOICE guide: narrator persona, register, POV, pacing, vocabulary, and a \
 banned_patterns list of clichés/AI-tells to never use.
 - A chapter plan: each chapter has a title, one-paragraph summary, 3-6 concrete \
-beats, and a page_budget. The page_budgets should sum to roughly {pages}. \
-For very short books (under ~10 pages), use a single short chapter; never plan \
-more chapters or page_budget than the target can support.
-- If the topic or title promises a numbered list (e.g. "Top 50 Ways…", "9 Things…"), \
-the chapter beats must cover exactly that many distinct items across the book — \
-no more, no fewer — and the title must not promise a count the plan cannot deliver.
+beats, and a page_budget. The page_budgets should sum to roughly {pages}.
 - recurring_motifs that tie the book together.
 
 Be specific and editorial. No filler."""
 
-_GUIDE_SYSTEM = """You are a senior editor designing a SENIOR-FIRST practical home \
-guide (large print, card-based how-to layout). The book teaches cheap, safe, \
-step-by-step tips grounded in the source material. Plain English only."""
 
-_GUIDE_PROMPT = """Design the Book Bible for a senior practical home guide.
+# --------------------------------------------------------------------------- #
+# Step 1 — editorial profile (Opus, zero keywords)
+# --------------------------------------------------------------------------- #
+class _SafetyCardDraft(BaseModel):
+    pair: str
+    why: str
+
+
+class _ProfileDraft(BaseModel):
+    """LLM-decided editorial brief; density knobs come from the template spec."""
+
+    genre: str
+    audience: str
+    angle: str
+    persona: str
+    safety_domain: str = "general_home"  # chemical | pest | food | general_home | none
+    structure_template: str = "essay_entries"
+    entry_noun: str = "entry"
+    need_label: str = "What You Need"
+    steps_label: str = "Steps"
+    requires_materials: bool = True   # False for habit/mindset guides (no "What You Need")
+    require_quantities: bool = False
+    show_savings: bool = False
+    show_meta: bool = False
+    min_steps: int = 3
+    max_steps: int = 6
+    headnote_lo: int = 20
+    headnote_hi: int = 40
+    cover_kicker: str = ""
+    cover_foot: str = ""
+    back_matter_heading: str = ""
+    back_matter_angle: str = ""
+    grounded_content: str = ""
+    authored_content: str = ""
+    style_sheet: list[str] = Field(default_factory=list)
+    # --- generated safety brief (topic-specific; no static canon exists) ---
+    safety_rules: str = ""
+    safety_cards: list[_SafetyCardDraft] = Field(default_factory=list)
+    danger_patterns: list[list[str]] = Field(default_factory=list)
+
+
+_PROFILE_PROMPT = """You are the publisher deciding the editorial brief for a new
+practical nonfiction book. The client's TITLE/TOPIC wording is the contract —
+honor it literally (a "Cookbook" must be a real cookbook with complete recipes,
+whatever the source text contains; a "Field Guide" must identify things; etc.).
+
+TOPIC (the client's request): {topic}
+
+SOURCE MATERIAL EXCERPT:
+\"\"\"
+{excerpt}
+\"\"\"
+
+Decide the brief. Derive EVERYTHING from this topic and source — do not carry
+assumptions from other books, and do not default to any particular audience,
+money angle, or domain unless the topic itself says so.
+
+- genre: the kind of book the title promises, in 1-3 words.
+- audience: who will actually buy and use this book.
+- angle: the editorial angle in one sentence — what makes THIS book distinct.
+- persona: the author persona a top publisher would hire for exactly this book.
+- safety_domain: what the reader physically does while using the book —
+  "food" (cooking/eating), "chemical" (cleaning products), "pest" (pest
+  control), "general_home" (household tasks), or "none" (no physical risk).
+- structure_template: pick ONE from this menu (by structure, not by topic):
+{template_menu}
+- entry_noun / need_label / steps_label: what the repeating unit is called and
+  how its parts are labeled (e.g. recipes need "Ingredients" and "Method" with
+  serves/time; repair tips need "What You Need"/"Steps").
+- requires_materials: does an entry in this book need PHYSICAL things the reader
+  must have in hand (ingredients, tools, supplies)? true for recipes/projects/
+  repairs; FALSE for habit, mindset, behaviour, finance, or advice books where an
+  entry needs nothing physical — those must NOT show a "What You Need" list.
+- require_quantities: true when every need-list item must carry an exact amount
+  (always true for recipes). Only meaningful when requires_materials is true.
+- show_savings: true ONLY if the topic is explicitly about saving money.
+- show_meta: true when entries need a yield/time strip (recipes, projects).
+- min_steps/max_steps and headnote_lo/headnote_hi (word range for the entry
+  intro/headnote): size them to the genre.
+- cover_kicker / cover_foot: short cover strap lines a top publisher would use
+  for this exact book. Never generic.
+- back_matter_heading / back_matter_angle: the back-matter page this genre's
+  readers expect (e.g. substitutions & pantry notes; resources; when to call a
+  professional) — derived from the topic.
+- grounded_content: which statements MUST come from the source (history, dates,
+  names, claims).
+- authored_content: what the writer DEVELOPS from the source to professional
+  depth (e.g. the complete recipes themselves, fully worked from the source's
+  dishes and era). Frame this as developing/expanding the source's real ideas —
+  the writer may add a genuinely new, concrete, expert-recognizable entry when it
+  fits the subject, but must NEVER invent hollow entries to reach a count, and
+  never write an entry about an attitude or feeling. Depth over volume.
+- style_sheet: 3-6 term-consistency rules for this book (one canonical name per
+  ingredient/tool/proper noun, unit style, etc.).
+- SAFETY BRIEF, written fresh for THIS topic (there is no pre-made canon —
+  reason from what the reader will physically do):
+  * safety_rules: the non-negotiable safety rules a professional editor in this
+    exact domain would force every writer to obey, written as direct prompt
+    instructions ("SAFETY RULES (obey exactly): - …"). Cover the real risks of
+    this topic with concrete thresholds where they exist. Empty if
+    safety_domain is "none".
+  * safety_cards: exactly 4 "never do this" pairs for the book's Safety First
+    page — each has pair (the two things never to combine, or the act never to
+    do, 3-7 words) and why (one plain sentence). Empty if no physical risk.
+  * danger_patterns: 5-10 automated-scan patterns; each is a list of 2-3
+    lowercase substrings that, appearing together in one instruction, would
+    indicate something unsafe for this topic. Empty if no physical risk."""
+
+
+_PROFILE_CHECK_PROMPT = """Review this editorial brief for a book. Fix anything
+inconsistent with the topic — wrong safety_domain for what the reader physically
+does, an audience or angle the topic doesn't support, labels that don't fit the
+genre, a structure_template that fights the title's promise, or leftover
+assumptions that belong to some other book. Return the corrected brief (or the
+same brief if it is already right).
 
 TOPIC: {topic}
-TARGET LENGTH: ~{pages} pages total.
 
-SOURCE MATERIAL (sections and tips must be grounded here):
-\"\"\"
-{source}
-\"\"\"
+BRIEF:
+{brief}"""
 
-Produce:
-- title + subtitle (money-saving / practical angle for seniors).
-- audience: seniors 65+, large-print friendly.
-- tone: warm, plain, reassuring.
-- art_style: bright clean home photography; palette matches the topic; \
-negative_prompt must include "no text, no clutter, no faces".
-- voice: second person, short sentences, everyday words; banned_patterns list.
-- base_sections: {base_lo}-{base_hi} DISTINCT topic areas from the source (e.g. \
-"Kitchen Cleaning"). Aim for the higher end so a long book never repeats itself; \
-each area must be genuinely different (not a rewording of another). \
-Each has title, one-paragraph summary, and divider_subject — a CLEAN vertical \
-portrait scene for the section opener photo panel (centered subject with margin \
-on all sides; one bowl, plate, or tidy scene — NOT a wide pantry shelf that \
-gets cropped). No pests, no scary imagery.
-- how_to: heading, lead (25-40 words), exactly 4 bullet points for the welcome page.
-- safety_key: "hp" if hydrogen peroxide / cleaning chemicals dominate; "pest" if \
-pest control dominates; else "general".
-- theme_name: "pest_guard" if pest topic; "senior_cookbook" if food/cooking/recipe \
-topic; "home_clean" if cleaning/chemical topic; pick from source content.
-- list_lead: one sentence for quick-tip list pages (e.g. "Quick jobs you can do \
-in a minute or two with items already at home.").
-- pro_topic: short phrase for the "when to call a professional" page.
-- cover_subject: photo prompt for the cover — match the book type (warm kitchen \
-scene for food books; tidy clean home for cleaning; protected home for pest). \
-No text, no faces.
-- specials: 2-3 special pages — each has after_section (1-based index into \
-base_sections, NOT the expanded tier list), kind ("chart" or "checklist"), heading, and for charts: columns \
-(3 strings) + rows (5-8); for checklists: about (one sentence) + items (8-12).
 
-TITLE/SUBTITLE RULES:
-- If the subtitle promises a tip count (e.g. "250 ways"), that number must be \
-realistic for ~{pages} pages and the section count you plan — do NOT promise \
-"700 ways" or "800 tips" unless the book will actually contain that many.
-- Use correct spelling in titles, headings, and product names.
-- Headings must accurately describe the section topic.
+def _profile_from_draft(d: _ProfileDraft) -> EditorialProfile:
+    spec = templates.spec_for(d.structure_template)
+    safety_domain = d.safety_domain if d.safety_domain in (
+        "chemical", "pest", "food", "general_home", "none") else "general_home"
+    return EditorialProfile(
+        genre=d.genre,
+        audience=d.audience,
+        angle=d.angle,
+        persona=d.persona,
+        safety_domain=safety_domain,  # type: ignore[arg-type]
+        entry_schema=EntrySchema(
+            entry_noun=d.entry_noun or "entry",
+            need_label=d.need_label or "What You Need",
+            steps_label=d.steps_label or "Steps",
+            requires_materials=d.requires_materials,
+            require_quantities=d.require_quantities and d.requires_materials,
+            show_savings=d.show_savings,
+            show_meta=d.show_meta,
+            min_steps=max(1, d.min_steps),
+            max_steps=max(d.min_steps, d.max_steps),
+            headnote_lo=max(10, d.headnote_lo),
+            headnote_hi=max(d.headnote_lo, d.headnote_hi),
+        ),
+        structure_template=spec.key,  # type: ignore[arg-type]
+        narrative_share=spec.narrative_share,
+        pages_per_entry=spec.pages_per_entry,
+        tiers=spec.tiers,
+        quick_list_weight=spec.quick_list_weight,
+        image_density=spec.image_density,  # type: ignore[arg-type]
+        feature_menu=list(spec.feature_menu),
+        cover_kicker=d.cover_kicker,
+        cover_foot=d.cover_foot,
+        back_matter_heading=d.back_matter_heading or "Notes & Resources",
+        back_matter_angle=d.back_matter_angle,
+        grounded_content=d.grounded_content,
+        authored_content=d.authored_content,
+        style_sheet=d.style_sheet,
+        safety_rules=d.safety_rules,
+        safety_cards=[SafetyCard(pair=c.pair, why=c.why) for c in d.safety_cards],
+        danger_patterns=[p for p in d.danger_patterns if p],
+    )
 
-Be specific. Every base_section must reflect the source, not generic filler."""
+
+def derive_profile(
+    source: SourceDoc, *, overrides: dict | None = None,
+) -> EditorialProfile:
+    """Derive the per-book editorial brief. Planning runs on the strongest
+    model (CONTENT_MODEL) — it is the highest-leverage call in the pipeline —
+    with a cheap LLM self-check instead of any keyword table."""
+    excerpt = source.text[:12000]
+    draft = llm.structured(
+        _PROFILE_PROMPT.format(
+            topic=source.topic, excerpt=excerpt,
+            template_menu=templates.menu_text(),
+        ),
+        _ProfileDraft, system=_SYSTEM,
+        model=settings.content_model, max_tokens=3000,
+    )
+    try:
+        checked = llm.structured(
+            _PROFILE_CHECK_PROMPT.format(
+                topic=source.topic, brief=draft.model_dump_json(indent=1)),
+            _ProfileDraft, system=_SYSTEM,
+            model=settings.draft_model, max_tokens=3000,
+        )
+        draft = checked
+    except Exception as exc:  # self-check is best-effort polish
+        if llm.is_provider_unavailable(exc):
+            raise
+        log.warning("profile_check_skipped", err=str(exc)[:160])
+
+    profile = _profile_from_draft(draft)
+    if overrides:
+        profile = profile.model_copy(update={
+            k: v for k, v in overrides.items() if hasattr(profile, k)
+        })
+    log.info("profile_derived", genre=profile.genre,
+             template=profile.structure_template, audience=profile.audience,
+             safety_domain=profile.safety_domain,
+             entry_noun=profile.entry_schema.entry_noun)
+    return profile
+
+
+# --------------------------------------------------------------------------- #
+# Per-book art direction — a bespoke DesignKit so no two books look alike.
+# --------------------------------------------------------------------------- #
+class _DesignDraft(BaseModel):
+    mood: str = ""
+    paper: str = ""
+    panel: str = ""
+    panel_dark: str = ""
+    ink: str = ""
+    accent: str = ""
+    deep: str = ""
+    gold: str = ""
+    muted: str = ""
+    onpaper_soft: str = ""
+    savings: str = "#2E7D5B"
+    caution: str = "#B5651D"
+    danger: str = "#B3261E"
+    display_font: str = ""   # a family NAME from the display menu
+    body_font: str = ""      # a family NAME from the body menu
+    cond_font: str = ""      # a family NAME from the cond menu
+    cover_art_direction: str = ""
+    motif: str = ""
+
+
+_DESIGN_PROMPT = """You are the ART DIRECTOR giving this book a BESPOKE visual
+identity — it must look unmistakably like THIS topic, never a generic template.
+Two books on different topics must never look alike.
+
+TOPIC: {topic}
+GENRE / EDITORIAL ANGLE: {genre} — {angle}
+AUDIENCE: {audience}
+
+Design a cohesive, cinematic, PRINT-grade system:
+- mood: 2-4 words for the visual mood (reason from the subject, e.g. "clinical,
+  energetic, modern-athletic" for fitness; "warm, rustic, heritage" for cooking).
+- PALETTE (hex, "#RRGGBB"). Choose colours that BELONG to this topic — never a
+  default cream+teal:
+  * paper — the page background (usually a near-white or a soft tinted ground; may
+    be bold if the topic earns it).
+  * panel — a subtle tint of paper for light boxes.
+  * panel_dark — a deep, rich shade for dark step boxes.
+  * ink — body text; must be very dark on paper.
+  * accent — the primary brand/heading colour.
+  * deep — the darkest brand shade (dividers, bands).
+  * gold — a secondary/metallic accent (rules, step numbers).
+  * muted — eyebrows/captions.
+  * onpaper_soft — a soft body variant.
+  CONTRAST IS MANDATORY (the design is rejected otherwise): ink-on-paper must be
+  near-black-on-light (ratio >= 6:1); white-on-panel_dark >= 4.5:1; accent-on-
+  paper >= 3:1; ink-on-panel >= 4.5:1.
+- FONTS — choose ONE family per role, by EXACT NAME, from this menu only:
+{font_menu}
+  Pair them for the topic's mood: a distinctive display + a highly legible body +
+  a clean condensed label face. Return display_font, body_font, cond_font.
+- cover_art_direction: one sentence directing cover + interior photography for
+  this topic (subject, lighting, palette, composition; no text, no faces).
+- motif: a small recurring visual motif for the book."""
+
+
+def _stack_for(role: str, name: str) -> str:
+    """Map a chosen font family NAME to its css stack, defaulting per role."""
+    lib = theme.FONT_LIBRARY.get(role, {})
+    if name in lib:
+        return lib[name]
+    return {"display": theme._GUIDE_FONTS["display"],
+            "body": theme._GUIDE_FONTS["body"],
+            "cond": theme._GUIDE_FONTS["cond"]}[role]
+
+
+def derive_design(source: SourceDoc, profile: EditorialProfile) -> DesignKit | None:
+    """Plan a bespoke per-book DesignKit (Opus). Returns None if generation fails
+    or the palette can't pass contrast validation — the caller then falls back to
+    the legacy preset menu, so this can never break a book."""
+    try:
+        d = llm.structured(
+            _DESIGN_PROMPT.format(
+                topic=source.topic, genre=profile.genre,
+                angle=profile.angle, audience=profile.audience,
+                font_menu=theme.design_font_menu(),
+            ),
+            _DesignDraft, system=_SYSTEM,
+            model=settings.content_model, max_tokens=1500,
+        )
+    except Exception as exc:
+        if llm.is_provider_unavailable(exc):
+            raise
+        log.warning("design_kit_skipped", err=str(exc)[:160])
+        return None
+
+    kit = DesignKit(
+        paper=d.paper, panel=d.panel, panel_dark=d.panel_dark, ink=d.ink,
+        accent=d.accent, deep=d.deep, gold=d.gold, muted=d.muted,
+        onpaper_soft=d.onpaper_soft, savings=d.savings, caution=d.caution,
+        danger=d.danger,
+        display=_stack_for("display", d.display_font),
+        body=_stack_for("body", d.body_font),
+        cond=_stack_for("cond", d.cond_font),
+        mood=d.mood, cover_art_direction=d.cover_art_direction, motif=d.motif,
+    )
+    # Reject (→ preset fallback) if the palette fails contrast.
+    if theme.kit_from_design(kit) is None:
+        log.warning("design_kit_low_contrast", mood=d.mood,
+                    ink=d.ink, paper=d.paper, accent=d.accent)
+        return None
+    log.info("design_kit_derived", mood=d.mood, display=d.display_font,
+             body=d.body_font, accent=d.accent, paper=d.paper)
+    return kit
+
+
+# --------------------------------------------------------------------------- #
+# Step 2 — outline (two-level, template-driven)
+# --------------------------------------------------------------------------- #
+class _EntryBrief(BaseModel):
+    title: str
+    brief: str = ""
 
 
 class _BaseSection(BaseModel):
     title: str
     summary: str
     divider_subject: str = ""
+    part_title: str = ""
+    entries: list[_EntryBrief] = Field(default_factory=list)
 
 
 class _SpecialDraft(BaseModel):
@@ -128,10 +409,7 @@ class _SpecialDraft(BaseModel):
         kind = self.kind if self.kind in ("chart", "checklist") else "checklist"
         heading = self.heading.strip()
         if not heading:
-            heading = (
-                "Replace Expensive Products" if kind == "chart"
-                else "Weekly Kitchen Checklist"
-            )
+            heading = "Reference Chart" if kind == "chart" else "Routine Checklist"
         about = self.about
         items = self.items
         if isinstance(items, list):
@@ -149,7 +427,7 @@ class _SpecialDraft(BaseModel):
             after_section=self.after_section,
             kind=self.kind,  # type: ignore[arg-type]
             heading=self.heading,
-            columns=self.columns or ["Store product", "Cheap method", "~Saving"],
+            columns=self.columns or ["Item", "Method", "Notes"],
             rows=self.rows,
             about=self.about,
             items=self.items if isinstance(self.items, int) else 10,
@@ -159,108 +437,269 @@ class _SpecialDraft(BaseModel):
 class _PracticalBibleDraft(BaseModel):
     title: str
     subtitle: str
-    audience: str = "Seniors (65+), large-print friendly"
-    tone: str = "warm, plain, reassuring"
+    audience: str = ""
+    tone: str = ""
     art_style: ArtStyle
     voice: VoiceStyle
-    base_sections: list[_BaseSection] = Field(min_length=1)
+    base_sections: list[_BaseSection] = Field(min_length=3)
     how_to: HowToPage
-    safety_key: str = "general"
-    theme_name: str = "home_clean"
+    theme_name: str = ""
     list_lead: str = ""
     pro_topic: str = ""
     cover_subject: str = ""
     specials: list[_SpecialDraft] = Field(default_factory=list)
 
 
-_TIER_NAMES = ("Essentials", "More Uses", "Extra Tips")
+_GUIDE_SYSTEM_TPL = """You are a veteran commissioning editor at a premium \
+practical-nonfiction publisher, designing a {genre} for {audience}. \
+Editorial angle: {angle}. The book must read as if written by {persona} — \
+with the structure, headings, and features a top publication in this genre \
+would use. You are precise, opinionated, allergic to generic AI phrasing, and \
+allergic to off-topic filler: every chapter must serve the {genre}'s promise."""
+
+
+_GUIDE_PROMPT_TPL = """Design the Book Bible for this {genre}.
+
+TOPIC (the client's request — its wording is the contract): {topic}
+TARGET LENGTH: ~{pages} pages total.
+
+SOURCE MATERIAL:
+\"\"\"
+{source}
+\"\"\"
+
+SOURCE POLICY: the source is the book's subject-matter backbone
+({grounded_content}). You develop and expand the source's real ideas into
+{authored_content} at professional depth. Plan a chapter only around genuinely
+distinct, substantive material a domain expert would respect — when the source is
+thin, cover fewer ideas MORE deeply rather than manufacturing hollow chapters or
+padding a count. Never plan a chapter, part, or entry that is filler, an
+attitude/mindset, or a near-duplicate of another.
+
+STRUCTURE (follow this template): {spine}.
+Chapter rhythm: {rhythm}.
+
+Produce:
+- title + subtitle that honor the client's topic wording. COUNT HONESTY: if the
+  title or subtitle names a number of {entry_noun}s (or habits/steps/rules/etc.),
+  the book must contain EXACTLY that many — do not let the body claim any other
+  total. Roughly {planned_entries} {entry_noun}s are planned for ~{pages} pages;
+  if the client's title already fixes a number, match the plan to that number
+  instead. One honest count, used everywhere.
+- audience: {audience}. tone: fitting the angle — {angle}.
+- art_style: one coherent photographic/illustration look for the whole book,
+  matched to the topic and era; negative_prompt must include "no text, no
+  clutter, no faces".
+- voice: persona, register, POV, pacing, vocabulary, and banned_patterns
+  (clichés/AI-tells to never use).
+- base_sections: EXACTLY {base_lo}-{base_hi} chapters. Organize them into 2-5
+  named PARTS with a narrative arc — the table of contents should read like a
+  story that builds, and each part_title names its act. For EACH chapter give:
+    * title: evocative, specific, publisher-grade (never mechanical patterns
+      like "Topic — Essentials"); it must accurately describe the chapter.
+      DISPLAY CONSTRAINT: it is set as large type in a narrow print sidebar —
+      keep it to at most 6 words / 48 characters, and avoid any single word
+      longer than 14 characters.
+    * summary: one paragraph on what the chapter covers and why it earns its
+      place in the arc.
+    * part_title: the part it belongs to (same string for chapters that share
+      a part).
+    * divider_subject: a CLEAN vertical portrait photo scene for the chapter
+      opener panel — one centered subject with margin on all sides, matched to
+      this chapter's content. Never leave it empty.
+    * entries: EXACTLY {cards_per_section} planned {entry_noun}s, each a distinct,
+      concrete, expert-recognizable idea — with a title (2-6 words, a real
+      {entry_noun} specific to this chapter) and a one-line brief naming the
+      specific technique/insight it delivers. No two entries in the BOOK may
+      overlap in substance OR subject; none may be an attitude/mindset/"framing"
+      or a restatement of the premise. If you cannot fill the count with genuinely
+      distinct, substantive entries, say so in the brief rather than padding.
+- how_to: heading, lead (25-40 words), exactly 4 bullet points for the welcome
+  page — written for THIS book's reader. EACH bullet 10-18 words; they are set
+  in fixed-height feature cards on one page, so long bullets get cut.
+- theme_name: pick ONE design preset from this menu by mood fit:
+{theme_menu}
+- list_lead: one sentence introducing the short quick-{entry_noun} list pages.
+- pro_topic: a short phrase for the back-matter page "{back_matter_heading}"
+  ({back_matter_angle}).
+- cover_subject: a photo prompt for the cover that captures the angle. No text,
+  no faces.
+- specials: 2-3 special reference pages this genre's readers expect (charts =
+  the reference tables of the genre, e.g. substitutions, conversions,
+  temperatures, seasonal timing; checklists = routines). Each has
+  after_section (1-based chapter index), kind ("chart" or "checklist"),
+  heading, and for charts: columns (3 strings) + rows (5-8); for checklists:
+  about + items (8-12).{savings_note}
+
+Use correct spelling everywhere. Every chapter must reflect the source and the
+angle, never generic filler."""
+
+
+_CRITIQUE_SYSTEM = """You are a sharp acquisitions editor at a major publishing \
+house reviewing a book outline before contract. You kill filler, sharpen \
+titles, and protect the title's promise to the reader."""
+
+_CRITIQUE_PROMPT = """Review this outline for "{title}" — a {genre} for {audience}
+(~{pages} pages). Would this table of contents survive a bookstore buyer?
+
+Check for and FIX:
+- chapters that are filler, overlap another chapter, or drift off the topic's
+  promise (a {genre} chapter must deliver {entry_noun}s worth buying);
+- mechanical or vague chapter titles — make each specific and evocative;
+- a missing or broken narrative arc across the parts;
+- planned entries that repeat one another or don't belong to their chapter;
+- missing divider_subject photo scenes.
+
+Return the COMPLETE corrected list of chapters (same schema: title, summary,
+part_title, divider_subject, entries). Improve, never pad: if a chapter or an
+entry is filler or a duplicate and cannot be made genuinely substantive, CUT it
+(you may return fewer chapters/entries) rather than keep a hollow one — a tighter,
+sharper book beats a padded one.
+
+OUTLINE:
+{outline}"""
+
+
+class _OutlineRevision(BaseModel):
+    base_sections: list[_BaseSection] = Field(min_length=3)
 
 
 def _clamp(lo: int, hi: int, v: int) -> int:
     return max(lo, min(hi, v))
 
 
-# Empirically (matching the hand-authored recipe books) one senior "use card"
-# fills ~1 page and a quick-tip list runs ~6 tips/page; with the section intro
-# and divider photo a dense section lands near ~14 finished pages. Section count
-# and per-section quotas scale with target_pages; large books keep recipe-grade
-# density while small targets produce lean sections.
+# Legacy density (tips_cards): one legacy "use card" fills ~1 page and a
+# quick-tip list runs ~6 tips/page; a dense section lands near ~14 pages.
 _PAGES_PER_SECTION = 14
 
 
-def _plan_dimensions(target_pages: int) -> tuple[int, int]:
-    """Pick base-topic count and tier count so expanded sections reach ~target_pages."""
-    tiers = 2 if target_pages >= 60 else 1
-    base = _clamp(1, 14, round(target_pages / (_PAGES_PER_SECTION * tiers)))
-    return base, tiers
-
-
-def _max_specials(target_pages: int) -> int:
-    if target_pages < 24:
-        return 0
-    if target_pages < 60:
-        return 1
-    return 3
+def _base_section_target(target_pages: int, tiers: int) -> int:
+    """Legacy tips_cards sizing (unchanged behavior)."""
+    want = max(4, round(target_pages / (_PAGES_PER_SECTION * tiers)))
+    ceiling = settings.max_base_sections
+    return min(want, ceiling) if ceiling and ceiling > 0 else want
 
 
 def _section_quotas(target_pages: int, num_sections: int) -> tuple[int, int, int, int]:
-    pages_per = max(1, round(target_pages / max(1, num_sections)))
-    full_cards = _clamp(1, 11, round(pages_per * 0.72))
-    list_quota = _clamp(0, 38, round(pages_per * 2.5))
+    """Legacy tips_cards quotas (unchanged behavior)."""
+    pages_per = max(8, (target_pages + num_sections - 1) // max(1, num_sections))
+    full_cards = _clamp(7, 11, round(pages_per * 0.72))
+    list_quota = _clamp(24, 38, round(pages_per * 2.5))
     image_quota = min(3, full_cards)
     return full_cards, list_quota, image_quota, pages_per
 
 
+class _Density(BaseModel):
+    base_sections: int
+    cards_per_section: int
+    list_quota: int
+    image_quota: int
+    page_budget: int
+
+
+def _guide_density(target_pages: int, profile: EditorialProfile) -> _Density:
+    """Template-driven density: fewer, deeper entries for entry-rich genres.
+
+    A 350-page essay_entries cookbook lands near 20-24 chapters × ~6 recipes
+    (≈130-150 entries) instead of the legacy 1,176 tips.
+    """
+    spec = templates.spec_for(profile.structure_template)
+    if spec.key == "tips_cards":
+        tiers = max(1, profile.tiers)
+        n = _base_section_target(target_pages, tiers)
+        fc, lq, iq, pb = _section_quotas(target_pages, n * tiers)
+        return _Density(base_sections=n, cards_per_section=fc,
+                        list_quota=lq, image_quota=iq, page_budget=pb)
+
+    fixed_overhead = 9  # cover, title, how-to, safety, TOC, specials, back matter
+    avail = max(12, target_pages - fixed_overhead)
+    cards = 6 if profile.pages_per_entry >= 1.5 else 8
+    list_pages = max(0.0, profile.quick_list_weight) * 1.2
+    per_section_overhead = 1.0 + (1.6 if spec.has_opener_essay else 0.4)
+    pages_per_section = (per_section_overhead
+                         + cards * max(0.5, profile.pages_per_entry)
+                         + list_pages)
+    n = max(4, round(avail / pages_per_section))
+    ceiling = settings.max_base_sections
+    if ceiling and ceiling > 0:
+        n = min(n, ceiling)
+    # Quick-lists only earn a page when there are enough one-liners to fill one.
+    # A 2-3 item list becomes a near-empty page (and just duplicates the cards),
+    # so below a page's worth we drop the list entirely (no orphan page, no gap).
+    list_quota = round(12 * max(0.0, profile.quick_list_weight))
+    if list_quota < 6:
+        list_quota = 0
+    override = settings.image_density_override.strip().lower()
+    if override in ("sparse", "standard", "every_entry"):
+        profile.image_density = override  # type: ignore[assignment]
+    if profile.image_density == "every_entry":
+        image_quota = cards
+    elif profile.image_density == "standard":
+        image_quota = min(3, cards)
+    else:
+        image_quota = min(2, cards)
+    return _Density(
+        base_sections=n, cards_per_section=cards, list_quota=list_quota,
+        image_quota=image_quota, page_budget=round(pages_per_section),
+    )
+
+
 def _expand_sections(
-    base_sections: list[_BaseSection], target_pages: int, *, tiers_count: int = 2,
+    base_sections: list[_BaseSection],
+    density: _Density,
+    profile: EditorialProfile,
 ) -> list[SectionPlan]:
-    tiers = _TIER_NAMES[:tiers_count]
-    n = len(base_sections) * len(tiers)
-    fc, lq, iq, pb = _section_quotas(target_pages, n)
+    """Expand base chapters into SectionPlans (tiered only for tips_cards)."""
+    noun = profile.entry_schema.entry_noun
+    tier_names = profile.tier_names[:max(1, profile.tiers)] or ["Essentials"]
     expanded: list[SectionPlan] = []
+    part_titles: list[str] = []
     idx = 1
     for base in base_sections:
-        for tier in tiers:
-            if tiers_count == 1:
-                title = base.title
+        if base.part_title and base.part_title not in part_titles:
+            part_titles.append(base.part_title)
+        part_index = (part_titles.index(base.part_title) + 1
+                      if base.part_title else 0)
+        for ti, tier in enumerate(tier_names):
+            if profile.tiers <= 1:
+                title, summary = base.title, base.summary
+            elif ti == 0:
+                title = f"{base.title} — {tier}"
                 summary = base.summary
-            elif tier == "Essentials":
-                title = f"{base.title} — Essentials"
-                summary = base.summary
-            elif tier == "More Uses":
-                title = f"{base.title} — More Uses"
-                summary = (
-                    f"More practical {base.title.lower()} tips with everyday "
-                    f"household items."
-                )
             else:
-                title = f"{base.title} — Extra Tips"
-                summary = (
-                    f"Additional senior-friendly {base.title.lower()} jobs "
-                    f"that save money."
-                )
+                title = f"{base.title} — {tier}"
+                summary = f"More {base.title.lower()} {noun}s in the same spirit."
+            planned = ([f"{e.title} — {e.brief}".rstrip(" —")
+                        for e in base.entries] if ti == 0 else [])
             expanded.append(SectionPlan(
                 index=idx, title=title, summary=summary,
                 divider_subject=base.divider_subject,
-                full_card_quota=fc, list_quota=lq, image_quota=iq,
-                page_budget=pb,
+                part_index=part_index, part_title=base.part_title,
+                planned_entries=planned,
+                full_card_quota=density.cards_per_section,
+                list_quota=density.list_quota,
+                image_quota=density.image_quota,
+                page_budget=density.page_budget,
             ))
             idx += 1
     return expanded
 
 
-def _default_specials() -> list[SpecialPlan]:
+def _default_specials(profile: EditorialProfile) -> list[SpecialPlan]:
+    """Genre-neutral fallbacks if the model returns no specials — no domain
+    vocabulary may live here (it would leak into unrelated books)."""
+    noun = profile.entry_schema.entry_noun
     return [
         SpecialPlan(
             after_section=1, kind="chart",
-            heading="Replace Expensive Staples",
-            columns=["Store product", "Cheap rice method", "~Yearly saving"],
+            heading="Quick Reference Chart",
+            columns=["Item", "How to do it", "Notes"],
             rows=6,
         ),
         SpecialPlan(
             after_section=2, kind="checklist",
-            heading="Weekly Rice Cooking Checklist",
-            about="a simple weekly kitchen routine for cooking rice on a budget",
+            heading="Routine Checklist",
+            about=f"a simple recurring routine drawn from this book's {noun}s",
             items=10,
         ),
     ]
@@ -272,111 +711,56 @@ def _map_specials(
     """Map after_base_section (1..base_count) to expanded section index."""
     mapped: list[SpecialPlan] = []
     for sp in specials:
-        base_idx = sp.after_section
-        if base_idx < 1:
-            base_idx = 1
-        if base_idx > base_count:
-            base_idx = base_count
+        base_idx = min(max(sp.after_section, 1), base_count)
         section_idx = (base_idx - 1) * tiers_per_base + 1
         mapped.append(sp.model_copy(update={"after_section": section_idx}))
     return mapped
 
 
-def infer_guide_theme(topic: str, excerpt: str, llm_theme: str) -> str:
-    """Pick guide preset from keyword scoring on topic + source; LLM hint is a tie-break."""
-    text = f"{topic} {excerpt[:8000]}".lower()
-    guide_presets = ("home_clean", "pest_guard", "senior_cookbook")
-    scores = {
-        preset: sum(1 for w in theme._KEYWORDS.get(preset, []) if w in text)
-        for preset in guide_presets
-    }
-    best = max(scores, key=lambda p: scores[p])
-    if scores[best] == 0:
-        return llm_theme if llm_theme in theme.PRESETS else "home_clean"
-    if llm_theme in guide_presets and scores.get(llm_theme, 0) >= scores[best]:
-        return llm_theme
-    return best
-
-
-def _infer_theme(topic: str, excerpt: str, explicit: str) -> str:
-    return infer_guide_theme(topic, excerpt, explicit)
-
-
-_COUNT_IN_TITLE_RE = re.compile(
-    r"\b(\d{1,4})\b(?:\s+\w+){0,4}\s*(?:\+?\s*)?"
-    r"(?:ways?|tips?|uses?|tricks?|methods?|ideas?|hacks?|things?)\b",
-    re.IGNORECASE,
-)
-
-
-def _rewrite_promised_number(title: str, subtitle: str, new_count: int) -> tuple[str, str]:
-    """Replace the marketing count in title/subtitle with new_count."""
-    def _sub(text: str) -> str:
-        if not text:
-            return text
-        return _COUNT_IN_TITLE_RE.sub(lambda m: m.group(0).replace(m.group(1), str(new_count), 1), text, count=1)
-
-    return _sub(title), _sub(subtitle)
-
-
-def _adjust_list_quotas(sections: list[SectionPlan], delta: int) -> list[SectionPlan]:
-    """Shift list_quota across sections (round-robin) by delta; clamp >= 0."""
-    if delta == 0 or not sections:
-        return sections
-    out = [s.model_copy() for s in sections]
-    n = len(out)
-    idx = 0
-    remaining = abs(delta)
-    sign = 1 if delta > 0 else -1
-    while remaining > 0:
-        i = idx % n
-        if sign > 0:
-            out[i] = out[i].model_copy(update={"list_quota": out[i].list_quota + 1})
-            remaining -= 1
-        elif out[i].list_quota > 0:
-            out[i] = out[i].model_copy(update={"list_quota": out[i].list_quota - 1})
-            remaining -= 1
-        idx += 1
-        if sign < 0 and idx > n * 1000:
-            break
-    return out
-
-
-def _reconcile_promise(bible: BookBible) -> BookBible:
-    """Align marketed tip count with planned section quotas (exact match when possible)."""
-    sections = list(bible.sections)
-    planned = planned_use_count(sections)
-    promised = parse_promised_count(bible.title, bible.subtitle)
-
-    if promised is None:
-        bible.promised_uses = planned
-        return bible
-
-    delta = promised - planned
-    density_cap = max(12, bible.target_pages * 8)
-
-    # Unreachable upward promise — rewrite title/subtitle to the planned total.
-    if promised > density_cap or (delta > 0 and delta > planned):
-        title, subtitle = _rewrite_promised_number(bible.title, bible.subtitle, planned)
-        log.info(
-            "promise_rewritten",
-            was=promised,
-            now=planned,
-            title=title,
+def _critique_outline(
+    draft: _PracticalBibleDraft,
+    profile: EditorialProfile,
+    target_pages: int,
+) -> list[_BaseSection]:
+    """Acquisitions-editor pass over the outline. Best-effort: on failure the
+    original outline stands."""
+    outline = "\n".join(
+        f"[{i + 1}] ({s.part_title}) {s.title} — {s.summary}\n"
+        + "\n".join(f"    - {e.title}: {e.brief}" for e in s.entries)
+        for i, s in enumerate(draft.base_sections)
+    )
+    try:
+        revised = llm.structured(
+            _CRITIQUE_PROMPT.format(
+                title=draft.title, genre=profile.genre,
+                audience=profile.audience, pages=target_pages,
+                entry_noun=profile.entry_schema.entry_noun, outline=outline,
+            ),
+            _OutlineRevision, system=_CRITIQUE_SYSTEM,
+            model=settings.draft_model, max_tokens=16000,
         )
-        bible.title = title
-        bible.subtitle = subtitle
-        bible.promised_uses = planned
-        return bible
+    except Exception as exc:
+        if llm.is_provider_unavailable(exc):
+            raise
+        log.warning("outline_critique_skipped", err=str(exc)[:160])
+        return draft.base_sections
+    if len(revised.base_sections) < max(3, len(draft.base_sections) // 2):
+        log.warning("outline_critique_rejected",
+                    got=len(revised.base_sections),
+                    expected=len(draft.base_sections))
+        return draft.base_sections
+    log.info("outline_critiqued", chapters=len(revised.base_sections))
+    return revised.base_sections
 
-    if delta != 0:
-        sections = _adjust_list_quotas(sections, delta)
-        bible.sections = sections
-        planned = planned_use_count(sections)
-        log.info("promise_reconciled", promised=promised, adjusted=planned, delta=delta)
 
-    bible.promised_uses = promised
-    return bible
+def _pick_theme(llm_theme: str) -> str:
+    """The planning model chooses the preset from a described menu; the only
+    programmatic step is validation (unknown name → neutral guide preset)."""
+    if llm_theme in theme.GUIDE_PRESET_MENU:
+        return llm_theme
+    if llm_theme in theme.PRESETS:
+        return llm_theme
+    return theme.NEUTRAL_GUIDE_PRESET
 
 
 def build_bible(
@@ -384,14 +768,14 @@ def build_bible(
     *,
     target_pages: int = 100,
     book_kind: str = "practical_guide",
+    profile_overrides: dict | None = None,
 ) -> BookBible:
     excerpt = source.text[:20000]
 
     if book_kind == "narrative":
         bible = llm.structured(
             _NARRATIVE_PROMPT.format(
-                topic=source.topic, pages=target_pages, source=excerpt,
-            ),
+                topic=source.topic, pages=target_pages, source=excerpt),
             BookBible, system=_SYSTEM, max_tokens=8000,
         )
         bible.target_pages = target_pages
@@ -400,62 +784,91 @@ def build_bible(
                  chapters=len(bible.chapters))
         return bible
 
-    # Base-topic count and tier depth scale with target_pages; large books keep
-    # the two-tier Essentials + More Uses pattern from the hand-authored guides.
-    base_target, tiers_per = _plan_dimensions(target_pages)
-    base_lo = max(1, base_target - 1)
+    profile = derive_profile(source, overrides=profile_overrides)
+    design = derive_design(source, profile)
+    spec = templates.spec_for(profile.structure_template)
+    density = _guide_density(target_pages, profile)
+    base_target = density.base_sections
+    base_lo = max(4, base_target - 1)
     base_hi = base_target + 2
-    max_sp = _max_specials(target_pages)
+    tiers_per = max(1, profile.tiers)
+    planned_estimate = (base_target * tiers_per
+                        * (density.cards_per_section + density.list_quota))
+
+    savings_note = ""
+    if profile.entry_schema.show_savings:
+        savings_note = ("\nCharts may compare costs and name realistic savings; "
+                        "keep every number honest.")
 
     draft = llm.structured(
-        _GUIDE_PROMPT.format(
-            topic=source.topic,
-            pages=target_pages,
-            source=excerpt,
-            base_lo=base_lo,
-            base_hi=base_hi,
+        _GUIDE_PROMPT_TPL.format(
+            genre=profile.genre, topic=source.topic, pages=target_pages,
+            source=excerpt, grounded_content=profile.grounded_content or
+            "the facts, history, and claims it contains",
+            authored_content=profile.authored_content or
+            f"the {profile.entry_schema.entry_noun}s themselves",
+            spine=spec.spine, rhythm=spec.rhythm,
+            entry_noun=profile.entry_schema.entry_noun,
+            planned_entries=planned_estimate,
+            audience=profile.audience, angle=profile.angle,
+            base_lo=base_lo, base_hi=base_hi,
+            cards_per_section=density.cards_per_section,
+            theme_menu=theme.menu_text(),
+            back_matter_heading=profile.back_matter_heading,
+            back_matter_angle=profile.back_matter_angle or
+            "the closing reference page readers of this genre expect",
+            savings_note=savings_note,
         ),
-        _PracticalBibleDraft, system=_GUIDE_SYSTEM, max_tokens=8000,
-    )
-    sections = _expand_sections(
-        draft.base_sections, target_pages, tiers_count=tiers_per,
-    )
-    raw_specials = [s.to_plan() for s in draft.specials]
-    if not raw_specials and max_sp > 0:
-        raw_specials = _default_specials()
-    raw_specials = raw_specials[:max_sp]
-    specials = (
-        _map_specials(raw_specials, len(draft.base_sections), tiers_per)
-        if raw_specials else []
+        _PracticalBibleDraft,
+        system=_GUIDE_SYSTEM_TPL.format(
+            genre=profile.genre, audience=profile.audience,
+            angle=profile.angle, persona=profile.persona or "its ideal author",
+        ),
+        model=settings.content_model, max_tokens=16000,
     )
 
+    base_sections = _critique_outline(draft, profile, target_pages)
+    sections = _expand_sections(base_sections, density, profile)
+    raw_specials = ([s.to_plan() for s in draft.specials]
+                    or _default_specials(profile))
+    specials = _map_specials(raw_specials, len(base_sections), tiers_per)
+
+    planned = planned_use_count(sections)
+    title, subtitle, promise_fixed = reconcile_promise(
+        draft.title, draft.subtitle, planned)
+    if promise_fixed:
+        log.warning("subtitle_promise_reconciled",
+                    old_subtitle=draft.subtitle, new_subtitle=subtitle,
+                    planned=planned)
+
     bible = BookBible(
-        title=draft.title,
-        subtitle=draft.subtitle,
-        audience=draft.audience,
-        tone=draft.tone,
+        title=title,
+        subtitle=subtitle,
+        audience=draft.audience or profile.audience,
+        tone=draft.tone or profile.angle,
         art_style=draft.art_style,
         voice=draft.voice,
         target_pages=target_pages,
         book_kind="practical_guide",
         sections=sections,
-        theme_name=_infer_theme(source.topic, excerpt, draft.theme_name),
-        safety_key=draft.safety_key,
+        theme_name=_pick_theme(draft.theme_name),
+        safety_key=profile.safety_domain,
+        profile=profile,
+        design=design,
         cover_subject=draft.cover_subject,
         how_to=draft.how_to,
-        list_lead=draft.list_lead or (
-            "Quick jobs you can do in a minute or two with items already at home."
-        ),
+        list_lead=draft.list_lead or
+        f"Quick {profile.entry_schema.entry_noun} ideas, one line each.",
         pro_topic=draft.pro_topic or source.topic,
         specials=specials,
     )
-    bible = _reconcile_promise(bible)
-    log.info(
-        "bible_built",
-        kind="practical_guide",
-        title=bible.title,
-        sections=len(bible.sections),
-        promised_uses=bible.promised_uses,
-        planned_uses=planned_use_count(bible.sections),
-    )
+    promised = parse_promised_count(bible.title, bible.subtitle)
+    bible.promised_uses = promised or planned
+    # Make ALL planner-authored copy (title, kicker, how-to, part titles, …)
+    # state the one promised count — the body is reconciled by the QA fix-loop.
+    propagate_promised_count(bible)
+    log.info("bible_built", kind="practical_guide", title=bible.title,
+             template=profile.structure_template, sections=len(bible.sections),
+             promised_uses=bible.promised_uses, planned_uses=planned,
+             theme=bible.theme_name, profile=profile.model_dump())
     return bible

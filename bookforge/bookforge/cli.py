@@ -34,11 +34,17 @@ def main(argv=None):
     ap.add_argument("--pages", type=int, default=100, help="target page count")
     ap.add_argument("--chapters", type=int, default=None,
                     help="limit chapters/sections; omit for full book")
-    ap.add_argument("--section-limit", type=int, default=None,
-                    help="limit sections for practical guides; overrides --chapters")
     ap.add_argument("--book-kind", choices=["practical_guide", "narrative"],
                     default="practical_guide", help="book layout pipeline")
+    ap.add_argument("--profile-json", default=None,
+                    help="JSON dict of EditorialProfile overrides "
+                         '(e.g. \'{"genre": "cookbook", "audience": "..."}\')')
     args = ap.parse_args(argv)
+
+    profile_overrides = None
+    if args.profile_json:
+        import json
+        profile_overrides = json.loads(args.profile_json)
 
     text = None
     if args.text_file:
@@ -49,10 +55,8 @@ def main(argv=None):
     book_id = uuid.uuid4().hex[:12]
     artifact = run_book(
         book_id, args.topic, text=text, youtube_url=args.youtube,
-        target_pages=args.pages,
-        chapter_limit=args.chapters,
-        section_limit=args.section_limit,
-        book_kind=args.book_kind,
+        target_pages=args.pages, chapter_limit=args.chapters,
+        book_kind=args.book_kind, profile_overrides=profile_overrides,
     )
 
     print("\n" + "=" * 60)

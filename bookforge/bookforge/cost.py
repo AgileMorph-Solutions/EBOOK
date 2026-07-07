@@ -40,7 +40,8 @@ class Budget:
         return self._spent
 
     def assert_ok(self) -> None:
-        if self._spent >= self.cap:
+        # cap <= 0 disables the guardrail entirely (PER_BOOK_BUDGET_USD=0).
+        if self.cap > 0 and self._spent >= self.cap:
             raise BudgetExceeded(
                 f"Per-book budget ${self.cap:.2f} exhausted (spent ${self._spent:.2f})"
             )

@@ -12,36 +12,29 @@ survives API restarts and container rebuilds.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
 import shutil
+import time
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import BoundedSemaphore, Lock
 from typing import Any, Literal
 
+import anthropic
 import structlog
-from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
-from pydantic import BaseModel, field_validator, model_validator
-from sqlalchemy.orm import Session
+from pydantic import BaseModel, model_validator
 
-from bookforge.api.auth import (
-    create_access_token,
-    get_current_user,
-    hash_password,
-    require_admin,
-    verify_password,
-)
-from bookforge.api.error_kinds import classify as classify_pipeline_error
-from bookforge.clients import storage
+from bookforge.clients import llm, storage
 from bookforge.config import get_settings
-from bookforge.db import get_db
-from bookforge.models import BookRecord, User
+from bookforge.errors import ContentQAError, EmptyBookError, GeometryError, IngestError
 
 log = structlog.get_logger(__name__)
 
@@ -50,7 +43,11 @@ API_VERSION = "0.3.0"
 
 @asynccontextmanager
 async def lifespan(_app: "FastAPI"):
-    """Fail fast on missing keys and recover jobs orphaned by a prior crash."""
+    """Recover orphaned jobs and start the background auto-resume loop.
+
+    Jobs interrupted by a restart (queued/running) are re-queued for automatic
+    resume — a restart is invisible to the user — unless a job has already been
+    resumed too many times (crash-loop guard), in which case it's failed."""
     s = get_settings()
     missing = [
         name for name, val in (
@@ -61,18 +58,39 @@ async def lifespan(_app: "FastAPI"):
     if missing:
         log.error("missing_required_keys", missing=missing)
 
-    recovered = 0
+    resumed = failed = 0
     books_dir = _ARTIFACTS / "books"
     if books_dir.is_dir():
         for path in books_dir.glob("*/status.json"):
-            state = _read_state(path.parent.name)
-            if state and state.get("status") in ("queued", "running"):
-                _set_state(path.parent.name, status="failed",
-                           error="interrupted by server restart")
-                recovered += 1
+            book_id = path.parent.name
+            state = _read_state(book_id)
+            if not state or state.get("status") not in ("queued", "running"):
+                continue
+            attempts = int(state.get("resume_attempts", 0)) + 1
+            if attempts > s.max_resume_attempts or _read_request(book_id) is None:
+                _set_state(book_id, status="failed",
+                           error=_friendly_error(RuntimeError("restart")),
+                           error_detail="interrupted by server restart; not resumable")
+                failed += 1
+            else:
+                # Park it so the resume loop picks it up immediately.
+                _set_state(book_id, status="waiting", resume_attempts=attempts,
+                           wait_reason="resuming after server restart",
+                           next_retry_at=_now_iso())
+                resumed += 1
     log.info("startup", version=API_VERSION, artifacts=str(_ARTIFACTS),
-             recovered_orphans=recovered, max_concurrent=s.max_concurrent_books)
-    yield
+             resumed_orphans=resumed, failed_orphans=failed,
+             max_concurrent=s.max_concurrent_books)
+
+    resume_task = asyncio.create_task(_resume_loop())
+    try:
+        yield
+    finally:
+        resume_task.cancel()
+        try:
+            await resume_task
+        except asyncio.CancelledError:
+            pass
 
 
 app = FastAPI(title="BookForge API", version=API_VERSION, lifespan=lifespan)
@@ -128,6 +146,34 @@ def _set_state(book_id: str, **kwargs: Any) -> None:
         _write_state(book_id, state)
 
 
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+# The full submission payload (incl. source text/URL) is persisted alongside the
+# status so a parked or orphaned job can be re-run later — possibly in a fresh
+# process after a restart — without the original in-memory request.
+
+def _request_path(book_id: str) -> Path:
+    return _ARTIFACTS / "books" / book_id / "request.json"
+
+
+def _write_request(book_id: str, req: "CreateBook") -> None:
+    path = _request_path(book_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(req.model_dump_json())
+
+
+def _read_request(book_id: str) -> "CreateBook | None":
+    path = _request_path(book_id)
+    if not path.exists():
+        return None
+    try:
+        return CreateBook.model_validate_json(path.read_text())
+    except Exception:
+        return None
+
+
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
@@ -138,23 +184,18 @@ def _make_book_id(topic: str) -> str:
     return f"{slug}-{uuid.uuid4().hex[:6]}"
 
 
-def _list_jobs(allowed_ids: set[str] | None = None) -> list[dict[str, Any]]:
-    """Scan artifact dirs for status.json files, newest first.
-
-    If ``allowed_ids`` is provided, restrict the listing to those book_ids.
-    """
+def _list_jobs() -> list[dict[str, Any]]:
+    """Scan artifact dirs for status.json files, newest first."""
     books_dir = _ARTIFACTS / "books"
     if not books_dir.is_dir():
         return []
     jobs: list[dict[str, Any]] = []
     for path in books_dir.glob("*/status.json"):
-        book_id = path.parent.name
-        if allowed_ids is not None and book_id not in allowed_ids:
-            continue
         try:
             state = json.loads(path.read_text())
         except Exception:
             continue
+        book_id = path.parent.name
         jobs.append({
             "book_id": book_id,
             "topic": state.get("topic", ""),
@@ -162,27 +203,107 @@ def _list_jobs(allowed_ids: set[str] | None = None) -> list[dict[str, Any]]:
             "created_at": state.get("created_at", ""),
             "target_pages": state.get("target_pages"),
             "chapter_limit": state.get("chapter_limit"),
-            "section_limit": state.get("section_limit"),
             "book_kind": state.get("book_kind"),
         })
     jobs.sort(key=lambda j: j.get("created_at") or "", reverse=True)
     return jobs
 
 
-def _assert_can_access(db: Session, user: User, book_id: str) -> BookRecord | None:
-    """Return the BookRecord if the user may access it, else raise.
+# --------------------------------------------------------------------------- #
+# Progress / ETA estimation
+# --------------------------------------------------------------------------- #
 
-    A missing record is treated as legacy — allowed only for admins so we don't
-    accidentally leak books that pre-date auth.
-    """
-    record = db.get(BookRecord, book_id)
-    if record is None:
-        if not user.is_admin:
-            raise HTTPException(status_code=404, detail="book not found")
+# Ordered pipeline stages per book kind, with rough wall-clock weights (fraction
+# of total run time). These drive the UI progress bar + ETA. Weights need not be
+# exact: within-stage progress is time-interpolated, and the ETA self-corrects
+# from the actual elapsed pace as the run proceeds.
+_STAGE_WEIGHTS: dict[str, list[tuple[str, float]]] = {
+    # Guides run QA (and its fix-loop) BEFORE images, so it sits between content
+    # and images and carries real weight — the loop can regenerate sections.
+    "practical_guide": [
+        ("ingest", 0.03), ("bible", 0.07), ("content", 0.42),
+        ("qa", 0.13), ("images", 0.30), ("layout", 0.05),
+    ],
+    "narrative": [
+        ("ingest", 0.03), ("bible", 0.07), ("content", 0.40),
+        ("images", 0.30), ("qa", 0.15), ("layout", 0.05),
+    ],
+}
+
+
+def _normalize_stage(stage: str | None) -> str | None:
+    """Collapse the fix-loops' dynamic stage names onto their parent bands so
+    the progress bar advances instead of resetting to 0: "revise (N)" → "qa",
+    "layout-revise (N)" → "layout"."""
+    if stage and stage.startswith("layout-revise"):
+        return "layout"
+    if stage and stage.startswith("revise"):
+        return "qa"
+    return stage
+# Seed estimate before enough elapsed data exists (base + per target page).
+_EXPECTED_BASE_S = 60.0
+_EXPECTED_PER_PAGE_S = 3.5
+
+
+def _parse_ts(value: Any) -> datetime | None:
+    if not value:
         return None
-    if record.user_id != user.id and not user.is_admin:
-        raise HTTPException(status_code=403, detail="forbidden")
-    return record
+    try:
+        return datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _with_progress(state: dict[str, Any]) -> dict[str, Any]:
+    """Attach progress (0..1), eta_seconds, elapsed_seconds, stage index/total."""
+    st = dict(state)
+    status = st.get("status")
+    stages = _STAGE_WEIGHTS.get(
+        st.get("book_kind") or "practical_guide", _STAGE_WEIGHTS["practical_guide"]
+    )
+    names = [n for n, _ in stages]
+    st["stage_total"] = len(names)
+
+    if status == "done":
+        st["progress"] = 1.0
+        st["eta_seconds"] = 0
+        return st
+    if status not in ("queued", "running"):
+        return st
+
+    now = datetime.now(timezone.utc)
+    started = _parse_ts(st.get("started_at"))
+    elapsed = (now - started).total_seconds() if started else 0.0
+    st["elapsed_seconds"] = round(elapsed)
+    expected_total = _EXPECTED_BASE_S + _EXPECTED_PER_PAGE_S * float(
+        st.get("target_pages") or 100
+    )
+
+    cur = _normalize_stage(st.get("stage"))
+    idx = names.index(cur) if cur in names else -1
+    st["stage_index"] = idx
+
+    if status == "queued" or idx < 0:
+        st["progress"] = 0.0
+        st["eta_seconds"] = round(expected_total)
+        return st
+
+    w_done = sum(w for _, w in stages[:idx])
+    w_cur = stages[idx][1]
+    stage_started = _parse_ts(st.get("stage_started_at")) or started or now
+    stage_elapsed = (now - stage_started).total_seconds()
+    expected_stage = max(1.0, expected_total * w_cur)
+    frac = min(0.98, stage_elapsed / expected_stage)
+    progress = min(0.99, w_done + w_cur * frac)
+    st["progress"] = round(progress, 4)
+
+    # ETA self-corrects from the real pace once we have meaningful progress.
+    if progress > 0.02 and elapsed > 0:
+        eta = elapsed * (1.0 - progress) / progress
+    else:
+        eta = max(0.0, expected_total - elapsed)
+    st["eta_seconds"] = max(0, round(eta))
+    return st
 
 
 # --------------------------------------------------------------------------- #
@@ -197,70 +318,24 @@ class CreateBook(BaseModel):
     chapter_limit: int | None = None
     section_limit: int | None = None
     book_kind: Literal["practical_guide", "narrative"] = "practical_guide"
+    # Optional EditorialProfile field overrides (e.g. {"genre": "cookbook",
+    # "audience": "..."}) applied after the planning model derives the profile.
+    profile_overrides: dict | None = None
 
     @model_validator(mode="after")
     def require_source(self) -> "CreateBook":
+        # Reject empty/whitespace-only text up front so a guaranteed-to-fail job
+        # never gets queued (empty text can't produce a grounded book).
+        if self.text is not None and not self.text.strip():
+            self.text = None
         if not self.text and not self.youtube_url:
             raise ValueError("Provide either 'text' or 'youtube_url'")
         return self
 
 
-def _normalize_email(value: str) -> str:
-    v = (value or "").strip().lower()
-    # Lightweight check — full RFC validation would reject dev-only TLDs like `.local`.
-    if "@" not in v or v.startswith("@") or v.endswith("@") or " " in v:
-        raise ValueError("must be a valid email address")
-    return v
-
-
-class LoginRequest(BaseModel):
-    email: str
-    password: str
-
-    @field_validator("email")
-    @classmethod
-    def _v_email(cls, v: str) -> str:
-        return _normalize_email(v)
-
-
-class RegisterRequest(BaseModel):
-    email: str
-    password: str
-    is_admin: bool = False
-
-    @field_validator("email")
-    @classmethod
-    def _v_email(cls, v: str) -> str:
-        return _normalize_email(v)
-
-    @field_validator("password")
-    @classmethod
-    def _v_password(cls, v: str) -> str:
-        if len(v) < 8:
-            raise ValueError("must be at least 8 characters")
-        return v
-
-
-class TokenResponse(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
-
-
-class UserOut(BaseModel):
-    id: str
-    email: str
-    is_admin: bool
-
-    @classmethod
-    def from_user(cls, user: User) -> "UserOut":
-        return cls(id=str(user.id), email=user.email, is_admin=user.is_admin)
-
-
 def _enqueue_book(
     req: CreateBook,
     background_tasks: BackgroundTasks,
-    user: User,
-    db: Session,
     *,
     source_filename: str | None = None,
 ) -> dict[str, str]:
@@ -274,29 +349,11 @@ def _enqueue_book(
         "section_limit": req.section_limit,
         "book_kind": req.book_kind,
         "source_type": "youtube" if req.youtube_url else "text",
-        "owner_id": str(user.id),
-        # Snapshot the request so a future /retry can reconstruct it without the
-        # user re-submitting the same text/URL.
-        "source_snapshot": {
-            "topic": req.topic,
-            "text": req.text,
-            "youtube_url": req.youtube_url,
-            "target_pages": req.target_pages,
-            "chapter_limit": req.chapter_limit,
-            "section_limit": req.section_limit,
-            "book_kind": req.book_kind,
-        },
-        "retry_count": 0,
     }
     if source_filename:
         state["source_filename"] = source_filename
     _set_state(book_id, **state)
-
-    # Persist ownership (skipped for the anonymous admin used when AUTH_ENABLED=false).
-    if get_settings().auth_enabled:
-        db.add(BookRecord(book_id=book_id, user_id=user.id, topic=req.topic))
-        db.commit()
-
+    _write_request(book_id, req)  # persisted so parked/orphaned jobs can resume
     background_tasks.add_task(_run_pipeline, book_id, req)
     return {"book_id": book_id, "status": "queued"}
 
@@ -305,69 +362,72 @@ def _enqueue_book(
 # Routes
 # --------------------------------------------------------------------------- #
 
+# Cached provider liveness ping: monotonic_deadline, ok, detail, unfunded.
+_provider_ping_cache: dict[str, Any] = {
+    "deadline": 0.0, "ok": None, "detail": "", "unfunded": False,
+}
+
+
+def _provider_ok() -> tuple[bool | None, str, bool]:
+    """Whether the AI provider can actually be reached (real 1-token call),
+    cached for HEALTH_PING_TTL_S so /health stays cheap. Returns
+    (ok, detail, unfunded); ok is None if no key is configured."""
+    s = get_settings()
+    if not s.anthropic_api_key:
+        return None, "no ANTHROPIC_API_KEY", False
+    now = time.monotonic()
+    if now < _provider_ping_cache["deadline"] and _provider_ping_cache["ok"] is not None:
+        return (_provider_ping_cache["ok"], _provider_ping_cache["detail"],
+                _provider_ping_cache["unfunded"])
+    unfunded = False
+    try:
+        llm.ping()
+        ok, detail = True, "ok"
+    except Exception as exc:
+        ok = False
+        if llm.is_unfunded(exc):
+            unfunded, detail = True, "out of credits (account unfunded)"
+        elif llm.is_provider_unavailable(exc):
+            detail = "invalid/revoked key: " + str(exc)[:120]
+        else:
+            detail = f"{type(exc).__name__}: {str(exc)[:120]}"
+    _provider_ping_cache.update(
+        deadline=now + max(5, s.health_ping_ttl_s), ok=ok, detail=detail,
+        unfunded=unfunded)
+    return ok, detail, unfunded
+
+
 @app.get("/health")
 def health():
     s = get_settings()
+    provider_ok, provider_detail, unfunded = _provider_ok()
     return {
-        "ok": bool(s.anthropic_api_key and s.gemini_api_key),
+        "ok": bool(provider_ok) and bool(s.gemini_api_key),
         "version": API_VERSION,
         "storage": "s3" if os.environ.get("BOOKFORGE_USE_S3") == "1" else "local",
         "render": "render_service" if os.environ.get("RENDER_URL") else "playwright",
         "anthropic_key": bool(s.anthropic_api_key),
         "gemini_key": bool(s.gemini_api_key),
+        "provider_ok": provider_ok,           # real "can we generate?" signal
+        "provider_detail": provider_detail,
+        "unfunded": unfunded,                 # true = out of Anthropic credits
         "max_concurrent_books": s.max_concurrent_books,
     }
 
 
-@app.post("/auth/login", response_model=TokenResponse)
-def login(req: LoginRequest, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == req.email).one_or_none()
-    if user is None or not user.is_active or not verify_password(req.password, user.hashed_password):
-        raise HTTPException(status_code=401, detail="invalid credentials")
-    return TokenResponse(access_token=create_access_token(user))
-
-
-@app.post("/auth/register", response_model=UserOut, status_code=201)
-def register(
-    req: RegisterRequest,
-    db: Session = Depends(get_db),
-    _admin: User = Depends(require_admin),
-):
-    """Admin-only: create a new user."""
-    if db.query(User).filter(User.email == req.email).one_or_none():
-        raise HTTPException(status_code=409, detail="email already registered")
-    user = User(email=req.email, hashed_password=hash_password(req.password), is_admin=req.is_admin)
-    db.add(user)
-    db.commit()
-    db.refresh(user)
-    return UserOut.from_user(user)
-
-
-@app.get("/auth/me", response_model=UserOut)
-def me(user: User = Depends(get_current_user)):
-    return UserOut.from_user(user)
-
-
 @app.get("/books")
-def list_books(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Recent book jobs, newest first (filtered to the current user unless admin)."""
-    if user.is_admin:
-        return {"books": _list_jobs()}
-    if not get_settings().auth_enabled:
-        return {"books": _list_jobs()}
-    owned = {r.book_id for r in db.query(BookRecord.book_id).filter(BookRecord.user_id == user.id)}
-    return {"books": _list_jobs(allowed_ids=owned)}
+def list_books():
+    """Recent book jobs, newest first."""
+    return {"books": _list_jobs()}
 
 
 @app.post("/books", status_code=202)
-def create_book(
-    req: CreateBook,
-    background_tasks: BackgroundTasks,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """Submit a book job. Returns immediately with a readable book_id."""
-    return _enqueue_book(req, background_tasks, user, db)
+def create_book(req: CreateBook, background_tasks: BackgroundTasks):
+    """Submit a book job. Returns immediately with a readable book_id.
+
+    Poll GET /books/{book_id} for progress, then GET /books/{book_id}/download.
+    """
+    return _enqueue_book(req, background_tasks)
 
 
 @app.post("/books/upload", status_code=202)
@@ -379,8 +439,6 @@ async def create_book_upload(
     chapter_limit: int | None = Form(None),
     section_limit: int | None = Form(None),
     book_kind: Literal["practical_guide", "narrative"] = Form("practical_guide"),
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
 ):
     """Submit a book job via multipart file upload."""
     if not topic.strip():
@@ -411,47 +469,22 @@ async def create_book_upload(
     return _enqueue_book(
         req,
         background_tasks,
-        user,
-        db,
         source_filename=file.filename or "upload.txt",
     )
 
 
-def _reclassify_legacy_error(state: dict[str, Any]) -> dict[str, Any]:
-    """Older failed jobs stored only the raw `error` string. Re-classify on read
-    so the UI shows the same friendly message without needing to re-run them."""
-    if state.get("status") != "failed" or state.get("error_kind"):
-        return state
-    raw = state.get("error") or ""
-    if not raw:
-        return state
-    classified = classify_pipeline_error(Exception(raw))
-    return {**state, "error": classified.message, "error_kind": classified.kind,
-            "error_detail": classified.detail or raw}
-
-
 @app.get("/books/{book_id}")
-def get_book(
-    book_id: str,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
+def get_book(book_id: str):
     """Current job status and, when done, artifact metadata."""
-    _assert_can_access(db, user, book_id)
     state = _read_state(book_id)
     if state is None:
         raise HTTPException(status_code=404, detail="book not found")
-    return {"book_id": book_id, **_reclassify_legacy_error(state)}
+    return {"book_id": book_id, **_with_progress(state)}
 
 
 @app.get("/books/{book_id}/download")
-def download(
-    book_id: str,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
+def download(book_id: str):
     """Download the finished PDF. Returns 409 if the job isn't done yet."""
-    _assert_can_access(db, user, book_id)
     state = _read_state(book_id)
     if state is None:
         raise HTTPException(status_code=404, detail="book not found")
@@ -471,76 +504,52 @@ def download(
     )
 
 
-@app.post("/books/{book_id}/retry", status_code=202)
-def retry_book(
-    book_id: str,
-    background_tasks: BackgroundTasks,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """Restart a failed pipeline from the last completed stage.
-
-    Reuses bible.json, chapters.json, and any images/PDFs already on disk. Only
-    the failing stage and everything downstream is re-run. The original source
-    (text / youtube_url) is read back from status.json.source_snapshot.
-    """
-    _assert_can_access(db, user, book_id)
+@app.post("/books/{book_id}/rerender", status_code=202)
+def rerender_book(book_id: str, background_tasks: BackgroundTasks):
+    """Re-render a book's PDF from its cached render manifest (zero LLM/image
+    cost) and mark it done. The ops path for layout/CSS fixes: a failed-at-layout
+    book whose content and images are already stored finishes without
+    regenerating anything."""
     state = _read_state(book_id)
     if state is None:
         raise HTTPException(status_code=404, detail="book not found")
-    current = state.get("status")
-    if current != "failed":
+    if state.get("status") not in ("failed", "done"):
         raise HTTPException(
             status_code=409,
-            detail=f"book not in a retryable state — current status: {current}",
-        )
-    snap = state.get("source_snapshot")
-    if not snap:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "This book has no source snapshot from its original submission "
-                "(pre-retry-feature). Please submit a new book."
-            ),
+            detail=f"book is {state.get('status')} — rerender applies to "
+                   "failed or done books only",
         )
     try:
-        req = CreateBook(**snap)
-    except Exception as exc:
-        raise HTTPException(status_code=422, detail=f"snapshot invalid: {exc}")
+        storage.get(f"books/{book_id}/render_manifest.json")
+    except Exception:
+        raise HTTPException(status_code=409,
+                            detail="no render manifest stored for this book")
 
-    retry_count = int(state.get("retry_count") or 0) + 1
-    _set_state(
-        book_id,
-        status="queued",
-        stage=None,
-        error=None,
-        error_kind=None,
-        error_detail=None,
-        artifact=None,
-        retry_count=retry_count,
-        last_retry_at=datetime.now(timezone.utc).isoformat(),
-    )
-    background_tasks.add_task(_run_pipeline, book_id, req, resume=True)
-    log.info("book_retry_enqueued", book_id=book_id, retry_count=retry_count)
-    return {"book_id": book_id, "status": "queued", "retry_count": retry_count}
+    def _do_rerender() -> None:
+        from bookforge.pipeline import assemble
+        try:
+            _set_state(book_id, status="running", stage="layout",
+                       stage_started_at=_now_iso())
+            artifact = assemble.rerender(book_id)
+            _set_state(book_id, status="done", artifact=artifact.model_dump(),
+                       error=None, error_type=None, error_detail=None)
+            log.info("rerender_done", book_id=book_id, pages=artifact.page_count)
+        except Exception as exc:
+            log.exception("rerender_failed", book_id=book_id)
+            _fail(book_id, exc, _failure_class(exc))
+
+    background_tasks.add_task(_do_rerender)
+    return {"book_id": book_id, "status": "running", "stage": "layout"}
 
 
 @app.delete("/books/{book_id}", status_code=204)
-def delete_book(
-    book_id: str,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
+def delete_book(book_id: str):
     """Archive (delete) a job and its artifacts. 404 if it never existed."""
-    record = _assert_can_access(db, user, book_id)
-    if _read_state(book_id) is None and record is None:
+    if _read_state(book_id) is None:
         raise HTTPException(status_code=404, detail="book not found")
     book_dir = _ARTIFACTS / "books" / book_id
     if book_dir.is_dir():
         shutil.rmtree(book_dir, ignore_errors=True)
-    if record is not None:
-        db.delete(record)
-        db.commit()
     log.info("book_deleted", book_id=book_id)
     return Response(status_code=204)
 
@@ -549,40 +558,217 @@ def delete_book(
 # Background pipeline runner
 # --------------------------------------------------------------------------- #
 
-def _run_pipeline(book_id: str, req: CreateBook, *, resume: bool = False) -> None:
-    current_stage: list[str | None] = [None]
+def _friendly_error(exc: Exception) -> str:
+    """Map an internal exception to a safe, actionable customer-facing message.
 
+    Never leak raw exception text (paths, memory addresses, provider internals,
+    or opaque tenacity RetryError reprs) to the UI — that goes to logs only.
+    """
+    from bookforge.cost import BudgetExceeded
+
+    if isinstance(exc, BudgetExceeded):
+        return ("This book reached its generation cost limit before finishing. "
+                "Try a shorter book or contact support to raise the limit.")
+    if isinstance(exc, GeometryError):
+        return ("We couldn't produce a clean layout for this book. Our team has "
+                "been notified and is looking into it.")
+    if isinstance(exc, ContentQAError):
+        return ("The generated content didn't meet our quality bar, so we "
+                "stopped before producing the book. Please try again — our "
+                "team has been notified.")
+    if isinstance(exc, anthropic.AuthenticationError | anthropic.PermissionDeniedError):
+        return "The book service is misconfigured. Our team has been notified."
+    if isinstance(exc, anthropic.RateLimitError):
+        return "The service is busy right now. Please try again in a few minutes."
+    if isinstance(exc, anthropic.BadRequestError):
+        if "credit balance" in str(exc).lower():
+            return ("Your AI credit balance is low. Please recharge to continue.")
+        return "This request couldn't be processed. Please adjust your input and retry."
+    if isinstance(exc, anthropic.APIConnectionError | anthropic.InternalServerError):
+        return "The service had a temporary problem. Please try again shortly."
+    return "Generation failed due to an unexpected error. Please try again."
+
+
+# --------------------------------------------------------------------------- #
+# Failure handling: classify → retry / park & auto-resume / fail
+# --------------------------------------------------------------------------- #
+
+def _failure_class(exc: Exception) -> str:
+    """Decide how a pipeline failure is handled.
+
+    - "permanent"            → mark failed (won't self-heal on retry): geometry
+                               regressions, bad input.
+    - "provider_unavailable" → park & auto-resume: credits/auth/outage, or an
+                               empty book (which almost always means the model is
+                               down). Also connection/rate/5xx that survived the
+                               call-level retries.
+    - "transient"            → auto-retry a few times, then park: render/storage/
+                               ingest hiccups and anything unclassified.
+    """
+    if isinstance(exc, (GeometryError, ContentQAError)):
+        return "permanent"
+    if llm.is_provider_unavailable(exc) or isinstance(exc, EmptyBookError):
+        return "provider_unavailable"
+    if isinstance(exc, (anthropic.APIConnectionError, anthropic.APITimeoutError,
+                        anthropic.RateLimitError, anthropic.InternalServerError)):
+        return "provider_unavailable"
+    if isinstance(exc, IngestError):
+        return "transient"
+    return "transient"
+
+
+def _wait_reason(exc: Exception) -> str:
+    """Fine-grained reason for a parked job (drives the message + UI styling)."""
+    if llm.is_unfunded(exc):
+        return "unfunded"
+    if isinstance(exc, anthropic.AuthenticationError | anthropic.PermissionDeniedError):
+        return "invalid_key"
+    return "service"
+
+
+def _waiting_message(reason: str) -> str:
+    if reason == "unfunded":
+        return ("Paused: your AI credit balance is low. Please recharge to "
+                "continue — your book will finish automatically once credits are "
+                "added, no need to resubmit.")
+    if reason == "invalid_key":
+        return ("Paused: the AI service key is invalid or revoked. Once it's "
+                "fixed, your book will finish automatically.")
+    return ("We're preparing your book — this is taking a little longer than "
+            "usual. It will finish automatically, no action needed.")
+
+
+def _backoff_seconds(attempts: int) -> int:
+    """Backoff for the Nth park attempt (1-based); the last value repeats."""
+    schedule = [int(x) for x in
+                get_settings().provider_retry_backoff_s.split(",") if x.strip()]
+    if not schedule:
+        schedule = [1800]
+    return schedule[min(max(attempts, 1), len(schedule)) - 1]
+
+
+def _operator_alert(book_id: str, cls: str, exc: Exception) -> None:
+    """Loud log + optional webhook so an operator notices credits/render issues."""
+    detail = f"{type(exc).__name__}: {str(exc)[:300]}"
+    log.error("operator_alert", book_id=book_id, failure_class=cls, detail=detail)
+    url = get_settings().operator_alert_webhook
+    if not url:
+        return
+    try:
+        import urllib.request
+        payload = json.dumps({"text": f"[BookForge] {cls} on {book_id}: {detail}"})
+        req = urllib.request.Request(
+            url, data=payload.encode(), headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=10)
+    except Exception as exc2:  # never let alerting break the pipeline
+        log.warning("operator_alert_webhook_failed", err=str(exc2)[:200])
+
+
+def _park(book_id: str, exc: Exception, cls: str) -> None:
+    """Keep the job alive as 'waiting'; the resume loop will re-run it later.
+    The wait_reason distinguishes the unfunded/out-of-credits case so the UI can
+    show a clear 'unfunded' notice instead of a generic 'preparing' message."""
+    state = _read_state(book_id) or {}
+    attempts = int(state.get("attempts", 0)) + 1
+    delay = _backoff_seconds(attempts)
+    next_at = (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat()
+    reason = _wait_reason(exc)
+    _set_state(book_id, status="waiting", attempts=attempts,
+               wait_reason=reason, unfunded=(reason == "unfunded"),
+               next_retry_at=next_at, error=_waiting_message(reason),
+               error_type=type(exc).__name__, error_detail=str(exc)[:2000])
+    _operator_alert(book_id, reason, exc)
+    log.warning("job_parked", book_id=book_id, attempts=attempts,
+                retry_in_s=delay, failure_class=cls, wait_reason=reason)
+
+
+def _fail(book_id: str, exc: Exception, cls: str) -> None:
+    _set_state(book_id, status="failed", error=_friendly_error(exc),
+               error_type=type(exc).__name__, error_detail=str(exc)[:2000])
+    if cls == "permanent":
+        _operator_alert(book_id, cls, exc)
+
+
+def _run_pipeline(book_id: str, req: CreateBook) -> None:
     def on_stage(stage: str) -> None:
-        current_stage[0] = stage
-        _set_state(book_id, stage=stage)
+        _set_state(book_id, stage=stage, stage_started_at=_now_iso())
 
     # Block here (still "queued") until a pipeline slot is free.
     with _pipeline_sem:
-        _set_state(book_id, status="running")
-        try:
-            from bookforge.pipeline.orchestrator import run_book
+        _set_state(book_id, status="running", started_at=_now_iso())
+        from bookforge.pipeline.orchestrator import run_book
 
-            artifact = run_book(
-                book_id,
-                req.topic,
-                text=req.text,
-                youtube_url=req.youtube_url,
-                target_pages=req.target_pages,
-                chapter_limit=req.chapter_limit,
-                section_limit=req.section_limit,
-                book_kind=req.book_kind,
-                on_stage=on_stage,
-                resume=resume,
-            )
-            _set_state(book_id, status="done", artifact=artifact.model_dump())
-        except Exception as exc:
-            log.exception("pipeline_failed", book_id=book_id)
-            classified = classify_pipeline_error(exc)
-            _set_state(
-                book_id,
-                status="failed",
-                error=classified.message,
-                error_kind=classified.kind,
-                error_detail=classified.detail,
-                failed_stage=current_stage[0],
-            )
+        inline_retries = get_settings().max_job_retries
+        attempt = 0
+        while True:
+            try:
+                artifact = run_book(
+                    book_id, req.topic,
+                    text=req.text, youtube_url=req.youtube_url,
+                    target_pages=req.target_pages,
+                    chapter_limit=req.chapter_limit,
+                    section_limit=req.section_limit,
+                    book_kind=req.book_kind,
+                    profile_overrides=req.profile_overrides,
+                    on_stage=on_stage,
+                )
+                _set_state(book_id, status="done", artifact=artifact.model_dump(),
+                           error=None, error_type=None, error_detail=None)
+                return
+            except Exception as exc:
+                cls = _failure_class(exc)
+                log.exception("pipeline_failed", book_id=book_id, failure_class=cls,
+                              attempt=attempt, error_type=type(exc).__name__)
+                if cls == "transient" and attempt < inline_retries:
+                    attempt += 1
+                    continue  # quick in-slot retry before giving up
+                if cls == "permanent":
+                    _fail(book_id, exc, cls)
+                else:  # provider_unavailable, or transient that exhausted retries
+                    _park(book_id, exc, cls)
+                return
+
+
+# --------------------------------------------------------------------------- #
+# Background auto-resume loop — re-runs parked ("waiting") jobs on schedule so a
+# provider outage (credits/auth) self-heals the moment it's fixed.
+# --------------------------------------------------------------------------- #
+
+def _resume_due(book_id: str) -> bool:
+    state = _read_state(book_id)
+    if not state or state.get("status") != "waiting":
+        return False
+    nxt = _parse_ts(state.get("next_retry_at"))
+    return nxt is None or nxt <= datetime.now(timezone.utc)
+
+
+def _resume_one(book_id: str) -> None:
+    req = _read_request(book_id)
+    if req is None:
+        _set_state(book_id, status="failed",
+                   error="Generation failed due to an unexpected error. Please try again.",
+                   error_detail="cannot resume: request payload missing")
+        return
+    _set_state(book_id, status="queued")  # claim it so the next tick skips it
+    _run_pipeline(book_id, req)
+
+
+async def _resume_loop() -> None:
+    interval = max(5, get_settings().resume_poll_interval_s)
+    loop = asyncio.get_running_loop()
+    while True:
+        try:
+            await asyncio.sleep(interval)
+            books_dir = _ARTIFACTS / "books"
+            if not books_dir.is_dir():
+                continue
+            for path in books_dir.glob("*/status.json"):
+                book_id = path.parent.name
+                if _resume_due(book_id):
+                    log.info("job_resuming", book_id=book_id)
+                    # Run off the event loop so a slow pipeline doesn't block polling.
+                    loop.run_in_executor(None, _resume_one, book_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # a bad tick must never kill the loop
+            log.exception("resume_loop_tick_failed")

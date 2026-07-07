@@ -7,7 +7,10 @@ export type SourceTab = "paste" | "file" | "youtube";
 const TABS: { id: SourceTab; label: string }[] = [
   { id: "paste", label: "Paste text" },
   { id: "file", label: "Upload file" },
-  { id: "youtube", label: "YouTube URL" },
+  // YouTube ingestion is disabled: YouTube hard-blocks this server's IP
+  // ("Sign in to confirm you're not a bot"), so jobs stall at ingest. Restore
+  // this tab once cookie-based fetching is wired up (YT_COOKIES_FILE).
+  // { id: "youtube", label: "YouTube URL" },
 ];
 
 type SourceTabsProps = {

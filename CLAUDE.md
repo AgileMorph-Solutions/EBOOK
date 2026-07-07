@@ -103,6 +103,8 @@ The pipeline has two execution modes sharing the same stage logic:
 
 **Grounding blocks shipping**: `pipeline/qa.py` runs every claim against its cited source passage (8 concurrent). `GROUNDEDNESS_THRESHOLD=1.0` means 100% of claims must be supported. Lower this carefully.
 
+**Broken layouts cannot ship — and defects trigger repair, not failure**: the render's fit JS (`layout/render.py:_LAYOUT_FIT_JS`) fits type on both axes, then audits every text clip-container and returns `render.last_fit_report`. Every page carries a `data-entry` repair key; `assemble._render_practical()` escalates measured overflows level-by-level at zero API cost (entry: spread → flowed over N pages → denser flow; essay: tighter word budgets; howto: compact → split; feature/list/chart/checklist/pro: lower fit floors, lists re-chunk). If escalation stalls, `LayoutError` (carrying structured `defects`) reaches `orchestrator._assemble_with_layout_revise`, which regenerates just the offending blocks with hard length budgets (`MAX_LAYOUT_REVISIONS`, default 2) and re-assembles. `POST /books/{id}/rerender` re-renders any failed/done book from its `render_manifest.json` (zero cost) and flips it to done. Vision layout QA (`pipeline/layout_qa.py`) fails closed and always inspects cover/divider/safety pages. The render service (`render/server.js`) runs the same fit+audit via its JSON protocol. Tests: `tests/test_layout_gates.py`.
+
 **Spike ↔ Production parity**: `orchestrator.py` (CLI) and `workflow/tasks.py` (Celery) call the same stage functions. Adding a stage means touching both files.
 
 **Budget guardrail is hard**: `cost.py` uses a thread-safe accumulator. Exceeding `PER_BOOK_BUDGET_USD` raises an exception mid-pipeline.

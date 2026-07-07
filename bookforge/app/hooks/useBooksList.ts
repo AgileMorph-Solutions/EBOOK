@@ -22,7 +22,10 @@ export function useBooksList() {
   }, []);
 
   const hasActive = books.some(
-    (b) => b.status === "queued" || b.status === "running"
+    (b) =>
+      b.status === "queued" ||
+      b.status === "running" ||
+      b.status === "waiting"
   );
 
   useEffect(() => {

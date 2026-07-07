@@ -3,11 +3,12 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
-import { checkHealth } from "@/lib/api";
+import { getHealth, type HealthInfo } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { Icon } from "@/components/ui/Icon";
-import { clearAuth, getStoredUser, type AuthUser } from "@/lib/auth";
+import { ProviderBanner } from "@/components/ui/ProviderBanner";
+
+const BILLING_URL = "https://console.anthropic.com/settings/billing";
 
 function HealthDot({ ok }: { ok: boolean | null }) {
   return (
@@ -41,26 +42,16 @@ const NAV = [
 
 export function Header() {
   const pathname = usePathname();
-  const router = useRouter();
-  const [healthy, setHealthy] = useState<boolean | null>(null);
+  const [health, setHealth] = useState<HealthInfo | null>(null);
   const [mobileOpen, setMobileOpen] = useState(false);
-  const [user, setUser] = useState<AuthUser | null>(null);
-
-  useEffect(() => {
-    setUser(getStoredUser());
-  }, [pathname]);
-
-  function onLogout() {
-    clearAuth();
-    setUser(null);
-    router.replace("/login");
-  }
+  const healthy = health ? health.ok : null;
+  const unfunded = health?.unfunded ?? false;
 
   useEffect(() => {
     let cancelled = false;
     async function poll() {
-      const ok = await checkHealth();
-      if (!cancelled) setHealthy(ok);
+      const h = await getHealth();
+      if (!cancelled) setHealth(h);
     }
     poll();
     const id = setInterval(poll, 30_000);
@@ -101,35 +92,33 @@ export function Header() {
               </Link>
             );
           })}
-          <span className="flex items-center gap-2 text-secondary">
-            <Icon name="sensors" size={18} />
-            <HealthDot ok={healthy} />
-            <span className="font-label text-label-md">API</span>
-          </span>
-          {user ? (
-            <div className="flex items-center gap-3">
-              <span
-                className="font-label text-label-sm text-secondary"
-                title={user.email}
-              >
-                {user.email}
-              </span>
-              <button
-                type="button"
-                onClick={onLogout}
-                className="rounded border border-outline-variant px-3 py-1 font-label text-label-sm text-secondary hover:text-primary"
-              >
-                Logout
-              </button>
-            </div>
-          ) : (
-            <div
-              className="flex h-8 w-8 items-center justify-center overflow-hidden rounded-full border border-outline-variant bg-surface-container-highest font-label text-label-sm text-secondary"
-              aria-hidden
+          {unfunded ? (
+            <a
+              href={BILLING_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-2 text-error"
+              title="AI credit balance is low — click to recharge"
             >
-              BF
-            </div>
+              <Icon name="account_balance_wallet" size={18} />
+              <HealthDot ok={healthy} />
+              <span className="font-label text-label-md font-semibold">
+                Low balance · Recharge
+              </span>
+            </a>
+          ) : (
+            <span className="flex items-center gap-2 text-secondary">
+              <Icon name="sensors" size={18} />
+              <HealthDot ok={healthy} />
+              <span className="font-label text-label-md">API</span>
+            </span>
           )}
+          <div
+            className="flex h-8 w-8 items-center justify-center overflow-hidden rounded-full border border-outline-variant bg-surface-container-highest font-label text-label-sm text-secondary"
+            aria-hidden
+          >
+            BF
+          </div>
         </nav>
 
         <button
@@ -178,6 +167,7 @@ export function PageShell({ children }: { children: React.ReactNode }) {
     <>
       <Header />
       <main className="mx-auto max-w-container-max px-margin-mobile pb-16 pt-28 md:px-margin-desktop">
+        <ProviderBanner />
         {children}
       </main>
     </>

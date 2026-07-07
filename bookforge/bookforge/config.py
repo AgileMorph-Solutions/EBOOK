@@ -22,6 +22,14 @@ class Settings(BaseSettings):
     content_model: str = Field("claude-opus-4-8", alias="CONTENT_MODEL")
     draft_model: str = Field("claude-haiku-4-5-20251001", alias="DRAFT_MODEL")
     vision_qa_model: str = Field("claude-opus-4-8", alias="VISION_QA_MODEL")
+    # Comma-separated fallback models tried (in order) when the primary model
+    # fails with a MODEL-SPECIFIC error (not-found, overload, non-credit 400).
+    # Credits/auth failures are NOT cascaded — they fail identically on every
+    # model and are handled by park & auto-resume instead.
+    content_model_fallbacks: str = Field(
+        "claude-sonnet-4-6,claude-haiku-4-5-20251001",
+        alias="CONTENT_MODEL_FALLBACKS",
+    )
 
     # --- Images (gemini Imagen default; openai gpt-image-1 alternative) ---
     image_primary_provider: str = Field("gemini", alias="IMAGE_PRIMARY_PROVIDER")
@@ -47,15 +55,55 @@ class Settings(BaseSettings):
     s3_region: str = Field("us-east-1", alias="S3_REGION")
 
     # --- Guardrails ---
-    per_book_budget_usd: float = Field(50.0, alias="PER_BOOK_BUDGET_USD")
+    per_book_budget_usd: float = Field(50.0, alias="PER_BOOK_BUDGET_USD")  # 0 = no cap
+    # Upper bound on DISTINCT base topics the bible may plan (each expands to N
+    # tiered sections). 0 = no ceiling (length scales freely with target_pages).
+    max_base_sections: int = Field(0, alias="MAX_BASE_SECTIONS")
+    # Operator override for per-entry image density ("sparse" | "standard" |
+    # "every_entry"). Empty = use the book profile's template default.
+    # every_entry ≈ one photo per entry — premium look, higher image spend.
+    image_density_override: str = Field("", alias="IMAGE_DENSITY")
+
+    # --- Resilience / self-heal ---
+    # Whole-job auto-retries for TRANSIENT failures before the job is parked.
+    max_job_retries: int = Field(2, alias="MAX_JOB_RETRIES")
+    # Backoff (seconds) between park & auto-resume attempts when the AI provider
+    # is unavailable (credits/auth/outage). The last value repeats indefinitely,
+    # so a parked job self-completes on the next tick after credits are restored.
+    provider_retry_backoff_s: str = Field(
+        "60,300,900,1800", alias="PROVIDER_RETRY_BACKOFF_S",
+    )
+    # How often the background loop scans for parked ("waiting") jobs to resume.
+    resume_poll_interval_s: int = Field(60, alias="RESUME_POLL_INTERVAL_S")
+    # Cap on restart-driven resumes of a single job (guards against crash loops).
+    max_resume_attempts: int = Field(3, alias="MAX_RESUME_ATTEMPTS")
+    # Cache TTL for the /health provider ping (a cheap 1-token model call).
+    health_ping_ttl_s: int = Field(60, alias="HEALTH_PING_TTL_S")
+    # Optional webhook (Slack-style JSON {"text": ...}) for operator alerts.
+    operator_alert_webhook: str = Field("", alias="OPERATOR_ALERT_WEBHOOK")
     max_concurrent_books: int = Field(2, alias="MAX_CONCURRENT_BOOKS")
     image_candidates_per_page: int = Field(2, alias="IMAGE_CANDIDATES_PER_PAGE")
     max_file_size_mb: int = Field(80, alias="MAX_FILE_SIZE_MB")
     max_source_size_mb: int = Field(10, alias="MAX_SOURCE_SIZE_MB")
     groundedness_threshold: float = Field(1.0, alias="GROUNDEDNESS_THRESHOLD")
+    # QA fix-loop: how many times the guide gate may feed its faults back into the
+    # writer and regenerate the offending sections before the book ships anyway.
+    # 0 = single pass, no fix loop (the book still ships best-effort, never errors).
+    max_qa_revisions: int = Field(3, alias="MAX_QA_REVISIONS")
+    # Layout fix-loop: how many times a LayoutError (audit defect that survived
+    # the deterministic repair ladder) may regenerate just the offending blocks
+    # with hard length budgets before the job fails. 0 = fail on first audit miss.
+    max_layout_revisions: int = Field(2, alias="MAX_LAYOUT_REVISIONS")
+    # Strict quality: treat a below-bar prose/editorial score as an ACTIONABLE
+    # fault (regenerate the weak chapter) rather than a soft warning that ships.
+    strict_quality: bool = Field(True, alias="STRICT_QUALITY")
+    prose_floor: float = Field(0.7, alias="PROSE_FLOOR")
     layout_qa_enabled: bool = Field(True, alias="LAYOUT_QA_ENABLED")
     layout_qa_block: bool = Field(False, alias="LAYOUT_QA_BLOCK")
     layout_qa_sample_pages: int = Field(10, alias="LAYOUT_QA_SAMPLE_PAGES")
+    # Deterministic geometry gate on the FINAL PDF (rasterize + measure coverage).
+    # Zero API cost, runs on every book, hard-fails a page-size/scale/clip defect.
+    pdf_geometry_check: bool = Field(True, alias="PDF_GEOMETRY_CHECK")
 
     # --- Print specs ---
     trim_width_in: float = Field(8.5, alias="TRIM_WIDTH_IN")

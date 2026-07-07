@@ -10,6 +10,7 @@ import re
 
 import structlog
 
+from bookforge.errors import IngestError
 from bookforge.schemas import Passage, SourceDoc
 
 log = structlog.get_logger(__name__)
@@ -52,22 +53,30 @@ def _fetch_youtube(url: str) -> str:
 
 
 def _asr_youtube(video_id: str) -> str:
-    """Download audio with yt-dlp and transcribe with faster-whisper."""
+    """Download audio with yt-dlp and transcribe with faster-whisper. Wrapped so
+    a blocked/geo-restricted video or a missing dependency surfaces as a clear
+    IngestError (retryable/parkable) instead of an unhandled traceback."""
     import tempfile
 
-    import yt_dlp
-    from faster_whisper import WhisperModel
+    try:
+        import yt_dlp
+        from faster_whisper import WhisperModel
 
-    with tempfile.TemporaryDirectory() as tmp:
-        out = f"{tmp}/audio.%(ext)s"
-        opts = {"format": "bestaudio", "outtmpl": out, "quiet": True,
-                "postprocessors": [{"key": "FFmpegExtractAudio",
-                                    "preferredcodec": "mp3"}]}
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            ydl.download([f"https://www.youtube.com/watch?v={video_id}"])
-        model = WhisperModel("base", device="cpu", compute_type="int8")
-        segments, _ = model.transcribe(f"{tmp}/audio.mp3")
-        return " ".join(s.text for s in segments)
+        with tempfile.TemporaryDirectory() as tmp:
+            out = f"{tmp}/audio.%(ext)s"
+            opts = {"format": "bestaudio", "outtmpl": out, "quiet": True,
+                    "postprocessors": [{"key": "FFmpegExtractAudio",
+                                        "preferredcodec": "mp3"}]}
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                ydl.download([f"https://www.youtube.com/watch?v={video_id}"])
+            model = WhisperModel("base", device="cpu", compute_type="int8")
+            segments, _ = model.transcribe(f"{tmp}/audio.mp3")
+            return " ".join(s.text for s in segments)
+    except Exception as exc:
+        raise IngestError(
+            f"Could not get a transcript for this video (no captions and audio "
+            f"transcription failed): {str(exc)[:200]}"
+        ) from exc
 
 
 def ingest(topic: str, *, text: str | None = None, youtube_url: str | None = None) -> SourceDoc:
@@ -80,6 +89,8 @@ def ingest(topic: str, *, text: str | None = None, youtube_url: str | None = Non
         raise ValueError("Provide either text or youtube_url")
 
     raw = re.sub(r"[ \t]+", " ", raw).strip()
+    if not raw:
+        raise IngestError("Source has no readable text content to build a book from")
     passages = _chunk(raw)
     log.info("ingested", topic=topic, origin=origin, passages=len(passages),
              chars=len(raw))

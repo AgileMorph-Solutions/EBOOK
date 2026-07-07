@@ -27,7 +27,7 @@ export default function JobsPage() {
     () => ({
       all: books.length,
       done: books.filter((b) => b.status === "done").length,
-      running: books.filter((b) => b.status === "running" || b.status === "queued").length,
+      running: books.filter((b) => ["running", "queued", "waiting"].includes(b.status)).length,
       failed: books.filter((b) => b.status === "failed").length,
     }),
     [books]
@@ -35,7 +35,7 @@ export default function JobsPage() {
 
   const visible = books.filter((b) => {
     if (filter === "all") return true;
-    if (filter === "running") return b.status === "running" || b.status === "queued";
+    if (filter === "running") return ["running", "queued", "waiting"].includes(b.status);
     return b.status === filter;
   });
 

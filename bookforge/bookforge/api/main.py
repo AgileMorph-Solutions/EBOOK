@@ -162,6 +162,7 @@ def _list_jobs(allowed_ids: set[str] | None = None) -> list[dict[str, Any]]:
             "created_at": state.get("created_at", ""),
             "target_pages": state.get("target_pages"),
             "chapter_limit": state.get("chapter_limit"),
+            "section_limit": state.get("section_limit"),
             "book_kind": state.get("book_kind"),
         })
     jobs.sort(key=lambda j: j.get("created_at") or "", reverse=True)

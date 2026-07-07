@@ -200,6 +200,7 @@ def _generate_best(
     negative = _negative_for(bible)
     subject = brief_prompt or prompt[:120]
     best: tuple[float, bytes, bool] | None = None
+    best_rejected: tuple[float, bytes, bool] | None = None  # fallback when all candidates are flagged
 
     for _ in range(max(1, settings.image_candidates_per_page)):
         try:
@@ -223,12 +224,17 @@ def _generate_best(
             continue
         if s.nsfw:
             continue
-        if s.has_garbled_text:
-            if settings.image_reject_text_artifacts:
-                log.info("image_rejected_garbled_text", brief=subject[:80])
-                continue
+        if s.has_garbled_text and settings.image_reject_text_artifacts:
+            log.info("image_rejected_garbled_text", brief=subject[:80])
+            rank = 0.6 * s.relevance + 0.4 * s.aesthetic
+            if best_rejected is None or rank > best_rejected[0]:
+                best_rejected = (rank, cand, True)
+            continue
         if settings.image_reject_text_artifacts and s.has_artifacts:
             log.info("image_rejected_artifacts", brief=subject[:80])
+            rank = 0.6 * s.relevance + 0.4 * s.aesthetic
+            if best_rejected is None or rank > best_rejected[0]:
+                best_rejected = (rank, cand, True)
             continue
         rank = 0.6 * s.relevance + 0.4 * s.aesthetic
         if rank < 0.25:
@@ -239,7 +245,12 @@ def _generate_best(
             best = (rank, cand, flagged)
 
     if best is None:
-        raise ImageGenerationError(f"all image candidates failed for brief: {subject[:80]}")
+        if best_rejected is not None:
+            log.warning("image_using_rejected_fallback", brief=subject[:80],
+                        rank=round(best_rejected[0], 2))
+            best = best_rejected
+        else:
+            raise ImageGenerationError(f"all image candidates failed for brief: {subject[:80]}")
     return best[1], best[0], best[2]
 
 

@@ -86,7 +86,11 @@ def run_book(
         )
         checkpoints.save_images(book_id, all_images)
 
-        pro = content_guide.make_pro(book_bible.pro_topic, book_bible)
+        pro = (
+            content_guide.make_pro(book_bible.pro_topic, book_bible)
+            if book_bible.target_pages >= 24
+            else None
+        )
         qa_result = QAResult(
             groundedness=1.0, prose_quality_score=0.8, passed=True,
         )

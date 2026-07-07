@@ -6,11 +6,14 @@ Practical-guide path: structured card/list blocks for the senior guide layout.
 from __future__ import annotations
 
 import structlog
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from bookforge.clients import llm
 from bookforge.pipeline import content_guide, content_guardrails, grounding, layout_budget
-from bookforge.schemas import BookBible, Chapter, ChapterPlan, Claim, SourceDoc, SpecialPlan
+from bookforge.schemas import (
+    BlockType, BookBible, Chapter, ChapterPlan, Claim, ContentBlock, SourceDoc,
+    SpecialPlan,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -32,6 +35,8 @@ _DRAFT_PROMPT = """Write chapter {idx}: "{title}".
 
 Chapter summary: {summary}
 Beats to cover: {beats}
+LENGTH BUDGET: this chapter must fit in approximately {page_budget} printed \
+page(s) (~300-350 words per page, image-rich layout). {length_guidance}
 
 GROUNDING PASSAGES (cite these ids in each claim; do not assert facts absent here):
 {passages}
@@ -46,12 +51,17 @@ Return structured ContentBlocks for this chapter. Guidance:
 source_passage_ids it comes from. Leave verdict as "pending".
 - Give blocks that deserve a hero image an `image_brief` with a vivid prompt \
 (the global art style is added later — describe subject, scene, mood). Set \
-needs_in_image_text=true only for labels/cards with words baked in."""
+needs_in_image_text=true only for labels/cards with words baked in.
+- `blocks` must NEVER be empty or missing — even a very short 1-page chapter \
+must return at least one `intro` block with a short paragraph.
+- Stay within the LENGTH BUDGET above — do not pad with extra blocks or beats \
+just because more source material is available."""
 
 _DEV_EDIT = """Developmental edit of this chapter draft. Improve structure and arc: \
 does each block earn its place? Is there a hook, momentum, and a satisfying close? \
 Convert flat summary into scene where it helps ("show don't tell"). Keep all claims \
-and their source_passage_ids intact. Return the revised chapter.
+and their source_passage_ids intact. Do NOT add new blocks or lengthen the chapter — \
+match or trim the draft's existing length. Return the revised chapter.
 
 DRAFT:
 {draft}"""
@@ -62,6 +72,40 @@ Then remove every banned AI-tell/cliché. Return the polished chapter.
 
 CHAPTER:
 {chapter}"""
+
+
+def _length_guidance(page_budget: int) -> str:
+    if page_budget <= 1:
+        return "Write ONE short intro block only (120-250 words total) — no more."
+    if page_budget <= 3:
+        return f"Use 1-3 blocks total, roughly {page_budget * 300} words combined."
+    return (
+        f"Use enough blocks to fill the budget without padding — roughly "
+        f"{page_budget * 300} words combined across all blocks."
+    )
+
+
+def _fallback_chapter(plan: ChapterPlan) -> Chapter:
+    """Minimal, always-valid chapter used when the model's structured output
+    for a chapter omits required fields (seen on very small target_pages)."""
+    text = plan.summary.strip() or f"An introduction to {plan.title}."
+    return Chapter(
+        index=plan.index, title=plan.title,
+        blocks=[ContentBlock(type=BlockType.intro, text=text)],
+    )
+
+
+def _safe_chapter_call(
+    prompt: str, system: str, *, idx: int, stage: str, fallback: Chapter,
+) -> Chapter:
+    """Call llm.structured() for a Chapter, falling back to the previous good
+    chapter (or a minimal stub) rather than crashing the whole pipeline when
+    the model omits required fields — most common on very short chapters."""
+    try:
+        return llm.structured(prompt, Chapter, system=system, max_tokens=8000)
+    except ValidationError as exc:
+        log.warning("chapter_stage_invalid", stage=stage, idx=idx, err=str(exc)[:300])
+        return fallback
 
 
 def write_guide(
@@ -118,18 +162,26 @@ def write_chapter(
     )
     passage_text = "\n\n".join(f"[{p.id}] {p.text}" for p in passages)
 
-    draft = llm.structured(
+    fallback = _fallback_chapter(plan)
+    page_budget = max(1, plan.page_budget)
+    draft = _safe_chapter_call(
         _DRAFT_PROMPT.format(
             idx=plan.index, title=plan.title, summary=plan.summary,
             beats="; ".join(plan.beats), passages=passage_text,
             running_summary=running_summary or "(this is the first chapter)",
+            page_budget=page_budget,
+            length_guidance=_length_guidance(page_budget),
         ),
-        Chapter, system=system, max_tokens=8000,
+        system, idx=plan.index, stage="draft", fallback=fallback,
     )
-    dev = llm.structured(_DEV_EDIT.format(draft=draft.model_dump_json()),
-                         Chapter, system=system, max_tokens=8000)
-    final = llm.structured(_LINE_EDIT.format(chapter=dev.model_dump_json()),
-                          Chapter, system=system, max_tokens=8000)
+    dev = _safe_chapter_call(
+        _DEV_EDIT.format(draft=draft.model_dump_json()),
+        system, idx=plan.index, stage="dev_edit", fallback=draft,
+    )
+    final = _safe_chapter_call(
+        _LINE_EDIT.format(chapter=dev.model_dump_json()),
+        system, idx=plan.index, stage="line_edit", fallback=dev,
+    )
     final.index, final.title = plan.index, plan.title
 
     attribute_claims(final, passages)

@@ -93,6 +93,7 @@ export type BookSummary = {
   created_at: string;
   target_pages?: number;
   chapter_limit?: number | null;
+  section_limit?: number | null;
   book_kind?: BookKind;
 };
 

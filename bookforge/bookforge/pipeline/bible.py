@@ -42,7 +42,9 @@ and a style_suffix string that will be appended to EVERY image prompt.
 - A VOICE guide: narrator persona, register, POV, pacing, vocabulary, and a \
 banned_patterns list of clichés/AI-tells to never use.
 - A chapter plan: each chapter has a title, one-paragraph summary, 3-6 concrete \
-beats, and a page_budget. The page_budgets should sum to roughly {pages}.
+beats, and a page_budget. The page_budgets should sum to roughly {pages}. \
+For very short books (under ~10 pages), use a single short chapter; never plan \
+more chapters or page_budget than the target can support.
 - recurring_motifs that tie the book together.
 
 Be specific and editorial. No filler."""
@@ -156,7 +158,7 @@ class _PracticalBibleDraft(BaseModel):
     tone: str = "warm, plain, reassuring"
     art_style: ArtStyle
     voice: VoiceStyle
-    base_sections: list[_BaseSection] = Field(min_length=3)
+    base_sections: list[_BaseSection] = Field(min_length=1)
     how_to: HowToPage
     safety_key: str = "general"
     theme_name: str = "home_clean"
@@ -175,24 +177,31 @@ def _clamp(lo: int, hi: int, v: int) -> int:
 
 # Empirically (matching the hand-authored recipe books) one senior "use card"
 # fills ~1 page and a quick-tip list runs ~6 tips/page; with the section intro
-# and divider photo a dense section lands near ~14 finished pages. We therefore
-# size the SECTION COUNT to the page target and keep every section at
-# recipe-grade density (≈10 cards + ≈35 tips) rather than thinning sections out
-# — thin sections render as padded, whitespace-heavy pages.
+# and divider photo a dense section lands near ~14 finished pages. Section count
+# and per-section quotas scale with target_pages; large books keep recipe-grade
+# density while small targets produce lean sections.
 _PAGES_PER_SECTION = 14
 
 
-def _base_section_target(target_pages: int, tiers: int) -> int:
-    """How many DISTINCT base topics to ask the model for, so base×tiers
-    sections at recipe density reach ~target_pages."""
-    return _clamp(4, 14, round(target_pages / (_PAGES_PER_SECTION * tiers)))
+def _plan_dimensions(target_pages: int) -> tuple[int, int]:
+    """Pick base-topic count and tier count so expanded sections reach ~target_pages."""
+    tiers = 2 if target_pages >= 60 else 1
+    base = _clamp(1, 14, round(target_pages / (_PAGES_PER_SECTION * tiers)))
+    return base, tiers
+
+
+def _max_specials(target_pages: int) -> int:
+    if target_pages < 24:
+        return 0
+    if target_pages < 60:
+        return 1
+    return 3
 
 
 def _section_quotas(target_pages: int, num_sections: int) -> tuple[int, int, int, int]:
-    pages_per = max(8, (target_pages + num_sections - 1) // max(1, num_sections))
-    # Recipe-grade floors: never drop below a dense, well-filled card page.
-    full_cards = _clamp(7, 11, round(pages_per * 0.72))
-    list_quota = _clamp(24, 38, round(pages_per * 2.5))
+    pages_per = max(1, round(target_pages / max(1, num_sections)))
+    full_cards = _clamp(1, 11, round(pages_per * 0.72))
+    list_quota = _clamp(0, 38, round(pages_per * 2.5))
     image_quota = min(3, full_cards)
     return full_cards, list_quota, image_quota, pages_per
 
@@ -207,7 +216,10 @@ def _expand_sections(
     idx = 1
     for base in base_sections:
         for tier in tiers:
-            if tier == "Essentials":
+            if tiers_count == 1:
+                title = base.title
+                summary = base.summary
+            elif tier == "Essentials":
                 title = f"{base.title} — Essentials"
                 summary = base.summary
             elif tier == "More Uses":
@@ -296,7 +308,8 @@ def build_bible(
     if book_kind == "narrative":
         bible = llm.structured(
             _NARRATIVE_PROMPT.format(
-                topic=source.topic, pages=target_pages, source=excerpt),
+                topic=source.topic, pages=target_pages, source=excerpt,
+            ),
             BookBible, system=_SYSTEM, max_tokens=8000,
         )
         bible.target_pages = target_pages
@@ -305,25 +318,34 @@ def build_bible(
                  chapters=len(bible.chapters))
         return bible
 
-    # Two dense tiers per base topic (Essentials + More Uses) matches the
-    # hand-authored recipe books; the base-topic count is what scales length.
-    tiers_per = 2
-    base_target = _base_section_target(target_pages, tiers_per)
-    base_lo = max(4, base_target - 1)
+    # Base-topic count and tier depth scale with target_pages; large books keep
+    # the two-tier Essentials + More Uses pattern from the hand-authored guides.
+    base_target, tiers_per = _plan_dimensions(target_pages)
+    base_lo = max(1, base_target - 1)
     base_hi = base_target + 2
+    max_sp = _max_specials(target_pages)
 
     draft = llm.structured(
         _GUIDE_PROMPT.format(
-            topic=source.topic, pages=target_pages, source=excerpt,
-            base_lo=base_lo, base_hi=base_hi,
+            topic=source.topic,
+            pages=target_pages,
+            source=excerpt,
+            base_lo=base_lo,
+            base_hi=base_hi,
         ),
         _PracticalBibleDraft, system=_GUIDE_SYSTEM, max_tokens=8000,
     )
     sections = _expand_sections(
         draft.base_sections, target_pages, tiers_count=tiers_per,
     )
-    raw_specials = [s.to_plan() for s in draft.specials] or _default_specials()
-    specials = _map_specials(raw_specials, len(draft.base_sections), tiers_per)
+    raw_specials = [s.to_plan() for s in draft.specials]
+    if not raw_specials and max_sp > 0:
+        raw_specials = _default_specials()
+    raw_specials = raw_specials[:max_sp]
+    specials = (
+        _map_specials(raw_specials, len(draft.base_sections), tiers_per)
+        if raw_specials else []
+    )
 
     bible = BookBible(
         title=draft.title,

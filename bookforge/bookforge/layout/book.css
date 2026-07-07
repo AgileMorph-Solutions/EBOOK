@@ -106,17 +106,18 @@ h1, h2, h3, .heading, .title { overflow-wrap: anywhere; }
 
 /* ============================ TEXT PAGE ============================ */
 .textpage .col { position: absolute; inset: var(--safe); top: 1.15in; bottom: .95in;
-  overflow: hidden; }
+  overflow: hidden; border-top: 2px solid var(--accent); padding-top: .35in; }
 .textpage .col::after { content: ""; display: block; clear: both; }
 .kicker-head { font-family: var(--cond); letter-spacing: .3em; text-transform: uppercase;
-  font-size: 10pt; color: var(--accent); margin-bottom: .12in; }
+  font-size: 11pt; color: var(--accent); margin-bottom: .18in; }
 .heading { font-family: var(--display); font-weight: 700; color: var(--accent);
   font-size: 22pt; line-height: 1.1; margin: 0 0 .3em; }
 .dropcap > p:first-of-type::first-letter { font-family: var(--display); font-weight: 800;
   color: var(--accent); float: left; font-size: 58pt; line-height: .8; padding: .03em .1em 0 0; }
 
-p { font-family: var(--body); font-size: 11.5pt; line-height: 1.6; margin: 0 0 .62em;
+p { font-family: var(--body); font-size: 12pt; line-height: 1.65; margin: 0 0 .62em;
   text-align: justify; hyphens: auto; overflow-wrap: break-word; }
+.textpage p { text-align: left; hyphens: auto; }
 .feature .body p:first-of-type { text-indent: 0; }
 .feature .body p + p, .textpage p + p { text-indent: 1.2em; margin-top: 0; }
 

@@ -14,7 +14,7 @@ import { Button } from "@/components/ui/Button";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { Skeleton } from "@/components/ui/Spinner";
 import { Icon } from "@/components/ui/Icon";
-import { deleteBook, type BookStatus, type ErrorKind } from "@/lib/api";
+import { deleteBook, retryBook, type BookStatus, type ErrorKind } from "@/lib/api";
 
 const FAILURE_TITLES: Record<ErrorKind, string> = {
   quota_llm: "Out of LLM credits",
@@ -91,6 +91,21 @@ export function BookStatusPanel({
   const router = useRouter();
   const [archiving, setArchiving] = useState(false);
   const [archiveError, setArchiveError] = useState<string | null>(null);
+  const [retrying, setRetrying] = useState(false);
+  const [retryError, setRetryError] = useState<string | null>(null);
+
+  async function handleRetry() {
+    if (retrying) return;
+    setRetrying(true);
+    setRetryError(null);
+    try {
+      await retryBook(bookId);
+      router.refresh();
+    } catch (e) {
+      setRetryError(e instanceof Error ? e.message : "Retry failed");
+      setRetrying(false);
+    }
+  }
 
   async function handleArchive() {
     if (archiving) return;
@@ -192,11 +207,34 @@ export function BookStatusPanel({
             message={book.error}
             detail={book.error_detail}
           />
-          <Link href="/" className="mt-6 inline-block">
-            <Button variant="outline" type="button">
-              Create new book
+          {book.retry_count && book.retry_count > 0 ? (
+            <p className="mt-3 font-label text-label-sm text-secondary">
+              Previous attempts: {book.retry_count}
+            </p>
+          ) : null}
+          {retryError && (
+            <Alert variant="error" className="mt-4">
+              {retryError}
+            </Alert>
+          )}
+          <div className="mt-6 flex flex-wrap items-center gap-3">
+            <Button
+              type="button"
+              onClick={handleRetry}
+              disabled={retrying}
+            >
+              {retrying ? "Retrying…" : "Retry pipeline"}
             </Button>
-          </Link>
+            <Link href="/">
+              <Button variant="outline" type="button">
+                Create new book
+              </Button>
+            </Link>
+          </div>
+          <p className="mt-2 font-label text-label-sm text-secondary">
+            Retry reuses bible, chapters, and any generated images from the last attempt —
+            only the failing stage and everything after it re-runs.
+          </p>
         </div>
       )}
 

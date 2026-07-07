@@ -274,6 +274,18 @@ def _enqueue_book(
         "book_kind": req.book_kind,
         "source_type": "youtube" if req.youtube_url else "text",
         "owner_id": str(user.id),
+        # Snapshot the request so a future /retry can reconstruct it without the
+        # user re-submitting the same text/URL.
+        "source_snapshot": {
+            "topic": req.topic,
+            "text": req.text,
+            "youtube_url": req.youtube_url,
+            "target_pages": req.target_pages,
+            "chapter_limit": req.chapter_limit,
+            "section_limit": req.section_limit,
+            "book_kind": req.book_kind,
+        },
+        "retry_count": 0,
     }
     if source_filename:
         state["source_filename"] = source_filename
@@ -458,6 +470,60 @@ def download(
     )
 
 
+@app.post("/books/{book_id}/retry", status_code=202)
+def retry_book(
+    book_id: str,
+    background_tasks: BackgroundTasks,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Restart a failed pipeline from the last completed stage.
+
+    Reuses bible.json, chapters.json, and any images/PDFs already on disk. Only
+    the failing stage and everything downstream is re-run. The original source
+    (text / youtube_url) is read back from status.json.source_snapshot.
+    """
+    _assert_can_access(db, user, book_id)
+    state = _read_state(book_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="book not found")
+    current = state.get("status")
+    if current != "failed":
+        raise HTTPException(
+            status_code=409,
+            detail=f"book not in a retryable state — current status: {current}",
+        )
+    snap = state.get("source_snapshot")
+    if not snap:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "This book has no source snapshot from its original submission "
+                "(pre-retry-feature). Please submit a new book."
+            ),
+        )
+    try:
+        req = CreateBook(**snap)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"snapshot invalid: {exc}")
+
+    retry_count = int(state.get("retry_count") or 0) + 1
+    _set_state(
+        book_id,
+        status="queued",
+        stage=None,
+        error=None,
+        error_kind=None,
+        error_detail=None,
+        artifact=None,
+        retry_count=retry_count,
+        last_retry_at=datetime.now(timezone.utc).isoformat(),
+    )
+    background_tasks.add_task(_run_pipeline, book_id, req, resume=True)
+    log.info("book_retry_enqueued", book_id=book_id, retry_count=retry_count)
+    return {"book_id": book_id, "status": "queued", "retry_count": retry_count}
+
+
 @app.delete("/books/{book_id}", status_code=204)
 def delete_book(
     book_id: str,
@@ -482,7 +548,7 @@ def delete_book(
 # Background pipeline runner
 # --------------------------------------------------------------------------- #
 
-def _run_pipeline(book_id: str, req: CreateBook) -> None:
+def _run_pipeline(book_id: str, req: CreateBook, *, resume: bool = False) -> None:
     def on_stage(stage: str) -> None:
         _set_state(book_id, stage=stage)
 
@@ -502,6 +568,7 @@ def _run_pipeline(book_id: str, req: CreateBook) -> None:
                 section_limit=req.section_limit,
                 book_kind=req.book_kind,
                 on_stage=on_stage,
+                resume=resume,
             )
             _set_state(book_id, status="done", artifact=artifact.model_dump())
         except Exception as exc:

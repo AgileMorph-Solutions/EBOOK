@@ -80,6 +80,16 @@ curl -X POST localhost:8000/books -H 'content-type: application/json' \
   -d '{"topic":"Forgotten British Meals","text":"...","chapter_limit":1}'
 ```
 
+## Resuming failed runs
+
+Every stage that finishes successfully writes a checkpoint next to the book's
+artifacts (`books/{id}/bible.json`, `chapters.json`, `images.json`, plus each
+`*.jpg`). If a run fails partway through, click **Retry pipeline** on the
+failed-job page — or `POST /books/{id}/retry` via the API — and the pipeline
+picks up from the last completed stage. Bible, chapters, and previously-
+generated images are reused; only the failing stage and everything downstream
+re-runs. The per-book `PER_BOOK_BUDGET_USD` cap is reset for each attempt.
+
 ## Authentication
 
 The API is gated by JWT auth (self-hosted; `python-jose` + bcrypt), and every

@@ -81,6 +81,8 @@ export type BookStatus = {
   error?: string;
   error_kind?: ErrorKind;
   error_detail?: string;
+  retry_count?: number;
+  last_retry_at?: string;
 };
 
 export type BookSummary = {
@@ -230,6 +232,12 @@ export async function getBook(bookId: string): Promise<BookStatus> {
 export async function listBooks(): Promise<BookSummary[]> {
   const data = await apiFetch<{ books: BookSummary[] }>("/books");
   return data.books;
+}
+
+export async function retryBook(
+  bookId: string
+): Promise<{ book_id: string; status: string; retry_count: number }> {
+  return apiFetch(`/books/${bookId}/retry`, { method: "POST" });
 }
 
 export async function deleteBook(bookId: string): Promise<void> {

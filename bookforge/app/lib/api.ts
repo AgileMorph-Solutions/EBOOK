@@ -35,7 +35,10 @@ export type ErrorKind =
   | "rate_limit"
   | "auth"
   | "network"
-  | "unknown";
+  | "unknown"
+  | "layout"
+  | "capacity"
+  | "request";
 
 export type CreateBookRequest = {
   topic: string;
@@ -153,7 +156,23 @@ export type HealthInfo = {
   ok: boolean;
   providerOk: boolean | null; // can we actually call the AI? null = no key
   unfunded: boolean; // AI credit balance too low
+  canGenerate?: boolean;
+  reasonCode?: ErrorKind | null;
   detail?: string;
+};
+
+export type CheckResult = {
+  ok: boolean;
+  reason_code?: ErrorKind | null;
+  detail?: string;
+};
+
+export type ReadinessResult = {
+  can_generate: boolean;
+  title: string;
+  message: string;
+  reason_code?: ErrorKind | null;
+  checks: Record<string, CheckResult>;
 };
 
 export async function getHealth(): Promise<HealthInfo> {
@@ -166,11 +185,15 @@ export async function getHealth(): Promise<HealthInfo> {
       provider_ok?: boolean | null;
       unfunded?: boolean;
       provider_detail?: string;
+      can_generate?: boolean;
+      reason_code?: ErrorKind | null;
     };
     return {
       ok: d.ok === true,
       providerOk: d.provider_ok ?? null,
       unfunded: d.unfunded === true,
+      canGenerate: d.can_generate,
+      reasonCode: d.reason_code ?? null,
       detail: d.provider_detail,
     };
   } catch {
@@ -180,6 +203,40 @@ export async function getHealth(): Promise<HealthInfo> {
 
 export async function checkHealth(): Promise<boolean> {
   return (await getHealth()).ok;
+}
+
+export async function getReadiness(): Promise<ReadinessResult> {
+  try {
+    const apiUrl = await getApiUrl();
+    const res = await fetch(`${apiUrl}/readiness`, { cache: "no-store" });
+    if (!res.ok) {
+      return {
+        can_generate: false,
+        title: "Can't check book service",
+        message: "We couldn't verify whether generation is available. Try again shortly.",
+        reason_code: "network",
+        checks: {},
+      };
+    }
+    return (await res.json()) as ReadinessResult;
+  } catch {
+    return {
+      can_generate: false,
+      title: "Can't check book service",
+      message: "We couldn't verify whether generation is available. Try again shortly.",
+      reason_code: "network",
+      checks: {},
+    };
+  }
+}
+
+export async function checkReadinessForRequest(
+  body: CreateBookRequest
+): Promise<ReadinessResult> {
+  return apiFetch<ReadinessResult>("/readiness", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 }
 
 export function downloadUrl(bookId: string): string {

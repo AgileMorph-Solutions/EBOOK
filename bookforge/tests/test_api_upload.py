@@ -11,14 +11,23 @@ from fastapi.testclient import TestClient
 os.environ.setdefault("BOOKFORGE_LOCAL_STORE", "/tmp/bookforge-test-artifacts")
 
 from bookforge.api.main import app  # noqa: E402
+from bookforge.pipeline.readiness import ReadinessResult  # noqa: E402
 
 client = TestClient(app)
 
 
 @pytest.fixture(autouse=True)
 def _no_pipeline():
+    passing = ReadinessResult(
+        can_generate=True,
+        title="Ready to generate",
+        message="All services are ready.",
+        reason_code="ok",
+        checks={},
+    )
     with patch("bookforge.api.main._run_pipeline"):
-        yield
+        with patch("bookforge.api.main.check_readiness", return_value=passing):
+            yield
 
 
 def test_upload_valid_file():

@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     image_primary_model: str = Field("imagen-4.0-generate-001", alias="IMAGE_PRIMARY_MODEL")
     image_allow_provider_fallback: bool = Field(False, alias="IMAGE_ALLOW_PROVIDER_FALLBACK")
     image_reject_text_artifacts: bool = Field(True, alias="IMAGE_REJECT_TEXT_ARTIFACTS")
+    # Readiness probe for image provider: metadata (cheap), generate (real image), off (key only).
+    readiness_image_probe: str = Field("metadata", alias="READINESS_IMAGE_PROBE")
 
     # --- Transcription / search ---
     deepgram_api_key: str = Field("", alias="DEEPGRAM_API_KEY")

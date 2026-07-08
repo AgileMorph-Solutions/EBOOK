@@ -49,3 +49,17 @@ class LayoutError(GeometryError):
     def __init__(self, message: str, defects: list[dict] | None = None):
         super().__init__(message)
         self.defects = defects or []
+
+
+class ReadinessError(RuntimeError):
+    """Services or request are not ready — fail before ingest/content spend."""
+
+    def __init__(
+        self,
+        title: str,
+        message: str,
+        reason_code: str | None = None,
+    ) -> None:
+        self.title = title
+        self.reason_code = reason_code
+        super().__init__(message)

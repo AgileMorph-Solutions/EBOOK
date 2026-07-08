@@ -155,6 +155,60 @@ def _gen_gemini(prompt: str, aspect: str, negative_prompt: str = "") -> bytes:
     raise ImageGenerationError(f"all Imagen models failed; last error: {last_err}") from last_err
 
 
+def ping() -> None:
+    """Cheap liveness probe for the configured image provider.
+
+    Raises ImageQuotaError / ImageGenerationError on quota or billing failures.
+    """
+    probe = (settings.readiness_image_probe or "metadata").lower()
+    provider = settings.image_primary_provider.lower()
+    _validate_provider(provider)
+
+    if probe == "off":
+        return
+
+    if provider == "gemini":
+        _ping_gemini(probe)
+    else:
+        _ping_openai(probe)
+
+
+def _ping_gemini(probe: str) -> None:
+    from google import genai
+
+    if not settings.gemini_api_key:
+        raise RuntimeError("GEMINI_API_KEY is not set — populate .env")
+    client = genai.Client(api_key=settings.gemini_api_key)
+    model = settings.image_primary_model or _IMAGEN_FALLBACKS[0]
+
+    if probe == "generate":
+        _gen_gemini("solid color", "square")
+        return
+
+    try:
+        client.models.get(model=model)
+    except Exception as exc:
+        if _is_quota_error(exc):
+            raise ImageQuotaError(str(exc)) from exc
+        if _is_fatal_imagen_error(exc):
+            raise ImageGenerationError(str(exc)) from exc
+        raise
+
+
+def _ping_openai(probe: str) -> None:
+    if probe == "generate":
+        _gen_openai("solid color", "square")
+        return
+    try:
+        _openai().models.list()
+    except Exception as exc:
+        if _is_quota_error(exc):
+            raise ImageQuotaError(str(exc)) from exc
+        if "401" in str(exc) or "403" in str(exc):
+            raise ImageGenerationError(str(exc)) from exc
+        raise
+
+
 def generate(prompt: str, *, aspect: str = "full_bleed", in_image_text: bool = False,
              negative_prompt: str = "") -> bytes:
     """Generate one image. `in_image_text` is informational — gpt-image-1 renders

@@ -13,11 +13,14 @@ import {
 } from "@/components/upload/FileDropzone";
 import { SourceTabs, type SourceTab } from "@/components/upload/SourceTabs";
 import {
+  checkReadinessForRequest,
   createBook,
   createBookFromFile,
   getBook,
+  getReadiness,
   type BookKind,
   type CreateBookRequest,
+  type ReadinessResult,
 } from "@/lib/api";
 
 const YT_RE =
@@ -42,6 +45,55 @@ export function CreateBookForm() {
     "idle" | "uploading" | "starting"
   >("idle");
   const [error, setError] = useState<string | null>(null);
+  const [serviceReadiness, setServiceReadiness] =
+    useState<ReadinessResult | null>(null);
+  const [requestReadiness, setRequestReadiness] =
+    useState<ReadinessResult | null>(null);
+
+  useEffect(() => {
+    void getReadiness().then(setServiceReadiness);
+  }, []);
+
+  useEffect(() => {
+    if (!topic.trim()) {
+      setRequestReadiness(null);
+      return;
+    }
+    const timer = setTimeout(() => {
+      const tocLines = toc
+        .split("\n")
+        .map((l) => l.trim())
+        .filter(Boolean);
+      const body: CreateBookRequest = {
+        topic: topic.trim(),
+        target_pages: targetPages,
+        book_kind: bookKind,
+        description: description.trim() || undefined,
+        toc: tocLines.length > 0 ? tocLines : undefined,
+      };
+      if (tab === "youtube" && youtubeUrl.trim()) {
+        body.youtube_url = youtubeUrl.trim();
+      } else if (tab === "file" && fileSelection?.text) {
+        body.text = fileSelection.text.trim();
+      } else if (tab === "paste" && text.trim()) {
+        body.text = text.trim();
+      }
+      void checkReadinessForRequest(body)
+        .then(setRequestReadiness)
+        .catch(() => setRequestReadiness(null));
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [
+    topic,
+    description,
+    toc,
+    targetPages,
+    bookKind,
+    tab,
+    text,
+    youtubeUrl,
+    fileSelection,
+  ]);
 
   useEffect(() => {
     const duplicateId = searchParams.get("duplicate");
@@ -70,7 +122,17 @@ export function CreateBookForm() {
         ? fileSelection !== null
         : text.trim().length > 0;
 
-  const canSubmit = topic.trim().length > 0 && hasSource && !submitting;
+  const readinessBlocked =
+    serviceReadiness?.can_generate === false ||
+    requestReadiness?.can_generate === false;
+  const blockReadiness = requestReadiness?.can_generate === false
+    ? requestReadiness
+    : serviceReadiness?.can_generate === false
+      ? serviceReadiness
+      : null;
+
+  const canSubmit =
+    topic.trim().length > 0 && hasSource && !submitting && !readinessBlocked;
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -310,6 +372,15 @@ export function CreateBookForm() {
           </div>
         )}
       </div>
+
+      {blockReadiness && (
+        <Alert variant={blockReadiness.reason_code === "request" ? "warning" : "error"}>
+          <p className="font-label text-label-md font-semibold">
+            {blockReadiness.title}
+          </p>
+          <p className="mt-1 font-body text-body-sm">{blockReadiness.message}</p>
+        </Alert>
+      )}
 
       {error && <Alert variant="error">{error}</Alert>}
 

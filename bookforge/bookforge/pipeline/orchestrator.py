@@ -115,6 +115,15 @@ def run_book(
             "aborting before generation (no tokens spent): " + " | ".join(preflight[:2])
         )
 
+    from bookforge.errors import ReadinessError
+    from bookforge.pipeline.readiness import check_readiness
+
+    readiness = check_readiness()
+    if not readiness.can_generate:
+        raise ReadinessError(
+            readiness.title, readiness.message, readiness.reason_code,
+        )
+
     def stage(name: str) -> None:
         if on_stage:
             on_stage(name)

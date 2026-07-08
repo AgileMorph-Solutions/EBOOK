@@ -6,6 +6,8 @@ GET  /books/{book_id}          → poll status: queued | running | done | failed
 GET  /books/{book_id}/download → stream the finished PDF
 POST /books/upload             → multipart file upload (alternative to JSON text)
 GET  /health                   → liveness probe
+GET  /readiness                → pre-queue generation readiness
+POST /readiness                → readiness with request sanity checks
 
 Job state is persisted to {ARTIFACTS_ROOT}/books/{book_id}/status.json so it
 survives API restarts and container rebuilds.
@@ -34,7 +36,15 @@ from pydantic import BaseModel, Field, model_validator
 
 from bookforge.clients import llm, storage
 from bookforge.config import get_settings
-from bookforge.errors import ContentQAError, EmptyBookError, GeometryError, IngestError
+from bookforge.errors import (
+    ContentQAError, EmptyBookError, GeometryError, IngestError, ReadinessError,
+)
+from bookforge.pipeline.readiness import (
+    ReadinessRequest,
+    ReadinessResult,
+    check_readiness,
+    writing_provider_status,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -209,6 +219,26 @@ def _list_jobs() -> list[dict[str, Any]]:
     return jobs
 
 
+def _count_active_jobs() -> int:
+    return sum(
+        1 for j in _list_jobs()
+        if j.get("status") in ("queued", "running")
+    )
+
+
+def _to_readiness_request(req: CreateBook) -> ReadinessRequest:
+    return ReadinessRequest.model_validate(req.model_dump())
+
+
+def _assert_can_generate(req: CreateBook | None = None) -> None:
+    result = check_readiness(
+        include_request=_to_readiness_request(req) if req else None,
+        active_jobs=_count_active_jobs(),
+    )
+    if not result.can_generate:
+        raise HTTPException(status_code=503, detail=result.model_dump())
+
+
 # --------------------------------------------------------------------------- #
 # Progress / ETA estimation
 # --------------------------------------------------------------------------- #
@@ -370,55 +400,49 @@ def _enqueue_book(
 # Routes
 # --------------------------------------------------------------------------- #
 
-# Cached provider liveness ping: monotonic_deadline, ok, detail, unfunded.
+# Cached provider liveness ping: kept for tests that patch _provider_ok.
 _provider_ping_cache: dict[str, Any] = {
     "deadline": 0.0, "ok": None, "detail": "", "unfunded": False,
 }
 
 
 def _provider_ok() -> tuple[bool | None, str, bool]:
-    """Whether the AI provider can actually be reached (real 1-token call),
-    cached for HEALTH_PING_TTL_S so /health stays cheap. Returns
-    (ok, detail, unfunded); ok is None if no key is configured."""
-    s = get_settings()
-    if not s.anthropic_api_key:
-        return None, "no ANTHROPIC_API_KEY", False
-    now = time.monotonic()
-    if now < _provider_ping_cache["deadline"] and _provider_ping_cache["ok"] is not None:
-        return (_provider_ping_cache["ok"], _provider_ping_cache["detail"],
-                _provider_ping_cache["unfunded"])
-    unfunded = False
-    try:
-        llm.ping()
-        ok, detail = True, "ok"
-    except Exception as exc:
-        ok = False
-        if llm.is_unfunded(exc):
-            unfunded, detail = True, "out of credits (account unfunded)"
-        elif llm.is_provider_unavailable(exc):
-            detail = "invalid/revoked key: " + str(exc)[:120]
-        else:
-            detail = f"{type(exc).__name__}: {str(exc)[:120]}"
-    _provider_ping_cache.update(
-        deadline=now + max(5, s.health_ping_ttl_s), ok=ok, detail=detail,
-        unfunded=unfunded)
-    return ok, detail, unfunded
+    """Whether Anthropic can be reached — delegates to readiness writing check."""
+    return writing_provider_status()
+
+
+@app.get("/readiness", response_model=ReadinessResult)
+def get_readiness():
+    """Service readiness (writing, images, layout, capacity)."""
+    return check_readiness(active_jobs=_count_active_jobs())
+
+
+@app.post("/readiness", response_model=ReadinessResult)
+def post_readiness(req: CreateBook):
+    """Readiness including request-sanity checks for the create form."""
+    return check_readiness(
+        include_request=_to_readiness_request(req),
+        active_jobs=_count_active_jobs(),
+    )
 
 
 @app.get("/health")
 def health():
     s = get_settings()
     provider_ok, provider_detail, unfunded = _provider_ok()
+    readiness = check_readiness(active_jobs=_count_active_jobs())
     return {
-        "ok": bool(provider_ok) and bool(s.gemini_api_key),
+        "ok": bool(provider_ok) and bool(s.gemini_api_key) and readiness.can_generate,
         "version": API_VERSION,
         "storage": "s3" if os.environ.get("BOOKFORGE_USE_S3") == "1" else "local",
         "render": "render_service" if os.environ.get("RENDER_URL") else "playwright",
         "anthropic_key": bool(s.anthropic_api_key),
         "gemini_key": bool(s.gemini_api_key),
-        "provider_ok": provider_ok,           # real "can we generate?" signal
+        "provider_ok": provider_ok,
         "provider_detail": provider_detail,
-        "unfunded": unfunded,                 # true = out of Anthropic credits
+        "unfunded": unfunded,
+        "can_generate": readiness.can_generate,
+        "reason_code": readiness.reason_code,
         "max_concurrent_books": s.max_concurrent_books,
     }
 
@@ -435,6 +459,7 @@ def create_book(req: CreateBook, background_tasks: BackgroundTasks):
 
     Poll GET /books/{book_id} for progress, then GET /books/{book_id}/download.
     """
+    _assert_can_generate(req)
     return _enqueue_book(req, background_tasks)
 
 
@@ -487,6 +512,7 @@ async def create_book_upload(
         description=description or None,
         toc=toc_list,
     )
+    _assert_can_generate(req)
     return _enqueue_book(
         req,
         background_tasks,
@@ -648,6 +674,8 @@ def _friendly_error(exc: Exception) -> str:
     if isinstance(exc, BudgetExceeded):
         return ("This book reached its generation cost limit before finishing. "
                 "Try a shorter book or contact support to raise the limit.")
+    if isinstance(exc, ReadinessError):
+        return str(exc)
     if isinstance(exc, GeometryError):
         return ("We couldn't produce a clean layout for this book. Our team has "
                 "been notified and is looking into it.")
@@ -684,7 +712,7 @@ def _failure_class(exc: Exception) -> str:
     - "transient"            → auto-retry a few times, then park: render/storage/
                                ingest hiccups and anything unclassified.
     """
-    if isinstance(exc, (GeometryError, ContentQAError)):
+    if isinstance(exc, (GeometryError, ContentQAError, ReadinessError)):
         return "permanent"
     if llm.is_provider_unavailable(exc) or isinstance(exc, EmptyBookError):
         return "provider_unavailable"
@@ -791,8 +819,11 @@ def _fail(book_id: str, exc: Exception, cls: str) -> None:
         friendly = classified.message
     else:
         friendly = _friendly_error(exc)
+    error_kind = classified.kind
+    if isinstance(exc, ReadinessError) and exc.reason_code:
+        error_kind = exc.reason_code
     _set_state(book_id, status="failed", error=friendly,
-               error_kind=classified.kind,
+               error_kind=error_kind,
                error_type=type(exc).__name__, error_detail=str(exc)[:2000])
     if cls == "permanent":
         _operator_alert(book_id, cls, exc)

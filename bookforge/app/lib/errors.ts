@@ -8,6 +8,12 @@ export function formatApiError(detail: unknown): string {
   if (typeof detail === "string") {
     return detail;
   }
+  if (detail && typeof detail === "object" && !Array.isArray(detail)) {
+    const obj = detail as { message?: string; title?: string };
+    if (typeof obj.message === "string" && obj.message) {
+      return obj.message;
+    }
+  }
   if (Array.isArray(detail)) {
     const messages = detail
       .map((item) => {

@@ -16,11 +16,32 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
       setReady(true);
       return;
     }
-    if (!getToken()) {
-      router.replace("/login");
-      return;
-    }
-    setReady(true);
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/config");
+        if (res.ok) {
+          const data = (await res.json()) as { authEnabled?: boolean };
+          if (!data.authEnabled) {
+            if (!cancelled) setReady(true);
+            return;
+          }
+        }
+      } catch {
+        /* fall through to token check */
+      }
+      if (cancelled) return;
+      if (!getToken()) {
+        router.replace("/login");
+        return;
+      }
+      setReady(true);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, [pathname, router]);
 
   if (!ready) return null;

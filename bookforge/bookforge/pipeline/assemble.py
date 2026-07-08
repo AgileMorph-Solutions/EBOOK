@@ -30,6 +30,23 @@ _BLOCKING_LAYOUT_HINTS = (
     "missing page number", "broken", "illegible", "cut off",
 )
 
+# Vision-QA commentary about page-NUMBER sequencing/ordering (TOC, reference
+# lists) is not a visual defect — folios are computed programmatically and are
+# always correct, and a TOC legitimately interleaves independent groups
+# (Chapters vs Reference) whose page numbers don't run monotonically together.
+# The vision model occasionally misreads this as an "inconsistency" and its
+# wording can coincidentally match a blocking hint (e.g. "overlap"); never let
+# that fail a book over content the render pipeline computed deterministically.
+_NON_BLOCKING_PATTERNS = (
+    "page order", "page numbering", "out of sequence", "page number",
+    "page reference", "table of contents", "numerically", "folio",
+)
+
+
+def _is_non_blocking_content_nit(issue: str) -> bool:
+    lower = issue.lower()
+    return any(p in lower for p in _NON_BLOCKING_PATTERNS)
+
 
 def _render_gated(html: str) -> bytes:
     """Render HTML → PDF and HARD-FAIL on any in-page layout defect.
@@ -253,6 +270,9 @@ def assemble(
                         sample=skipped[:2])
         hard = [i for i in layout_issues
                 if "(info)" not in i and "(skipped)" not in i]
+        # Content/page-numbering commentary is never a visual print defect —
+        # filter it out before hint-matching so it can't masquerade as one.
+        hard = [i for i in hard if not _is_non_blocking_content_nit(i)]
         # Classify: real print defects block; whitespace nits only warn.
         blocking = hard if settings.layout_qa_block else [
             i for i in hard if any(k in i.lower() for k in _BLOCKING_LAYOUT_HINTS)]

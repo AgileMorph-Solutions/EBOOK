@@ -30,7 +30,7 @@ import structlog
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 from bookforge.clients import llm, storage
 from bookforge.config import get_settings
@@ -314,10 +314,15 @@ class CreateBook(BaseModel):
     topic: str
     text: str | None = None
     youtube_url: str | None = None
-    target_pages: int = 100
+    target_pages: int = Field(100, gt=0, le=300)
     chapter_limit: int | None = None
     section_limit: int | None = None
     book_kind: Literal["practical_guide", "narrative"] = "practical_guide"
+    # Optional book description (angle, audience, themes) injected into planning prompts.
+    description: str | None = None
+    # Optional user-supplied table of contents: list of chapter/section titles the
+    # planner must follow verbatim. Empty list or None → planner auto-plans.
+    toc: list[str] | None = None
     # Optional EditorialProfile field overrides (e.g. {"genre": "cookbook",
     # "audience": "..."}) applied after the planning model derives the profile.
     profile_overrides: dict | None = None
@@ -330,6 +335,9 @@ class CreateBook(BaseModel):
             self.text = None
         if not self.text and not self.youtube_url:
             raise ValueError("Provide either 'text' or 'youtube_url'")
+        # Normalize toc: drop blank entries, set to None if empty.
+        if self.toc is not None:
+            self.toc = [t.strip() for t in self.toc if t.strip()] or None
         return self
 
 
@@ -439,6 +447,8 @@ async def create_book_upload(
     chapter_limit: int | None = Form(None),
     section_limit: int | None = Form(None),
     book_kind: Literal["practical_guide", "narrative"] = Form("practical_guide"),
+    description: str | None = Form(None),
+    toc: str | None = Form(None),
 ):
     """Submit a book job via multipart file upload."""
     if not topic.strip():
@@ -458,6 +468,15 @@ async def create_book_upload(
     if not text.strip():
         raise HTTPException(status_code=422, detail="File has no readable text content")
 
+    # toc arrives as a JSON-encoded string list from the multipart form.
+    toc_list: list[str] | None = None
+    if toc:
+        import json as _json
+        try:
+            toc_list = _json.loads(toc)
+        except Exception:
+            toc_list = [t.strip() for t in toc.split("\n") if t.strip()]
+
     req = CreateBook(
         topic=topic.strip(),
         text=text,
@@ -465,6 +484,8 @@ async def create_book_upload(
         chapter_limit=chapter_limit,
         section_limit=section_limit,
         book_kind=book_kind,
+        description=description or None,
+        toc=toc_list,
     )
     return _enqueue_book(
         req,
@@ -542,6 +563,64 @@ def rerender_book(book_id: str, background_tasks: BackgroundTasks):
     return {"book_id": book_id, "status": "running", "stage": "layout"}
 
 
+@app.post("/books/{book_id}/regenerate", status_code=202)
+def regenerate_book(book_id: str, background_tasks: BackgroundTasks):
+    """Recover a failed job the smart way: reuse whatever work already exists
+    instead of starting over from scratch.
+
+    - If a render manifest is stored (failure happened at/after the layout
+      stage — content and images are already generated), this is a zero
+      LLM/image-cost re-render, identical to POST /rerender.
+    - Otherwise (failure happened at ingest/bible/content, before anything
+      reusable was cached), falls back to a full pipeline re-run from the
+      original request — same params the book was originally submitted with,
+      same book_id, so job history and the URL stay the same instead of
+      minting a new book.
+    """
+    state = _read_state(book_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="book not found")
+    if state.get("status") not in ("failed", "waiting"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"book is {state.get('status')} — regenerate applies to "
+                   "failed or waiting books only",
+        )
+
+    has_manifest = storage.exists(f"books/{book_id}/render_manifest.json")
+    if has_manifest:
+        def _do_rerender() -> None:
+            from bookforge.pipeline import assemble
+            try:
+                _set_state(book_id, status="running", stage="layout",
+                           stage_started_at=_now_iso())
+                artifact = assemble.rerender(book_id)
+                _set_state(book_id, status="done", artifact=artifact.model_dump(),
+                           error=None, error_type=None, error_detail=None)
+                log.info("regenerate_rerendered", book_id=book_id,
+                         pages=artifact.page_count)
+            except Exception as exc:
+                log.exception("regenerate_rerender_failed", book_id=book_id)
+                _fail(book_id, exc, _failure_class(exc))
+
+        background_tasks.add_task(_do_rerender)
+        return {"book_id": book_id, "status": "running", "stage": "layout",
+                "mode": "rerender"}
+
+    req = _read_request(book_id)
+    if req is None:
+        raise HTTPException(
+            status_code=409,
+            detail="no render manifest or original request stored for this "
+                   "book — it cannot be regenerated; create a new book instead",
+        )
+    _set_state(book_id, status="queued", stage=None, error=None,
+               error_type=None, error_detail=None, attempts=0,
+               resume_attempts=0)
+    background_tasks.add_task(_run_pipeline, book_id, req)
+    return {"book_id": book_id, "status": "queued", "mode": "full_rerun"}
+
+
 @app.delete("/books/{book_id}", status_code=204)
 def delete_book(book_id: str):
     """Archive (delete) a job and its artifacts. 404 if it never existed."""
@@ -613,7 +692,9 @@ def _failure_class(exc: Exception) -> str:
                         anthropic.RateLimitError, anthropic.InternalServerError)):
         return "provider_unavailable"
     if isinstance(exc, IngestError):
-        return "transient"
+        # Ingest failures (bad source, missing captions, blocked IP) are not
+        # self-healing — fail fast instead of looping indefinitely.
+        return "permanent"
     return "transient"
 
 
@@ -664,26 +745,54 @@ def _operator_alert(book_id: str, cls: str, exc: Exception) -> None:
         log.warning("operator_alert_webhook_failed", err=str(exc2)[:200])
 
 
+_MAX_PARK_ATTEMPTS = 6  # after this many park cycles, fail the job permanently
+
+
 def _park(book_id: str, exc: Exception, cls: str) -> None:
     """Keep the job alive as 'waiting'; the resume loop will re-run it later.
     The wait_reason distinguishes the unfunded/out-of-credits case so the UI can
-    show a clear 'unfunded' notice instead of a generic 'preparing' message."""
+    show a clear 'unfunded' notice instead of a generic 'preparing' message.
+    After _MAX_PARK_ATTEMPTS park cycles the job is failed to prevent infinite
+    loops when the provider issue doesn't self-heal."""
+    from bookforge.api.error_kinds import classify as _classify_error
+
     state = _read_state(book_id) or {}
     attempts = int(state.get("attempts", 0)) + 1
+
+    if attempts > _MAX_PARK_ATTEMPTS:
+        classified = _classify_error(exc)
+        log.warning("job_park_cap_exceeded", book_id=book_id, attempts=attempts,
+                    failure_class=cls, error_kind=classified.kind)
+        _fail(book_id, exc, "permanent")
+        return
+
     delay = _backoff_seconds(attempts)
     next_at = (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat()
     reason = _wait_reason(exc)
+    classified = _classify_error(exc)
     _set_state(book_id, status="waiting", attempts=attempts,
                wait_reason=reason, unfunded=(reason == "unfunded"),
                next_retry_at=next_at, error=_waiting_message(reason),
+               error_kind=classified.kind,
                error_type=type(exc).__name__, error_detail=str(exc)[:2000])
     _operator_alert(book_id, reason, exc)
     log.warning("job_parked", book_id=book_id, attempts=attempts,
-                retry_in_s=delay, failure_class=cls, wait_reason=reason)
+                retry_in_s=delay, failure_class=cls, wait_reason=reason,
+                error_kind=classified.kind)
 
 
 def _fail(book_id: str, exc: Exception, cls: str) -> None:
-    _set_state(book_id, status="failed", error=_friendly_error(exc),
+    from bookforge.api.error_kinds import classify as _classify_error
+
+    classified = _classify_error(exc)
+    # Use the classifier's friendly message for quota/auth kinds; fall back to
+    # the legacy _friendly_error for domain-specific messages (geometry, etc.).
+    if classified.kind in ("quota_llm", "quota_images", "rate_limit", "auth"):
+        friendly = classified.message
+    else:
+        friendly = _friendly_error(exc)
+    _set_state(book_id, status="failed", error=friendly,
+               error_kind=classified.kind,
                error_type=type(exc).__name__, error_detail=str(exc)[:2000])
     if cls == "permanent":
         _operator_alert(book_id, cls, exc)
@@ -709,6 +818,8 @@ def _run_pipeline(book_id: str, req: CreateBook) -> None:
                     chapter_limit=req.chapter_limit,
                     section_limit=req.section_limit,
                     book_kind=req.book_kind,
+                    description=req.description,
+                    toc=req.toc,
                     profile_overrides=req.profile_overrides,
                     on_stage=on_stage,
                 )

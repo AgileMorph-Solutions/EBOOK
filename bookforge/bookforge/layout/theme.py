@@ -244,8 +244,8 @@ def contrast_ratio(fg: str, bg: str) -> float:
 def validate_kit(kit: dict[str, str] | None) -> dict[str, str] | None:
     """Validate a per-book design kit. Fills missing tokens from the neutral
     preset and enforces legibility: body ink on paper ≥ 6:1, white on dark panel
-    ≥ 4.5:1, accent on paper ≥ 3:1. Returns validated tokens, or None if the kit
-    is unusable (caller falls back to a preset)."""
+    ≥ 4.5:1, accent on paper ≥ 3:1, white on accent ≥ 4.5:1. Returns validated
+    tokens, or None if the kit is unusable (caller falls back to a preset)."""
     if not kit:
         return None
     base = PRESETS[NEUTRAL_GUIDE_PRESET]
@@ -260,6 +260,11 @@ def validate_kit(kit: dict[str, str] | None) -> dict[str, str] | None:
         contrast_ratio("#FFFFFF", tokens["panel_dark"]) >= 4.5,
         contrast_ratio(tokens["accent"], tokens["paper"]) >= 3.0,
         contrast_ratio(tokens["ink"], tokens["panel"]) >= 4.5,
+        # white-on-accent: the cover band, entry-number badges, divider
+        # panels, table headers, and list numerals all set white text
+        # directly on the accent colour — a light/pastel accent (common in
+        # LLM-derived palettes) can make that text unreadable.
+        contrast_ratio("#FFFFFF", tokens["accent"]) >= 4.5,
     )
     if not all(checks):
         return None

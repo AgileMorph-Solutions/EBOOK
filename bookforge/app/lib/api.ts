@@ -29,6 +29,14 @@ export function getApiUrlSync(): string {
 
 export type BookKind = "practical_guide" | "narrative";
 
+export type ErrorKind =
+  | "quota_llm"
+  | "quota_images"
+  | "rate_limit"
+  | "auth"
+  | "network"
+  | "unknown";
+
 export type CreateBookRequest = {
   topic: string;
   text?: string;
@@ -37,6 +45,8 @@ export type CreateBookRequest = {
   chapter_limit?: number | null;
   section_limit?: number | null;
   book_kind?: BookKind;
+  description?: string;
+  toc?: string[];
 };
 
 export type QAResult = {
@@ -76,6 +86,7 @@ export type BookStatus = {
   stage_total?: number;
   artifact?: BookArtifact;
   error?: string;
+  error_kind?: ErrorKind;
   next_retry_at?: string;
   attempts?: number;
   wait_reason?: string;
@@ -123,6 +134,19 @@ async function apiFetch<T>(
     throw new Error(formatApiError(detail));
   }
   return res.json() as Promise<T>;
+}
+
+export type LoginResponse = { access_token: string; token_type: string };
+
+export async function login(email: string, password: string): Promise<LoginResponse> {
+  return apiFetch<LoginResponse>("/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ email, password }),
+  });
+}
+
+export async function fetchMe(): Promise<{ id: string; email: string; is_admin: boolean }> {
+  return apiFetch("/auth/me");
 }
 
 export type HealthInfo = {
@@ -226,4 +250,14 @@ export async function deleteBook(bookId: string): Promise<void> {
   if (!res.ok && res.status !== 404) {
     throw new Error(formatApiError(res.statusText));
   }
+}
+
+export type RegenerateResponse = {
+  book_id: string;
+  status: string;
+  mode?: "rerender" | "full_rerun";
+};
+
+export async function regenerateBook(bookId: string): Promise<RegenerateResponse> {
+  return apiFetch(`/books/${bookId}/regenerate`, { method: "POST" });
 }

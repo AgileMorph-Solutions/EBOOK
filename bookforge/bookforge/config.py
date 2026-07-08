@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     deepgram_api_key: str = Field("", alias="DEEPGRAM_API_KEY")
     search_api_key: str = Field("", alias="SEARCH_API_KEY")
     search_provider: str = Field("tavily", alias="SEARCH_PROVIDER")
+    # Netscape-format cookies.txt (exported from a real logged-in YouTube session)
+    # used to work around YouTube IP-blocking this server's requests ("Sign in to
+    # confirm you're not a bot"). Empty = unauthenticated requests (may be blocked).
+    yt_cookies_file: str = Field("", alias="YT_COOKIES_FILE")
 
     # --- Infra ---
     database_url: str = Field(

@@ -124,6 +124,19 @@ _LAYOUT_FIT_JS = """
       stuck.push('safety-band');
   });
 
+  // Cover title/subtitle: long topics ("365 Forgotten American Recipes...")
+  // can overflow the fixed-height title band and get clipped at the page
+  // edge. Shrink title first (it dominates height), then the subtitle,
+  // against the whole band so both compete for the same space fairly.
+  document.querySelectorAll('.gcover .cband').forEach((band) => {
+    const title = band.querySelector('.ctitle');
+    const sub = band.querySelector('.csub');
+    let ok = true;
+    if (title) ok = shrinkToFit(title, 'fontSize', 24, 46, band) && ok;
+    if (sub) ok = shrinkToFit(sub, 'fontSize', 11, 17, band) && ok;
+    if (!ok) stuck.push('cover-band');
+  });
+
   // ---- defect audit -------------------------------------------------------
   // Text clip-containers where ANY overflow means clipped print output. Image
   // crop frames (.dphoto, entry frames) are deliberately excluded: their inner
@@ -131,7 +144,7 @@ _LAYOUT_FIT_JS = """
   // stops that overflow from propagating to these containers anyway.
   const pages = Array.from(document.querySelectorAll('.page'));
   const overflows = [];
-  const AUDIT = '.gdivider .dpanel, .gfit, .gsafety .band, .gbody-box';
+  const AUDIT = '.gdivider .dpanel, .gfit, .gsafety .band, .gbody-box, .gcover .cband';
   document.querySelectorAll(AUDIT).forEach((el) => {
     const over_h = el.scrollHeight - el.clientHeight;
     const over_w = el.scrollWidth - el.clientWidth;

@@ -30,7 +30,7 @@ _PROMPT = """You are a print production QA inspector reviewing a page from \
 
 Theme: {theme}
 
-Check for these defects:
+Check for these VISUAL defects only:
 - Text bleeding onto photos or clipped at page edges
 - A word broken across two lines WITHOUT a hyphen (e.g. "Rebuildi" / "ng")
 - Title overlapping image on section divider pages
@@ -40,8 +40,17 @@ Check for these defects:
 - Unreadable text (too small or low contrast)
 - Wrong color theme for the topic (e.g. cleaning teal on a food book)
 
-Be strict. Return passed=false if ANY serious layout defect is visible.
-List specific issues found. If the page looks print-ready, return passed=true."""
+Do NOT evaluate whether page numbers, a table of contents, or a reference
+list are numerically "in order" or "sequential" — folio numbers are computed
+programmatically and are always correct; a table of contents legitimately
+lists multiple independent groups (e.g. "Chapters" and "Reference") whose
+page numbers naturally interleave since those pages are physically
+distributed throughout the book. This is normal book structure, NOT a defect
+— never flag it.
+
+Be strict about VISUAL print defects only. Return passed=false if ANY serious
+visual layout defect is visible. List specific issues found. If the page
+looks print-ready, return passed=true."""
 
 
 def _pick_pages(total: int, section_count: int, sample: int,

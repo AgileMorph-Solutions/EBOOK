@@ -763,34 +763,98 @@ def _pick_theme(llm_theme: str) -> str:
     return theme.NEUTRAL_GUIDE_PRESET
 
 
+def _description_block(description: str | None) -> str:
+    """Format an optional author description as a prompt block."""
+    if not description or not description.strip():
+        return ""
+    return (
+        "\n\nAUTHOR DESCRIPTION (written by the requester — treat as editorial "
+        "direction and honor its angle, audience, and themes):\n\"\"\"\n"
+        + description.strip()
+        + "\n\"\"\""
+    )
+
+
+def _narrative_toc_block(toc: list[str] | None) -> str:
+    """Format a required chapter list for the narrative prompt."""
+    if not toc:
+        return ""
+    numbered = "\n".join(f"  {i + 1}. {t}" for i, t in enumerate(toc))
+    return (
+        "\n\nREQUIRED CHAPTER PLAN (the user has specified these chapter titles "
+        "— you MUST use them EXACTLY and IN THIS ORDER; do not add, remove, "
+        "rename, or reorder any chapter; fill each with a summary, beats, and "
+        "page_budget that fit the title):\n" + numbered
+    )
+
+
+def _guide_toc_block(toc: list[str] | None) -> str:
+    """Format a required section list for the practical-guide prompt."""
+    if not toc:
+        return ""
+    numbered = "\n".join(f"  {i + 1}. {t}" for i, t in enumerate(toc))
+    return (
+        "\n\nREQUIRED TABLE OF CONTENTS (the user has specified these chapter "
+        "titles — your base_sections MUST use them EXACTLY and IN THIS ORDER; "
+        "do not add, remove, rename, or reorder any chapter; fill each with a "
+        "summary, divider_subject, part_title, and entries):\n" + numbered
+    )
+
+
 def build_bible(
     source: SourceDoc,
     *,
     target_pages: int = 100,
     book_kind: str = "practical_guide",
+    description: str | None = None,
+    toc: list[str] | None = None,
     profile_overrides: dict | None = None,
 ) -> BookBible:
     excerpt = source.text[:20000]
+    desc_block = _description_block(description)
 
     if book_kind == "narrative":
-        bible = llm.structured(
+        toc_block = _narrative_toc_block(toc)
+        prompt = (
             _NARRATIVE_PROMPT.format(
-                topic=source.topic, pages=target_pages, source=excerpt),
+                topic=source.topic, pages=target_pages, source=excerpt)
+            + desc_block
+            + toc_block
+        )
+        bible = llm.structured(
+            prompt,
             BookBible, system=_SYSTEM, max_tokens=8000,
         )
         bible.target_pages = target_pages
         bible.book_kind = "narrative"
+        # Enforce user TOC exactly: overwrite chapter titles in order.
+        if toc and bible.chapters:
+            for i, ch_title in enumerate(toc):
+                if i < len(bible.chapters):
+                    bible.chapters[i].title = ch_title
+                else:
+                    from bookforge.schemas import ChapterPlan
+                    bible.chapters.append(ChapterPlan(
+                        index=i + 1, title=ch_title, summary="", beats=[],
+                        page_budget=max(1, target_pages // len(toc)),
+                    ))
+            bible.chapters = bible.chapters[:len(toc)]
         log.info("bible_built", kind="narrative", title=bible.title,
-                 chapters=len(bible.chapters))
+                 chapters=len(bible.chapters), user_toc=bool(toc))
         return bible
 
     profile = derive_profile(source, overrides=profile_overrides)
     design = derive_design(source, profile)
     spec = templates.spec_for(profile.structure_template)
     density = _guide_density(target_pages, profile)
-    base_target = density.base_sections
-    base_lo = max(4, base_target - 1)
-    base_hi = base_target + 2
+    # When user supplies TOC, pin base section count to that length.
+    if toc:
+        base_lo = base_hi = len(toc)
+        base_target = len(toc)
+    else:
+        base_target = density.base_sections
+        base_lo = max(4, base_target - 1)
+        base_hi = base_target + 2
     tiers_per = max(1, profile.tiers)
     planned_estimate = (base_target * tiers_per
                         * (density.cards_per_section + density.list_quota))
@@ -800,6 +864,7 @@ def build_bible(
         savings_note = ("\nCharts may compare costs and name realistic savings; "
                         "keep every number honest.")
 
+    guide_toc_block = _guide_toc_block(toc)
     draft = llm.structured(
         _GUIDE_PROMPT_TPL.format(
             genre=profile.genre, topic=source.topic, pages=target_pages,
@@ -818,7 +883,7 @@ def build_bible(
             back_matter_angle=profile.back_matter_angle or
             "the closing reference page readers of this genre expect",
             savings_note=savings_note,
-        ),
+        ) + desc_block + guide_toc_block,
         _PracticalBibleDraft,
         system=_GUIDE_SYSTEM_TPL.format(
             genre=profile.genre, audience=profile.audience,
@@ -827,7 +892,46 @@ def build_bible(
         model=settings.content_model, max_tokens=16000,
     )
 
+    # Enforce user TOC exactly: overwrite section titles from the user's list,
+    # adding or trimming the draft's sections to match the user's count.
+    if toc:
+        existing = list(draft.base_sections)
+        enforced: list[_BaseSection] = []
+        for i, ch_title in enumerate(toc):
+            if i < len(existing):
+                enforced.append(_BaseSection(
+                    title=ch_title,
+                    summary=existing[i].summary,
+                    divider_subject=existing[i].divider_subject,
+                    part_title=existing[i].part_title,
+                    entries=existing[i].entries,
+                ))
+            else:
+                # Pad with a minimal section if the model returned fewer.
+                enforced.append(_BaseSection(
+                    title=ch_title,
+                    summary="",
+                    divider_subject="",
+                    part_title="",
+                    entries=[],
+                ))
+        # Rebuild draft with enforced sections (Pydantic models are immutable,
+        # use model_copy to avoid mutation issues).
+        draft = draft.model_copy(update={"base_sections": enforced})
+        log.info("guide_toc_enforced", titles=[s.title for s in enforced])
+
     base_sections = _critique_outline(draft, profile, target_pages)
+    # Re-enforce user TOC after the critique pass (which may have renamed titles).
+    if toc:
+        for i, ch_title in enumerate(toc):
+            if i < len(base_sections):
+                base_sections[i] = _BaseSection(
+                    title=ch_title,
+                    summary=base_sections[i].summary,
+                    divider_subject=base_sections[i].divider_subject,
+                    part_title=base_sections[i].part_title,
+                    entries=base_sections[i].entries,
+                )
     sections = _expand_sections(base_sections, density, profile)
     raw_specials = ([s.to_plan() for s in draft.specials]
                     or _default_specials(profile))
@@ -870,5 +974,6 @@ def build_bible(
     log.info("bible_built", kind="practical_guide", title=bible.title,
              template=profile.structure_template, sections=len(bible.sections),
              promised_uses=bible.promised_uses, planned_uses=planned,
-             theme=bible.theme_name, profile=profile.model_dump())
+             theme=bible.theme_name, user_toc=bool(toc),
+             profile=profile.model_dump())
     return bible

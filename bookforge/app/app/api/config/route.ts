@@ -12,6 +12,7 @@ export function GET() {
 
   return NextResponse.json({
     apiUrl,
+    authEnabled: process.env.AUTH_ENABLED === "true",
     trimWidthIn: parseFloat(process.env.TRIM_WIDTH_IN ?? "8.5"),
     trimHeightIn: parseFloat(process.env.TRIM_HEIGHT_IN ?? "11"),
     contentModel: process.env.CONTENT_MODEL ?? "claude-opus-4-8",

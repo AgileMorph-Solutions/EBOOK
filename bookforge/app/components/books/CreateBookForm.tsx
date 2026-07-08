@@ -28,6 +28,8 @@ export function CreateBookForm() {
   const searchParams = useSearchParams();
   const [tab, setTab] = useState<SourceTab>("paste");
   const [topic, setTopic] = useState("");
+  const [description, setDescription] = useState("");
+  const [toc, setToc] = useState("");
   const [text, setText] = useState("");
   const [youtubeUrl, setYoutubeUrl] = useState("");
   const [fileSelection, setFileSelection] = useState<FileSelection | null>(null);
@@ -48,7 +50,7 @@ export function CreateBookForm() {
       .then((book) => {
         if (book.topic) setTopic(book.topic);
         if (book.book_kind) setBookKind(book.book_kind);
-        if (book.target_pages) setTargetPages(book.target_pages);
+        if (book.target_pages) setTargetPages(Math.min(300, book.target_pages));
         if (book.chapter_limit != null) {
           setChapterLimit(String(book.chapter_limit));
         }
@@ -85,12 +87,19 @@ export function CreateBookForm() {
     setSubmitting(true);
 
     try {
+      const tocLines = toc
+        .split("\n")
+        .map((l) => l.trim())
+        .filter(Boolean);
+
       const common = {
         topic: topic.trim(),
         target_pages: targetPages,
         book_kind: bookKind,
         chapter_limit: chapterLimit ? parseInt(chapterLimit, 10) : null,
         section_limit: sectionLimit ? parseInt(sectionLimit, 10) : null,
+        description: description.trim() || undefined,
+        toc: tocLines.length > 0 ? tocLines : undefined,
       };
 
       let book_id: string;
@@ -107,6 +116,12 @@ export function CreateBookForm() {
         }
         if (common.section_limit != null) {
           formData.append("section_limit", String(common.section_limit));
+        }
+        if (common.description) {
+          formData.append("description", common.description);
+        }
+        if (common.toc) {
+          formData.append("toc", JSON.stringify(common.toc));
         }
         const res = await createBookFromFile(formData);
         book_id = res.book_id;
@@ -159,6 +174,37 @@ export function CreateBookForm() {
         </p>
       </div>
 
+      <div className="flex flex-col gap-2">
+        <Label htmlFor="description">
+          Description{" "}
+          <span className="font-normal text-secondary">(optional)</span>
+        </Label>
+        <Textarea
+          id="description"
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+          rows={3}
+          placeholder="Briefly describe the book's angle, audience, or key themes the AI should focus on…"
+        />
+      </div>
+
+      <div className="flex flex-col gap-2">
+        <Label htmlFor="toc">
+          Table of contents{" "}
+          <span className="font-normal text-secondary">(optional)</span>
+        </Label>
+        <Textarea
+          id="toc"
+          value={toc}
+          onChange={(e) => setToc(e.target.value)}
+          rows={6}
+          placeholder={"One chapter or section title per line, e.g.:\nChapter 1: Introduction\nChapter 2: Core Concepts\nChapter 3: Advanced Techniques"}
+        />
+        <p className="font-body text-body-sm italic text-secondary">
+          The book will follow your chapters exactly. Leave blank to let the AI plan the structure.
+        </p>
+      </div>
+
       <div className="space-y-4">
         <Label>
           Source material <span className="text-primary">*</span>
@@ -208,12 +254,15 @@ export function CreateBookForm() {
             id="pages"
             type="number"
             min={1}
-            max={500}
+            max={300}
             value={targetPages}
             onChange={(e) =>
-              setTargetPages(parseInt(e.target.value, 10) || 100)
+              setTargetPages(Math.min(300, parseInt(e.target.value, 10) || 100))
             }
           />
+          <p className="font-body text-body-sm italic text-secondary">
+            Maximum 300 pages per book.
+          </p>
         </div>
         <div className="flex flex-col gap-2">
           <Label htmlFor="book-kind">Book type</Label>

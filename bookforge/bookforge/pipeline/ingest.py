@@ -6,10 +6,12 @@ is a SourceDoc with stable, chunked passages that everything downstream cites.
 """
 from __future__ import annotations
 
+import os
 import re
 
 import structlog
 
+from bookforge.config import get_settings
 from bookforge.errors import IngestError
 from bookforge.schemas import Passage, SourceDoc
 
@@ -33,6 +35,35 @@ def _chunk(text: str, target_chars: int = 1200) -> list[Passage]:
     return passages
 
 
+def _cookies_file() -> str | None:
+    """Path to a Netscape-format cookies.txt for an authenticated YouTube
+    session, used to work around YouTube IP-blocking this server's requests.
+    Returns None (unauthenticated) if unset, missing, or empty (placeholder)."""
+    path = get_settings().yt_cookies_file
+    if path and os.path.isfile(path) and os.path.getsize(path) > 0:
+        return path
+    if path:
+        log.warning("yt_cookies_file_missing_or_empty", path=path)
+    return None
+
+
+def _authenticated_session():
+    """A requests.Session pre-loaded with cookies from YT_COOKIES_FILE, or
+    None if no cookies file is configured (falls back to anonymous requests)."""
+    path = _cookies_file()
+    if not path:
+        return None
+    import http.cookiejar
+
+    import requests
+
+    jar = http.cookiejar.MozillaCookieJar(path)
+    jar.load(ignore_discard=True, ignore_expires=True)
+    session = requests.Session()
+    session.cookies = jar
+    return session
+
+
 def _fetch_youtube(url: str) -> str:
     vid = _YT_RE.search(url)
     if not vid:
@@ -41,9 +72,10 @@ def _fetch_youtube(url: str) -> str:
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
 
+        api = YouTubeTranscriptApi(http_client=_authenticated_session())
         # v1.x: instance method fetch(); v0.x: class method get_transcript()
         try:
-            parts = list(YouTubeTranscriptApi().fetch(video_id))
+            parts = list(api.fetch(video_id))
         except (AttributeError, TypeError):
             parts = YouTubeTranscriptApi.get_transcript(video_id)  # type: ignore[attr-defined]
         return " ".join(p["text"] if isinstance(p, dict) else p.text for p in parts)
@@ -67,6 +99,9 @@ def _asr_youtube(video_id: str) -> str:
             opts = {"format": "bestaudio", "outtmpl": out, "quiet": True,
                     "postprocessors": [{"key": "FFmpegExtractAudio",
                                         "preferredcodec": "mp3"}]}
+            cookies_path = _cookies_file()
+            if cookies_path:
+                opts["cookiefile"] = cookies_path
             with yt_dlp.YoutubeDL(opts) as ydl:
                 ydl.download([f"https://www.youtube.com/watch?v={video_id}"])
             model = WhisperModel("base", device="cpu", compute_type="int8")

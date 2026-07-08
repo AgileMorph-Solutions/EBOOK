@@ -95,6 +95,8 @@ def run_book(
     chapter_limit: int | None = None,
     section_limit: int | None = None,
     book_kind: str = "practical_guide",
+    description: str | None = None,
+    toc: list[str] | None = None,
     profile_overrides: dict | None = None,
     on_stage: Callable[[str], None] | None = None,
 ) -> BookArtifact:
@@ -123,6 +125,7 @@ def run_book(
     stage("bible")
     book_bible = bible_stage.build_bible(
         source, target_pages=target_pages, book_kind=book_kind,
+        description=description, toc=toc,
         profile_overrides=profile_overrides,
     )
 

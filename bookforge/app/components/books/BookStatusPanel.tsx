@@ -14,7 +14,7 @@ import { Button } from "@/components/ui/Button";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { Skeleton } from "@/components/ui/Spinner";
 import { Icon } from "@/components/ui/Icon";
-import { deleteBook, type BookStatus } from "@/lib/api";
+import { deleteBook, regenerateBook, type BookStatus } from "@/lib/api";
 import { formatBookDate, shortBookId } from "@/lib/config";
 
 function formatElapsed(startIso?: string, elapsedSeconds?: number) {
@@ -48,6 +48,8 @@ export function BookStatusPanel({
   const router = useRouter();
   const [archiving, setArchiving] = useState(false);
   const [archiveError, setArchiveError] = useState<string | null>(null);
+  const [regenerating, setRegenerating] = useState(false);
+  const [regenerateError, setRegenerateError] = useState<string | null>(null);
 
   async function handleArchive() {
     if (archiving) return;
@@ -62,6 +64,20 @@ export function BookStatusPanel({
     } catch (e) {
       setArchiveError(e instanceof Error ? e.message : "Archive failed");
       setArchiving(false);
+    }
+  }
+
+  async function handleRegenerate() {
+    if (regenerating) return;
+    setRegenerating(true);
+    setRegenerateError(null);
+    try {
+      await regenerateBook(bookId);
+      router.refresh();
+    } catch (e) {
+      setRegenerateError(e instanceof Error ? e.message : "Regenerate failed");
+    } finally {
+      setRegenerating(false);
     }
   }
 
@@ -120,10 +136,27 @@ export function BookStatusPanel({
 
       {book?.status === "waiting" && (
         <div className="md:col-span-12">
-          <Alert variant={book.unfunded ? "error" : "info"}>
-            {book.unfunded && <p className="font-medium">Out of credits</p>}
-            {book.error ??
-              "We're preparing your book — this is taking a little longer than usual. It will finish automatically, no action needed."}
+          <Alert variant={book.unfunded || book.error_kind === "quota_llm" ? "error" : "info"}>
+            {(book.unfunded || book.error_kind === "quota_llm") && (
+              <p className="font-medium">Out of writing credits</p>
+            )}
+            {book.error_kind === "quota_images" && (
+              <p className="font-medium">Image allowance reached — auto-resuming when it resets</p>
+            )}
+            <p className="mt-1">
+              {book.error ??
+                "We're preparing your book — this is taking a little longer than usual. It will finish automatically, no action needed."}
+            </p>
+            {(book.unfunded || book.error_kind === "quota_llm") && (
+              <a
+                href="https://console.anthropic.com/settings/billing"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="mt-2 inline-block font-label text-label-sm font-semibold underline underline-offset-2"
+              >
+                Recharge credits →
+              </a>
+            )}
           </Alert>
         </div>
       )}
@@ -158,27 +191,68 @@ export function BookStatusPanel({
         <div className="md:col-span-12">
           <Alert variant="error">
             <p className="font-medium">
-              {book.unfunded ? "AI credit balance is low" : "Generation failed"}
+              {book.error_kind === "quota_llm"
+                ? "Writing credits exhausted"
+                : book.error_kind === "quota_images"
+                  ? "Image allowance exhausted"
+                  : book.error_kind === "rate_limit"
+                    ? "Service temporarily busy"
+                    : book.error_kind === "auth"
+                      ? "Service configuration error"
+                      : book.unfunded
+                        ? "AI credit balance is low"
+                        : "Generation failed"}
             </p>
             <p className="mt-2 whitespace-pre-wrap font-body text-body-sm">
               {book.error}
             </p>
-            {book.unfunded && (
+            {(book.error_kind === "quota_llm" || book.unfunded) && (
               <a
                 href="https://console.anthropic.com/settings/billing"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="mt-2 inline-block font-label text-label-sm font-semibold underline underline-offset-2"
               >
-                Recharge credits →
+                Recharge writing credits →
               </a>
             )}
+            {book.error_kind === "quota_images" && (
+              <p className="mt-2 font-label text-label-sm text-secondary">
+                Your book will continue automatically when the allowance resets — no need to resubmit.
+              </p>
+            )}
+            {book.error_kind === "rate_limit" && (
+              <p className="mt-2 font-label text-label-sm text-secondary">
+                Wait a minute, then try submitting again.
+              </p>
+            )}
           </Alert>
-          <Link href="/" className="mt-6 inline-block">
-            <Button variant="outline" type="button">
-              Create new book
+          <div className="mt-6 flex flex-wrap items-center gap-3">
+            <Button
+              variant="surface"
+              type="button"
+              disabled={regenerating}
+              onClick={handleRegenerate}
+            >
+              <Icon name={regenerating ? "hourglass_top" : "refresh"} />
+              {regenerating ? "Regenerating…" : "Regenerate"}
             </Button>
-          </Link>
+            <Link href="/">
+              <Button variant="outline" type="button">
+                Create new book
+              </Button>
+            </Link>
+          </div>
+          {regenerateError && (
+            <p className="mt-2 font-body text-body-sm text-error">
+              {regenerateError}
+            </p>
+          )}
+          <p className="mt-2 font-label text-label-sm text-secondary">
+            Regenerate picks up from where it failed — if content and images
+            were already generated, it re-renders for free; otherwise it
+            re-runs the full pipeline with the same settings.
+          </p>
         </div>
       )}
 

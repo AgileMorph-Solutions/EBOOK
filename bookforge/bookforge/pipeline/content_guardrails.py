@@ -14,7 +14,7 @@ from bookforge.schemas import BookBible, Chapter, SectionPlan
 # the book shipped 1,176 entries under a "200" subtitle.
 _COUNT_NOUNS = (
     r"ways?|tips?|uses?|tricks?|methods?|ideas?|hacks?|recipes?|dishes?|"
-    r"projects?|patterns?|exercises?|lessons?|entries|habits?|steps?|rules?|"
+    r"fixes?|projects?|patterns?|exercises?|lessons?|entries|habits?|steps?|rules?|"
     r"principles?|moves?|shifts?|strategies|strategy|secrets?|mistakes?|"
     r"reasons?|laws?|keys?|changes?|foods?|drinks?|workouts?|stretches|poses?|"
     r"questions?|skills?|routines?|swaps?|rituals?|practices?"
@@ -29,9 +29,11 @@ _TENS = {"twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60,
          "seventy": 70, "eighty": 80, "ninety": 90}
 _NUMBER_WORDS = {**_ONES, **_TEENS, **_TENS}
 _WORDS_ALT = "|".join(sorted(_NUMBER_WORDS, key=len, reverse=True))
+# Gap words between count and noun (commas in "21 Cheap, Safe DIY Fixes").
+_GAP_WORDS = r"(?:\s+[\w',.-]+){0,6}"
 _WORD_COUNT_RE = re.compile(
-    r"\b((?:%s)(?:[- ](?:%s))?)\b(?:\s+[\w-]+){0,4}\s*(?:%s)\b"
-    % (_WORDS_ALT, "|".join(_ONES), _COUNT_NOUNS),
+    r"\b((?:%s)(?:[- ](?:%s))?)\b%s\s*(?:%s)\b"
+    % (_WORDS_ALT, "|".join(_ONES), _GAP_WORDS, _COUNT_NOUNS),
     re.IGNORECASE,
 )
 
@@ -49,7 +51,7 @@ def _word_to_int(phrase: str) -> int | None:
 
 
 _COUNT_RE = re.compile(
-    r"\b(\d{2,4})\b(?:\s+[\w-]+){0,4}\s*(?:\+?\s*)?(?:%s)\b" % _COUNT_NOUNS,
+    r"\b(\d{2,4})\b%s\s*(?:\+?\s*)?(?:%s)\b" % (_GAP_WORDS, _COUNT_NOUNS),
     re.IGNORECASE,
 )
 _INFLATED_RE = re.compile(
@@ -63,7 +65,7 @@ _BARE_TOTAL_RE = re.compile(
 
 
 _TITLE_COUNT_RE = re.compile(
-    r"\b(\d{1,4})\b(?:\s+[\w-]+){0,4}\s*(?:\+?\s*)?(?:%s)\b" % _COUNT_NOUNS,
+    r"\b(\d{1,4})\b%s\s*(?:\+?\s*)?(?:%s)\b" % (_GAP_WORDS, _COUNT_NOUNS),
     re.IGNORECASE,
 )
 
@@ -99,13 +101,79 @@ def reconcile_promise(title: str, subtitle: str, planned: int,
         return title, subtitle, False
 
     def _swap(text: str) -> str:
-        m = _COUNT_RE.search(text)
+        m = _TITLE_COUNT_RE.search(text)
         if not m:
             return text
         s, e = m.span(1)
         return text[:s] + str(planned) + text[e:]
 
     return _swap(title), _swap(subtitle), True
+
+
+def shrink_sections_to_count(
+    sections: list[SectionPlan], target: int,
+) -> list[SectionPlan]:
+    """Reduce list_quota first, then full_card_quota, to hit `target` uses."""
+    out = [s.model_copy() for s in sections]
+    for s in out:
+        s.list_quota = 0
+    current = planned_use_count(out)
+    if current <= target:
+        return out
+
+    n = len(out) or 1
+    remaining = target
+    trimmed: list[SectionPlan] = []
+    for i, s in enumerate(out):
+        slots = n - i
+        share = max(0, remaining // slots) if i < n - 1 else remaining
+        cards = min(s.full_card_quota, share)
+        trimmed.append(s.model_copy(update={"full_card_quota": cards, "list_quota": 0}))
+        remaining -= cards
+    return trimmed
+
+
+def adjust_list_quotas(
+    sections: list[SectionPlan], extra: int,
+) -> list[SectionPlan]:
+    """Distribute `extra` additional quick-list slots across sections."""
+    if extra <= 0 or not sections:
+        return [s.model_copy() for s in sections]
+    out = [s.model_copy() for s in sections]
+    per, rem = divmod(extra, len(out))
+    for i, s in enumerate(out):
+        s.list_quota += per + (1 if i < rem else 0)
+    return out
+
+
+def rewrite_promised_number(
+    title: str, subtitle: str, target: int,
+) -> tuple[str, str]:
+    """Replace marketing counts in title/subtitle with `target`."""
+    return _rewrite_counts(title, target), _rewrite_counts(subtitle, target)
+
+
+def reconcile_promise_book(bible: BookBible) -> BookBible:
+    """Align section quotas and title copy with the promised marketing count."""
+    promised = parse_promised_count(bible.title, bible.subtitle)
+    planned = planned_use_count(bible.sections)
+    if promised is None:
+        return bible.model_copy(update={"promised_uses": planned})
+
+    if promised > planned * 5:
+        title, subtitle = rewrite_promised_number(
+            bible.title, bible.subtitle, planned)
+        return bible.model_copy(update={
+            "title": title, "subtitle": subtitle, "promised_uses": planned,
+        })
+
+    if promised > planned:
+        sections = adjust_list_quotas(bible.sections, promised - planned)
+        return bible.model_copy(update={
+            "sections": sections, "promised_uses": promised,
+        })
+
+    return bible.model_copy(update={"promised_uses": promised})
 
 
 def _rewrite_counts(text: str, target: int) -> str:

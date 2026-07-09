@@ -39,6 +39,8 @@ def test_parse_promised_count_digits_and_words():
     assert cg.parse_promised_count("Fourteen Habits That Work", "") == 14
     assert cg.parse_promised_count("Sixty Rules for a Calmer Life", "") == 60
     assert cg.parse_promised_count("200 Best-Loved Recipes", "") == 200
+    assert cg.parse_promised_count(
+        "T", "21 Cheap, Safe DIY Fixes") == 21
     assert cg.parse_promised_count("A Book With No Number", "") is None
 
 

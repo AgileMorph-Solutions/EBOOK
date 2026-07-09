@@ -5,6 +5,7 @@ from bookforge.pipeline.content_guardrails import (
     parse_promised_count,
     planned_use_count,
     scan_chapters_for_count_drift,
+    shrink_sections_to_count,
 )
 from bookforge.schemas import (
     ArtStyle, BlockType, BookBible, Chapter, ContentBlock, SectionPlan, VoiceStyle,
@@ -44,6 +45,22 @@ def test_parse_promised_count_from_subtitle():
 
 def test_parse_promised_count_none():
     assert parse_promised_count("Pest Guide", "How to Fight Roaches Without Paying Hundreds") is None
+
+
+def test_parse_promised_count_fixes():
+    assert parse_promised_count(
+        "Senior Pest Control",
+        "21 Cheap, Safe DIY Fixes Before You Pay an Exterminator",
+    ) == 21
+
+
+def test_shrink_pamphlet_sections_to_promise():
+    sections = [
+        SectionPlan(index=i, title=f"S{i}", full_card_quota=7, list_quota=24)
+        for i in range(1, 7)
+    ]
+    out = shrink_sections_to_count(sections, 21)
+    assert planned_use_count(out) <= 21
 
 
 def test_planned_use_count():

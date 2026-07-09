@@ -565,10 +565,10 @@ class GuideDirector:
                 start = step_items[0][0]
                 lis = "".join(f"<li>{_esc(_strip_passage_ids(t))}</li>"
                               for _, t in step_items)
-                start_attr = f' start="{start + 1}"' if start else ""
+                counter_style = f' style="counter-reset: s {start}"' if start else ""
                 label = _esc(es.steps_label) + (" (continued)" if start else "")
                 body += (f'<div class="entry-steps"><div class="steps-label">'
-                         f'{label}</div><ol class="steps-list"{start_attr}>'
+                         f'{label}</div><ol class="steps-list"{counter_style}>'
                          f'{lis}</ol></div>')
                 step_items.clear()
 

@@ -3,9 +3,31 @@ from bookforge.pipeline.bible import (
     _BaseSection,
     _apply_cookbook_profile_bias,
     _enforce_toc_sections,
+    _expand_sections,
+    _guide_density,
     _is_cookbookish,
 )
+from bookforge.pipeline.content_guardrails import (
+    parse_promised_count,
+    planned_use_count,
+    shrink_sections_to_count,
+)
 from bookforge.schemas import EditorialProfile, EntrySchema, SourceDoc
+
+
+def _pest_profile() -> EditorialProfile:
+    return EditorialProfile(
+        genre="Home pest-control handbook",
+        audience="seniors",
+        angle="cheap DIY",
+        entry_schema=EntrySchema(entry_noun="method"),
+        structure_template="tips_cards",
+        tiers=2,
+        tier_names=["Essentials", "More Uses"],
+        image_density="every_entry",
+        pages_per_entry=1.0,
+        quick_list_weight=1.0,
+    )
 
 
 def test_enforce_toc_sections_pads_after_critique_drop():
@@ -43,3 +65,31 @@ def test_cookbook_profile_bias_forces_every_entry_and_spread_template():
     assert biased.image_density == "every_entry"
     assert biased.structure_template == "project_based"
     assert biased.pages_per_entry == 2.0
+
+
+def test_smoke_density_five_pages():
+    density = _guide_density(5, _pest_profile())
+    assert density.list_quota == 0
+    assert density.cards_per_section <= 3
+    assert density.image_quota <= 1
+
+
+def test_smoke_expand_and_shrink_to_subtitle_promise():
+    """Pamphlet: 3 TOC sections x tiers=1, shrink to subtitle promise of 21."""
+    profile = _pest_profile().model_copy(update={"tiers": 1})
+    density = _guide_density(5, profile)
+    bases = [
+        _BaseSection(title=t, summary="s", divider_subject="d")
+        for t in ("Roaches", "Ants", "Mice")
+    ]
+    sections = _expand_sections(bases, density, profile)
+    planned = planned_use_count(sections)
+    promised = parse_promised_count(
+        "Senior Pest Control",
+        "21 Cheap, Safe DIY Fixes Before You Pay an Exterminator",
+    )
+    assert promised == 21
+    if planned > promised:
+        sections = shrink_sections_to_count(sections, promised)
+    assert planned_use_count(sections) <= 21
+    assert all(s.list_quota == 0 for s in sections)

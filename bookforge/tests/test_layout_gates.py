@@ -147,6 +147,23 @@ def test_entry_flow_level3_sheds_intro_from_presentation_page():
     assert all('data-entry="1.2"' in pg for pg in d3.pages)
 
 
+def test_entry_flow_continues_step_numbering_across_pages():
+    """Continuation pages must use CSS counter-reset, not HTML start= (ignored)."""
+    long_steps = [
+        StepItem(text=" ".join(["patience"] * 55)) for _ in range(10)
+    ]
+    entry = _entry(steps=long_steps)
+    d = GuideDirector(_bible())
+    d.entry_card("Seasoning", entry, None, key="1.2", level=2)
+    assert len(d.pages) >= 2
+    step_pages = [p for p in d.pages if "steps-list" in p]
+    assert len(step_pages) >= 2
+    assert any('counter-reset: s' in p and 'counter-reset: s 0' not in p
+               or __import__("re").search(r"counter-reset: s [1-9]", p)
+               for p in step_pages[1:])
+    assert ' start="' not in "".join(step_pages[1:])
+
+
 def test_essay_page_tagged_and_squeeze_paginates_more():
     text = " ".join(["Cast iron rewards patience and punishes neglect."] * 90)
     d1 = GuideDirector(_bible())

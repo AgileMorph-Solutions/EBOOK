@@ -25,7 +25,7 @@ from bookforge.layout import theme
 from bookforge.pipeline import templates
 from bookforge.pipeline.content_guardrails import (
     parse_promised_count, planned_use_count, propagate_promised_count,
-    reconcile_promise,
+    reconcile_promise, shrink_sections_to_count,
 )
 from bookforge.schemas import (
     ArtStyle, BookBible, DesignKit, EditorialProfile, EntrySchema, HowToPage,
@@ -614,15 +614,8 @@ def _guide_density(target_pages: int, profile: EditorialProfile) -> _Density:
         ceiling = settings.max_base_sections
         if ceiling and ceiling > 0:
             n = min(n, ceiling)
-        override = settings.image_density_override.strip().lower()
-        if override in ("sparse", "standard", "every_entry"):
-            profile.image_density = override  # type: ignore[assignment]
-        if profile.image_density == "every_entry":
-            image_quota = cards
-        elif profile.image_density == "standard":
-            image_quota = min(2, cards)
-        else:
-            image_quota = min(1, cards)
+        # Pamphlet: at most one image per section — never every_entry density.
+        image_quota = min(1, cards)
         return _Density(
             base_sections=n, cards_per_section=cards, list_quota=0,
             image_quota=image_quota, page_budget=max(1, round(avail / max(1, n))),
@@ -933,6 +926,9 @@ def build_bible(
         cookbookish=_is_cookbookish(source, description=description, toc=toc),
         has_user_toc=bool(toc),
     )
+    pamphlet = target_pages <= 15
+    if pamphlet:
+        profile = profile.model_copy(update={"tiers": 1})
     design = derive_design(source, profile)
     spec = templates.spec_for(profile.structure_template)
     density = _guide_density(target_pages, profile)
@@ -991,17 +987,31 @@ def build_bible(
         base_sections = _enforce_toc_sections(base_sections, toc)
         log.info("guide_toc_reenforced", count=len(base_sections))
     sections = _expand_sections(base_sections, density, profile)
-    raw_specials = ([s.to_plan() for s in draft.specials]
-                    or _default_specials(profile))
+    if draft.specials:
+        raw_specials = [s.to_plan() for s in draft.specials]
+    elif pamphlet:
+        raw_specials = []
+    else:
+        raw_specials = _default_specials(profile)
     specials = _map_specials(raw_specials, len(base_sections), tiers_per)
 
     planned = planned_use_count(sections)
-    title, subtitle, promise_fixed = reconcile_promise(
-        draft.title, draft.subtitle, planned)
-    if promise_fixed:
-        log.warning("subtitle_promise_reconciled",
-                    old_subtitle=draft.subtitle, new_subtitle=subtitle,
-                    planned=planned)
+    title = draft.title
+    subtitle = draft.subtitle
+    promised = parse_promised_count(title, subtitle)
+
+    if pamphlet and promised and planned > promised:
+        sections = shrink_sections_to_count(sections, promised)
+        planned = promised
+        log.info("pamphlet_shrunk_to_promise", promised=promised,
+                 sections=len(sections))
+    elif not pamphlet:
+        title, subtitle, promise_fixed = reconcile_promise(
+            title, subtitle, planned)
+        if promise_fixed:
+            log.warning("subtitle_promise_reconciled",
+                        old_subtitle=draft.subtitle, new_subtitle=subtitle,
+                        planned=planned)
 
     bible = BookBible(
         title=title,
@@ -1024,8 +1034,7 @@ def build_bible(
         pro_topic=draft.pro_topic or source.topic,
         specials=specials,
     )
-    promised = parse_promised_count(bible.title, bible.subtitle)
-    bible.promised_uses = promised or planned
+    bible.promised_uses = planned
     # Make ALL planner-authored copy (title, kicker, how-to, part titles, …)
     # state the one promised count — the body is reconciled by the QA fix-loop.
     propagate_promised_count(bible)

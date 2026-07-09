@@ -122,6 +122,16 @@ def classify(exc: BaseException) -> ClassifiedError:
                 detail=detail,
             )
 
+    # ---------- Required image slots not filled ----------
+    if cls_name == "ImageCoverageError":
+        return ClassifiedError(
+            kind="quota_images",
+            message="BookForge couldn't fill every photo slot for your book. "
+                    "It will retry automatically — if it keeps failing, try again later "
+                    "or contact support.",
+            detail=detail,
+        )
+
     # ---------- Generic message-based fallbacks ----------
     if "credit balance is too low" in lower or "insufficient_quota" in lower:
         return ClassifiedError(

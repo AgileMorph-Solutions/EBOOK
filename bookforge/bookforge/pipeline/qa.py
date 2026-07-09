@@ -286,12 +286,16 @@ def audit_guide_chapters(chapters: list[Chapter], bible: BookBible) -> tuple[lis
                         seen_openings[opening] = loc
 
                 for field_name in ("title", "intro", "savings", "caution",
-                                   "variation", "note"):
+                                   "variation", "note", "source_line"):
                     val = getattr(e, field_name, None) or ""
                     if val.endswith("…"):
                         issues.append(
                             f"{loc}: {field_name} was truncated ('…') — "
                             "corrupted content must not ship")
+                    if "[]" in val or re.search(r"(?i)adapted from\s*$", val.strip()):
+                        issues.append(
+                            f"{loc}: {field_name} has a broken/empty citation — "
+                            "fill the source credit or leave it empty")
                 for item in e.what_you_need:
                     if item.endswith("…"):
                         issues.append(f"{loc}: truncated {es.need_label} item")

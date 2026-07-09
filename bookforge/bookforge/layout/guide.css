@@ -41,7 +41,7 @@ html { -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
   text-transform: uppercase; letter-spacing: .16em; font-size: 10pt; color: var(--muted); }
 /* folio sits ≥0.375in above trim (KDP no-content zone for bleed books) */
 .gfolio { position: absolute; bottom: calc(var(--bleed) + .42in); left: 0; right: 0;
-  text-align: center; font-family: var(--cond); font-size: 12pt;
+  text-align: center; font-family: var(--cond); font-size: 13pt;
   /* digits only: kill the Oswald alpha tracking (rendered "4 2" / "1 1 5") and
      use tabular figures so multi-digit folios sit evenly. Tracking stays on the
      alpha running head / eyebrows. */
@@ -54,7 +54,7 @@ html { -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
   display: flex; flex-direction: column; }
 
 /* the fit region — render.py tunes its font-size; children size in em */
-.gfit { font-size: 15pt; flex: 1 1 auto; min-height: 0;
+.gfit { font-size: 16pt; flex: 1 1 auto; min-height: 0;
   display: flex; flex-direction: column; }
 .ghead { flex: 0 0 auto; }
 .gbodyfill { flex: 1 1 auto; min-height: 0; margin-top: .16in; }
@@ -206,7 +206,7 @@ b, strong { font-weight: 700; }
   border-bottom: 2px solid var(--panel); padding-bottom: .05in;
   /* long part titles WRAP (were clipped by the column's overflow:hidden) */
   white-space: normal; overflow-wrap: break-word; hyphens: auto; }
-.toc .row { display: flex; align-items: baseline; font-size: 14pt; line-height: 1.85; }
+.toc .row { display: flex; align-items: baseline; font-size: 15pt; line-height: 1.85; }
 .toc .row .tt { color: var(--ink); overflow-wrap: break-word; min-width: 0; }
 .toc .row .dots { flex: 1 1 auto; border-bottom: 1.5px dotted var(--muted); margin: 0 .12in;
   transform: translateY(-.04in); }
@@ -297,7 +297,7 @@ b, strong { font-weight: 700; }
 .need-label, .steps-label { font-family: var(--cond); text-transform: uppercase;
   letter-spacing: .12em; font-weight: 700; font-size: 1.0em; color: var(--accent); }
 .need-list { list-style: none; margin-top: .12in; }
-.need-list li { font-size: 1.0em; line-height: 1.38; margin-bottom: .1in;
+.need-list li { font-size: 1.04em; line-height: 1.38; margin-bottom: .1in;
   padding-left: 1.1em; text-indent: -1.1em; }
 .need-list li::before { content: "•"; color: var(--accent); font-weight: 800; margin-right: .5em; }
 /* 7-9 quantified items read as two columns so a big recipe list still fits
@@ -308,7 +308,7 @@ b, strong { font-weight: 700; }
   padding: .24in .28in; }
 .entry-steps .steps-label { color: #fff; }
 .steps-list { list-style: none; counter-reset: s; margin-top: .14in; }
-.steps-list li { position: relative; font-size: 1.0em; line-height: 1.45; margin-bottom: .14in;
+.steps-list li { position: relative; font-size: 1.04em; line-height: 1.45; margin-bottom: .14in;
   padding-left: 2.0em; color: #fff; }
 .steps-list li:last-child { margin-bottom: 0; }
 .steps-list li::before { counter-increment: s; content: counter(s); position: absolute; left: 0;
@@ -319,8 +319,9 @@ b, strong { font-weight: 700; }
 .callout { flex: 1; border-radius: 10px; padding: .16in .2in; font-size: .96em; line-height: 1.4; }
 .callout .cl-label { font-family: var(--cond); text-transform: uppercase; letter-spacing: .06em;
   font-weight: 700; }
-.callout.savings { background: rgba(46,125,91,.14); border-left: 6px solid var(--savings, #2E7D5B); }
-.callout.savings .cl-label { color: var(--savings, #2E7D5B); }
+.callout.savings { background: rgba(46,125,91,.14); border-left: 6px solid var(--savings, #2E7D5B);
+  font-variant-numeric: tabular-nums; letter-spacing: 0; word-spacing: normal; }
+.callout.savings .cl-label { color: var(--savings, #2E7D5B); letter-spacing: .06em; }
 .callout.caution { background: rgba(181,101,29,.14); border-left: 6px solid var(--caution, #B5651D); }
 .callout.caution .cl-label { color: var(--caution, #B5651D); }
 .callout.danger { background: rgba(179,38,30,.12); border-left: 6px solid var(--danger, #B3261E); }
@@ -335,7 +336,7 @@ b, strong { font-weight: 700; }
 .list-compact { align-items: center; }
 .list-compact .list-col { width: 100%; max-width: var(--measure, 5.4in); }
 .list-compact .list-item { padding: .16in 0; }
-.list-item { font-size: 1.0em; line-height: 1.4; padding: .06in 0; }
+.list-item { font-size: 1.04em; line-height: 1.4; padding: .06in 0; }
 .list-item .ln { display: flex; gap: .45em; }
 .list-item .num { font-family: var(--cond); font-weight: 700; color: var(--accent); min-width: 1.7em; }
 .list-item .nm { font-weight: 700; color: var(--ink); }
@@ -350,6 +351,7 @@ b, strong { font-weight: 700; }
 .gtable tbody td { padding: .15in .18in; line-height: 1.35; border-bottom: 1px solid var(--panel);
   vertical-align: middle; }
 .gtable tbody td:last-child { text-align: right; font-weight: 700; color: var(--savings, #2E7D5B);
+  font-family: var(--body); font-variant-numeric: tabular-nums; letter-spacing: 0;
   white-space: nowrap; }
 .gtable tbody tr:nth-child(even) { background: var(--panel); }
 .chart-note { margin-top: .16in; font-size: .9em; color: var(--muted); font-style: italic; }

@@ -187,7 +187,7 @@ class EditorialProfile(BaseModel):
         default_factory=lambda: ["Essentials", "More Uses"])
     list_section_heading: str = "More {topic} Uses"
     quick_list_weight: float = 1.0  # scales the quick-list quota (cookbook ~0.15)
-    image_density: Literal["sparse", "standard", "every_entry"] = "sparse"
+    image_density: Literal["sparse", "standard", "every_entry"] = "every_entry"
     feature_menu: list[str] = Field(default_factory=list)  # allowed sidebar kinds
     # --- cover & matter ---
     cover_kicker: str = ""

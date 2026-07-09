@@ -100,14 +100,31 @@ def test_capacity_warn_only():
     assert result.checks["capacity"].reason_code == "capacity"
 
 
-def test_request_block_narrative_cookbook():
+def test_request_allows_marketing_count_smoke_run():
+    """10-page smoke tests must not be blocked by title numbers like 365 or 100."""
     req = ReadinessRequest(
-        topic="365 Forgotten American Recipes",
+        topic="100 Forgotten American Recipes",
         description="365 recipes for seniors",
         text="x" * 500,
-        target_pages=100,
-        book_kind="narrative",
-        toc=["ch1"] * 16,
+        target_pages=10,
+        section_limit=1,
+    )
+    with patch("bookforge.pipeline.readiness.llm.ping"):
+        with patch("bookforge.pipeline.readiness.img_client.ping"):
+            with patch(
+                "bookforge.pipeline.readiness.pdf_geometry.preflight_render_check",
+                return_value=[],
+            ):
+                result = check_readiness(include_request=req, active_jobs=0)
+    assert result.can_generate is True
+    assert result.checks["request"].ok is True
+
+
+def test_request_blocks_short_source():
+    req = ReadinessRequest(
+        topic="Test Book",
+        text="too short",
+        target_pages=10,
     )
     with patch("bookforge.pipeline.readiness.llm.ping"):
         with patch("bookforge.pipeline.readiness.img_client.ping"):
@@ -118,7 +135,7 @@ def test_request_block_narrative_cookbook():
                 result = check_readiness(include_request=req, active_jobs=0)
     assert result.can_generate is False
     assert result.reason_code == "request"
-    assert "practical guide" in result.message.lower() or "pages" in result.message.lower()
+    assert "too short" in result.message.lower()
 
 
 def test_post_books_503_when_not_ready():

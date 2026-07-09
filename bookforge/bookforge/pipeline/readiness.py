@@ -11,7 +11,6 @@ from bookforge.api.error_kinds import ClassifiedError, classify
 from bookforge.clients import images as img_client
 from bookforge.clients import llm
 from bookforge.config import get_settings
-from bookforge.pipeline import content_guardrails
 from bookforge.pipeline import pdf_geometry
 
 log = structlog.get_logger(__name__)
@@ -75,9 +74,10 @@ class ReadinessRequest(BaseModel):
     text: str | None = None
     youtube_url: str | None = None
     target_pages: int = Field(100, gt=0, le=300)
-    book_kind: Literal["practical_guide", "narrative"] = "practical_guide"
+    book_kind: Literal["practical_guide"] = "practical_guide"
     description: str | None = None
     toc: list[str] | None = None
+    section_limit: int | None = None
 
 
 class ReadinessResult(BaseModel):
@@ -177,8 +177,11 @@ def _check_capacity(active_jobs: int) -> CheckResult:
 
 
 def _check_request(req: ReadinessRequest) -> CheckResult:
-    promised = content_guardrails.parse_promised_count(req.topic, req.description or "")
-    toc_count = len(req.toc or [])
+    """Light request sanity — provider checks are the real gate.
+
+    Title marketing counts (e.g. "365 recipes") are NOT validated here; the
+    bible stage sizes the book and reconcile_promise() rewrites mismatched counts.
+    """
     text_len = len((req.text or "").strip())
 
     if req.youtube_url:
@@ -189,50 +192,14 @@ def _check_request(req: ReadinessRequest) -> CheckResult:
             detail=f"source text too short ({text_len} chars)",
         )
 
-    cookbookish = (
-        (promised is not None and promised >= 50)
-        or toc_count >= 15
-        or "recipe" in (req.topic + " " + (req.description or "")).lower()
-    )
-    if (
-        cookbookish
-        and req.book_kind == "narrative"
-        and req.target_pages < 150
-    ):
-        return CheckResult(
-            ok=False, reason_code="request",
-            detail="cookbook-style request on narrative pipeline with low page budget",
-        )
-
-    if promised is not None and promised > req.target_pages * 0.5:
-        min_pages = max(150, min(400, promised // 2))
-        return CheckResult(
-            ok=False, reason_code="request",
-            detail=f"promised={promised} target_pages={req.target_pages}",
-        )
-
     return CheckResult(ok=True, reason_code="ok", detail="ok")
 
 
-def _request_block_message(req: ReadinessRequest, check: CheckResult) -> str:
-    promised = content_guardrails.parse_promised_count(req.topic, req.description or "")
+def _request_block_message(_req: ReadinessRequest, check: CheckResult) -> str:
     if check.detail.startswith("source text"):
         return (
             "Your source text is too short to generate a grounded book. "
-            "Paste more content or upload a longer file."
-        )
-    if "cookbook" in check.detail:
-        return (
-            f"This book looks like a cookbook or recipe collection, but you selected "
-            f"narrative with only {req.target_pages} pages. Switch to Practical guide, "
-            f"increase pages to at least 300, or shorten the recipe list."
-        )
-    if promised is not None:
-        min_pages = max(150, min(400, promised // 2))
-        return (
-            f"This book promises about {promised} items but only {req.target_pages} pages "
-            f"were requested. Increase pages to at least {min_pages}, switch to "
-            f"Practical guide, or reduce the promised count."
+            "Paste more content into the source notes field."
         )
     return _USER_COPY["request"][1]
 
@@ -258,6 +225,35 @@ def _first_hard_failure(
                 return c.reason_code, _request_block_message(include_request, c)
             return c.reason_code, None
     return None, None
+
+
+def clear_service_cache() -> None:
+    """Drop cached provider pings so the next check hits live APIs."""
+    _service_cache["deadline"] = 0.0
+    _service_cache["checks"] = None
+
+
+def require_ready(
+    *,
+    include_request: ReadinessRequest | None = None,
+    active_jobs: int = 0,
+    fresh: bool = True,
+) -> ReadinessResult:
+    """Verify services are live; raise ReadinessError when not.
+
+    `fresh=True` bypasses the TTL cache — use before expensive stages (images)
+    so a quota hit mid-run is caught before spending the writing budget again.
+    """
+    from bookforge.errors import ReadinessError
+
+    if fresh:
+        clear_service_cache()
+    result = check_readiness(
+        include_request=include_request, active_jobs=active_jobs,
+    )
+    if not result.can_generate:
+        raise ReadinessError(result.title, result.message, result.reason_code)
+    return result
 
 
 def check_readiness(

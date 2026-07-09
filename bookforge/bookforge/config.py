@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     image_allow_provider_fallback: bool = Field(False, alias="IMAGE_ALLOW_PROVIDER_FALLBACK")
     image_reject_text_artifacts: bool = Field(True, alias="IMAGE_REJECT_TEXT_ARTIFACTS")
     # Readiness probe for image provider: metadata (cheap), generate (real image), off (key only).
-    readiness_image_probe: str = Field("metadata", alias="READINESS_IMAGE_PROBE")
+    readiness_image_probe: str = Field("generate", alias="READINESS_IMAGE_PROBE")
 
     # --- Transcription / search ---
     deepgram_api_key: str = Field("", alias="DEEPGRAM_API_KEY")
@@ -89,6 +89,12 @@ class Settings(BaseSettings):
     operator_alert_webhook: str = Field("", alias="OPERATOR_ALERT_WEBHOOK")
     max_concurrent_books: int = Field(2, alias="MAX_CONCURRENT_BOOKS")
     image_candidates_per_page: int = Field(2, alias="IMAGE_CANDIDATES_PER_PAGE")
+    # When vision QA rejects every candidate, keep the best-scoring one anyway
+    # (flagged_for_review) rather than leaving the slot empty.
+    image_accept_qa_rejects: bool = Field(True, alias="IMAGE_ACCEPT_QA_REJECTS")
+    # Fraction of required image slots (cover + card heroes + dividers) that must
+    # be filled before layout. 1.0 = never ship a book missing any required photo.
+    image_require_coverage: float = Field(1.0, alias="IMAGE_REQUIRE_COVERAGE")
     max_file_size_mb: int = Field(80, alias="MAX_FILE_SIZE_MB")
     max_source_size_mb: int = Field(10, alias="MAX_SOURCE_SIZE_MB")
     groundedness_threshold: float = Field(1.0, alias="GROUNDEDNESS_THRESHOLD")

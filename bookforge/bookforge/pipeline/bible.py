@@ -604,6 +604,30 @@ def _guide_density(target_pages: int, profile: EditorialProfile) -> _Density:
     (≈130-150 entries) instead of the legacy 1,176 tips.
     """
     spec = templates.spec_for(profile.structure_template)
+
+    if target_pages <= 15:
+        # Smoke / pamphlet: cap ALL templates (including tips_cards) so a
+        # 5-page request never balloons to 40+ cards / 100+ pages.
+        avail = max(1, target_pages - 2)
+        cards = max(2, min(3, round(avail / 3)))
+        n = max(1, min(3, round(avail / 2)))
+        ceiling = settings.max_base_sections
+        if ceiling and ceiling > 0:
+            n = min(n, ceiling)
+        override = settings.image_density_override.strip().lower()
+        if override in ("sparse", "standard", "every_entry"):
+            profile.image_density = override  # type: ignore[assignment]
+        if profile.image_density == "every_entry":
+            image_quota = cards
+        elif profile.image_density == "standard":
+            image_quota = min(2, cards)
+        else:
+            image_quota = min(1, cards)
+        return _Density(
+            base_sections=n, cards_per_section=cards, list_quota=0,
+            image_quota=image_quota, page_budget=max(1, round(avail / max(1, n))),
+        )
+
     if spec.key == "tips_cards":
         tiers = max(1, profile.tiers)
         n = _base_section_target(target_pages, tiers)
@@ -623,9 +647,6 @@ def _guide_density(target_pages: int, profile: EditorialProfile) -> _Density:
     ceiling = settings.max_base_sections
     if ceiling and ceiling > 0:
         n = min(n, ceiling)
-    # Quick-lists only earn a page when there are enough one-liners to fill one.
-    # A 2-3 item list becomes a near-empty page (and just duplicates the cards),
-    # so below a page's worth we drop the list entirely (no orphan page, no gap).
     list_quota = round(12 * max(0.0, profile.quick_list_weight))
     if list_quota < 6:
         list_quota = 0
@@ -715,6 +736,69 @@ def _map_specials(
         section_idx = (base_idx - 1) * tiers_per_base + 1
         mapped.append(sp.model_copy(update={"after_section": section_idx}))
     return mapped
+
+
+def _enforce_toc_sections(
+    sections: list[_BaseSection],
+    toc: list[str],
+) -> list[_BaseSection]:
+    """Pad/trim sections to match the user TOC and set titles verbatim."""
+    enforced: list[_BaseSection] = []
+    for i, ch_title in enumerate(toc):
+        if i < len(sections):
+            s = sections[i]
+            enforced.append(_BaseSection(
+                title=ch_title,
+                summary=s.summary,
+                divider_subject=s.divider_subject,
+                part_title=s.part_title,
+                entries=s.entries,
+            ))
+        else:
+            enforced.append(_BaseSection(
+                title=ch_title,
+                summary="",
+                divider_subject="",
+                part_title="",
+                entries=[],
+            ))
+    return enforced
+
+
+def _is_cookbookish(
+    source: SourceDoc,
+    *,
+    description: str | None = None,
+    toc: list[str] | None = None,
+) -> bool:
+    promised = parse_promised_count(source.topic, description or "")
+    toc_count = len(toc or [])
+    text = (source.topic + " " + (description or "")).lower()
+    return (
+        (promised is not None and promised >= 50)
+        or toc_count >= 15
+        or "recipe" in text
+    )
+
+
+def _apply_cookbook_profile_bias(
+    profile: EditorialProfile,
+    *,
+    cookbookish: bool,
+    has_user_toc: bool,
+) -> EditorialProfile:
+    """Bias cookbook-style books toward photo-rich, spread-friendly templates."""
+    if not cookbookish:
+        return profile
+    updates: dict = {"image_density": "every_entry"}
+    sparse_templates = ("tips_cards", "reference_bible", "framework")
+    if has_user_toc and profile.structure_template in sparse_templates:
+        updates["structure_template"] = "project_based"
+        updates["pages_per_entry"] = 2.0
+    elif profile.structure_template == "tips_cards":
+        updates["structure_template"] = "essay_entries"
+        updates["pages_per_entry"] = 2.0
+    return profile.model_copy(update=updates)
 
 
 def _critique_outline(
@@ -844,6 +928,11 @@ def build_bible(
         return bible
 
     profile = derive_profile(source, overrides=profile_overrides)
+    profile = _apply_cookbook_profile_bias(
+        profile,
+        cookbookish=_is_cookbookish(source, description=description, toc=toc),
+        has_user_toc=bool(toc),
+    )
     design = derive_design(source, profile)
     spec = templates.spec_for(profile.structure_template)
     density = _guide_density(target_pages, profile)
@@ -892,46 +981,15 @@ def build_bible(
         model=settings.content_model, max_tokens=16000,
     )
 
-    # Enforce user TOC exactly: overwrite section titles from the user's list,
-    # adding or trimming the draft's sections to match the user's count.
     if toc:
-        existing = list(draft.base_sections)
-        enforced: list[_BaseSection] = []
-        for i, ch_title in enumerate(toc):
-            if i < len(existing):
-                enforced.append(_BaseSection(
-                    title=ch_title,
-                    summary=existing[i].summary,
-                    divider_subject=existing[i].divider_subject,
-                    part_title=existing[i].part_title,
-                    entries=existing[i].entries,
-                ))
-            else:
-                # Pad with a minimal section if the model returned fewer.
-                enforced.append(_BaseSection(
-                    title=ch_title,
-                    summary="",
-                    divider_subject="",
-                    part_title="",
-                    entries=[],
-                ))
-        # Rebuild draft with enforced sections (Pydantic models are immutable,
-        # use model_copy to avoid mutation issues).
+        enforced = _enforce_toc_sections(draft.base_sections, toc)
         draft = draft.model_copy(update={"base_sections": enforced})
         log.info("guide_toc_enforced", titles=[s.title for s in enforced])
 
     base_sections = _critique_outline(draft, profile, target_pages)
-    # Re-enforce user TOC after the critique pass (which may have renamed titles).
     if toc:
-        for i, ch_title in enumerate(toc):
-            if i < len(base_sections):
-                base_sections[i] = _BaseSection(
-                    title=ch_title,
-                    summary=base_sections[i].summary,
-                    divider_subject=base_sections[i].divider_subject,
-                    part_title=base_sections[i].part_title,
-                    entries=base_sections[i].entries,
-                )
+        base_sections = _enforce_toc_sections(base_sections, toc)
+        log.info("guide_toc_reenforced", count=len(base_sections))
     sections = _expand_sections(base_sections, density, profile)
     raw_specials = ([s.to_plan() for s in draft.specials]
                     or _default_specials(profile))

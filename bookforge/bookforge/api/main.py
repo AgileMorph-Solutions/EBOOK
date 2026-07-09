@@ -37,7 +37,8 @@ from pydantic import BaseModel, Field, model_validator
 from bookforge.clients import llm, storage
 from bookforge.config import get_settings
 from bookforge.errors import (
-    ContentQAError, EmptyBookError, GeometryError, IngestError, ReadinessError,
+    ContentQAError, EmptyBookError, GeometryError, ImageCoverageError,
+    IngestError, PipelineCancelledError, ReadinessError,
 )
 from bookforge.pipeline.readiness import (
     ReadinessRequest,
@@ -166,6 +167,27 @@ def _now_iso() -> str:
 
 def _request_path(book_id: str) -> Path:
     return _ARTIFACTS / "books" / book_id / "request.json"
+
+
+def _cancel_path(book_id: str) -> Path:
+    return _ARTIFACTS / "books" / book_id / "cancelled.flag"
+
+
+def _is_cancelled(book_id: str) -> bool:
+    return _cancel_path(book_id).exists()
+
+
+def _request_cancel(book_id: str) -> None:
+    path = _cancel_path(book_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_now_iso())
+
+
+def _clear_cancelled(book_id: str) -> None:
+    try:
+        _cancel_path(book_id).unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def _write_request(book_id: str, req: "CreateBook") -> None:
@@ -347,7 +369,7 @@ class CreateBook(BaseModel):
     target_pages: int = Field(100, gt=0, le=300)
     chapter_limit: int | None = None
     section_limit: int | None = None
-    book_kind: Literal["practical_guide", "narrative"] = "practical_guide"
+    book_kind: Literal["practical_guide"] = "practical_guide"
     # Optional book description (angle, audience, themes) injected into planning prompts.
     description: str | None = None
     # Optional user-supplied table of contents: list of chapter/section titles the
@@ -471,7 +493,7 @@ async def create_book_upload(
     target_pages: int = Form(100),
     chapter_limit: int | None = Form(None),
     section_limit: int | None = Form(None),
-    book_kind: Literal["practical_guide", "narrative"] = Form("practical_guide"),
+    book_kind: Literal["practical_guide"] = Form("practical_guide"),
     description: str | None = Form(None),
     toc: str | None = Form(None),
 ):
@@ -526,6 +548,12 @@ def get_book(book_id: str):
     state = _read_state(book_id)
     if state is None:
         raise HTTPException(status_code=404, detail="book not found")
+    req = _read_request(book_id)
+    if req is not None:
+        if req.description:
+            state["description"] = req.description
+        if req.toc:
+            state["toc"] = req.toc
     return {"book_id": book_id, **_with_progress(state)}
 
 
@@ -647,6 +675,32 @@ def regenerate_book(book_id: str, background_tasks: BackgroundTasks):
     return {"book_id": book_id, "status": "queued", "mode": "full_rerun"}
 
 
+@app.post("/books/{book_id}/cancel", status_code=200)
+def cancel_book(book_id: str):
+    """Stop a queued, running, or waiting job. Marks it failed — no auto-resume."""
+    state = _read_state(book_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="book not found")
+    if state.get("status") in ("done", "failed"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"book is already {state.get('status')}",
+        )
+    _request_cancel(book_id)
+    _set_state(
+        book_id,
+        status="failed",
+        error="Generation was cancelled.",
+        error_kind="cancelled",
+        error_type="PipelineCancelledError",
+        cancelled_at=_now_iso(),
+        attempts=_MAX_PARK_ATTEMPTS + 1,
+        resume_attempts=get_settings().max_resume_attempts + 1,
+    )
+    log.info("book_cancelled", book_id=book_id, prior_status=state.get("status"))
+    return {"book_id": book_id, "status": "failed", "cancelled": True}
+
+
 @app.delete("/books/{book_id}", status_code=204)
 def delete_book(book_id: str):
     """Archive (delete) a job and its artifacts. 404 if it never existed."""
@@ -676,6 +730,8 @@ def _friendly_error(exc: Exception) -> str:
                 "Try a shorter book or contact support to raise the limit.")
     if isinstance(exc, ReadinessError):
         return str(exc)
+    if isinstance(exc, PipelineCancelledError):
+        return "Generation was cancelled."
     if isinstance(exc, GeometryError):
         return ("We couldn't produce a clean layout for this book. Our team has "
                 "been notified and is looking into it.")
@@ -712,8 +768,17 @@ def _failure_class(exc: Exception) -> str:
     - "transient"            → auto-retry a few times, then park: render/storage/
                                ingest hiccups and anything unclassified.
     """
-    if isinstance(exc, (GeometryError, ContentQAError, ReadinessError)):
+    if isinstance(exc, (GeometryError, ContentQAError, PipelineCancelledError)):
         return "permanent"
+    if isinstance(exc, ReadinessError):
+        if exc.reason_code in ("quota_llm", "quota_images", "rate_limit"):
+            return "provider_unavailable"
+        return "permanent"
+    if isinstance(exc, ImageCoverageError):
+        return "provider_unavailable"
+    from bookforge.clients import images as img_client
+    if isinstance(exc, (img_client.ImageQuotaError, img_client.ImageGenerationError)):
+        return "provider_unavailable"
     if llm.is_provider_unavailable(exc) or isinstance(exc, EmptyBookError):
         return "provider_unavailable"
     if isinstance(exc, (anthropic.APIConnectionError, anthropic.APITimeoutError,
@@ -831,16 +896,24 @@ def _fail(book_id: str, exc: Exception, cls: str) -> None:
 
 def _run_pipeline(book_id: str, req: CreateBook) -> None:
     def on_stage(stage: str) -> None:
+        if _is_cancelled(book_id):
+            raise PipelineCancelledError(f"cancelled at stage {stage}")
         _set_state(book_id, stage=stage, stage_started_at=_now_iso())
 
     # Block here (still "queued") until a pipeline slot is free.
     with _pipeline_sem:
+        if _is_cancelled(book_id):
+            _fail(book_id, PipelineCancelledError("cancelled before start"), "permanent")
+            return
         _set_state(book_id, status="running", started_at=_now_iso())
         from bookforge.pipeline.orchestrator import run_book
 
         inline_retries = get_settings().max_job_retries
         attempt = 0
         while True:
+            if _is_cancelled(book_id):
+                _fail(book_id, PipelineCancelledError("cancelled"), "permanent")
+                return
             try:
                 artifact = run_book(
                     book_id, req.topic,
@@ -854,6 +927,9 @@ def _run_pipeline(book_id: str, req: CreateBook) -> None:
                     profile_overrides=req.profile_overrides,
                     on_stage=on_stage,
                 )
+                if _is_cancelled(book_id):
+                    _fail(book_id, PipelineCancelledError("cancelled"), "permanent")
+                    return
                 _set_state(book_id, status="done", artifact=artifact.model_dump(),
                            error=None, error_type=None, error_detail=None)
                 return
@@ -879,6 +955,8 @@ def _run_pipeline(book_id: str, req: CreateBook) -> None:
 def _resume_due(book_id: str) -> bool:
     state = _read_state(book_id)
     if not state or state.get("status") != "waiting":
+        return False
+    if _is_cancelled(book_id):
         return False
     nxt = _parse_ts(state.get("next_retry_at"))
     return nxt is None or nxt <= datetime.now(timezone.utc)

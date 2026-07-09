@@ -34,8 +34,8 @@ def main(argv=None):
     ap.add_argument("--pages", type=int, default=100, help="target page count")
     ap.add_argument("--chapters", type=int, default=None,
                     help="limit chapters/sections; omit for full book")
-    ap.add_argument("--book-kind", choices=["practical_guide", "narrative"],
-                    default="practical_guide", help="book layout pipeline")
+    ap.add_argument("--book-kind", choices=["practical_guide"],
+                    default="practical_guide", help="book layout pipeline (practical guide only)")
     ap.add_argument("--profile-json", default=None,
                     help="JSON dict of EditorialProfile overrides "
                          '(e.g. \'{"genre": "cookbook", "audience": "..."}\')')

@@ -216,10 +216,15 @@ def _generate_best(
     brief_prompt: str = "",
     in_image_text: bool = False,
 ) -> tuple[bytes, float, bool] | None:
-    """Generate N candidates, vision-score, return (bytes, rank, flagged)."""
+    """Generate N candidates, vision-score, return (bytes, rank, flagged).
+
+    When every candidate fails the hard QA filters (garbled text, artifacts,
+    blur) but IMAGE_ACCEPT_QA_REJECTS is on, ship the best-scoring non-NSFW
+    candidate flagged for review instead of leaving the slot empty."""
     negative = _negative_for(bible)
     subject = brief_prompt or prompt[:120]
     best: tuple[float, bytes, bool] | None = None
+    fallback: tuple[float, bytes] | None = None
 
     for _ in range(max(1, settings.image_candidates_per_page)):
         try:
@@ -228,6 +233,8 @@ def _generate_best(
                 in_image_text=in_image_text,
                 negative_prompt=negative,
             )
+        except (img_client.ImageQuotaError, img_client.ImageGenerationError):
+            raise  # quota/auth — fail the stage immediately, don't burn every slot
         except Exception as exc:
             log.warning("image_gen_failed", err=str(exc)[:200])
             continue
@@ -235,33 +242,42 @@ def _generate_best(
             s = _score(cand, subject)
         except Exception as exc:
             log.warning("image_score_failed", err=str(exc)[:200])
-            best = (0.5, cand, True)
+            if fallback is None or 0.5 > fallback[0]:
+                fallback = (0.5, cand)
             continue
         if s.nsfw:
             continue
-        if s.has_garbled_text:
-            if settings.image_reject_text_artifacts:
-                log.info("image_rejected_garbled_text", brief=subject[:80])
-                continue
-        if settings.image_reject_text_artifacts and s.has_artifacts:
-            log.info("image_rejected_artifacts", brief=subject[:80])
-            continue
-        try:
-            sharp = _sharpness(cand)
-        except Exception:
-            sharp = 999.0
-        if sharp < 20.0:  # out-of-focus / featureless gradient — unusable in print
-            log.info("image_rejected_blurry", brief=subject[:80],
-                     sharpness=round(sharp, 1))
-            continue
         rank = 0.6 * s.relevance + 0.4 * s.aesthetic
         flagged = rank < 0.6 or s.has_artifacts or s.has_garbled_text
-        if best is None or rank > best[0]:
+        if fallback is None or rank > fallback[0]:
+            fallback = (rank, cand)
+
+        hard_reject = False
+        if s.has_garbled_text and settings.image_reject_text_artifacts:
+            log.info("image_rejected_garbled_text", brief=subject[:80])
+            hard_reject = True
+        elif settings.image_reject_text_artifacts and s.has_artifacts:
+            log.info("image_rejected_artifacts", brief=subject[:80])
+            hard_reject = True
+        else:
+            try:
+                sharp = _sharpness(cand)
+            except Exception:
+                sharp = 999.0
+            if sharp < 20.0:  # out-of-focus / featureless gradient
+                log.info("image_rejected_blurry", brief=subject[:80],
+                         sharpness=round(sharp, 1))
+                hard_reject = True
+        if not hard_reject and (best is None or rank > best[0]):
             best = (rank, cand, flagged)
 
-    if best is None:
-        return None
-    return best[1], best[0], best[2]
+    if best is not None:
+        return best[1], best[0], best[2]
+    if fallback is not None and settings.image_accept_qa_rejects:
+        log.warning("image_accepted_qa_fallback", brief=subject[:80],
+                    rank=round(fallback[0], 2))
+        return fallback[1], fallback[0], True
+    return None
 
 
 def generate_image(
@@ -291,6 +307,8 @@ def generate_image(
         try:
             raw = img_client.generate(prompt, aspect=aspect, negative_prompt=_NO_TEXT)
             score, flagged = 0.9, False
+        except (img_client.ImageQuotaError, img_client.ImageGenerationError):
+            raise
         except Exception as exc:
             log.warning("image_gen_failed", key=key, err=str(exc)[:200])
             return None

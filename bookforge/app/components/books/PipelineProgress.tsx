@@ -1,4 +1,4 @@
-import { PIPELINE_STAGES, GUIDE_PIPELINE_STAGES } from "@/lib/constants";
+import { GUIDE_PIPELINE_STAGES } from "@/lib/constants";
 import { cn } from "@/lib/cn";
 import { Icon } from "@/components/ui/Icon";
 import { GlassPanel } from "@/components/ui/Card";
@@ -31,8 +31,7 @@ export function PipelineProgress({
   progress,
   etaSeconds,
 }: PipelineProgressProps) {
-  const stages =
-    bookKind === "narrative" ? PIPELINE_STAGES : GUIDE_PIPELINE_STAGES;
+  const stages = GUIDE_PIPELINE_STAGES;
 
   // The fix-loop reports dynamic stages ("revise (1)", "revise (2)"…); they all
   // belong to the QA phase, so map them onto the "qa" chip.

@@ -11,6 +11,9 @@ const FAILURE_TITLES: Record<ErrorKind, string> = {
   rate_limit: "AI service is busy",
   auth: "Service configuration issue",
   network: "Connection error",
+  layout: "Layout system error",
+  capacity: "Pipeline at capacity",
+  request: "Invalid book request",
   unknown: "Generation failed",
 };
 

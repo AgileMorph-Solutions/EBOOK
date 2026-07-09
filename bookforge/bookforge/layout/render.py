@@ -48,8 +48,8 @@ def _page_viewport() -> dict[str, int]:
 # Dense regions may SHRINK toward the floor (only when content would otherwise
 # overflow); nothing ever grows above BASE. A page may raise its own floor via
 # data-fitmin on the .gfit.
-_FIT_BASE = float(os.environ.get("FIT_BASE_PT", "15"))
-_FIT_FLOOR = float(os.environ.get("FIT_FLOOR_PT", "12.5"))
+_FIT_BASE = float(os.environ.get("FIT_BASE_PT", "16"))
+_FIT_FLOOR = float(os.environ.get("FIT_FLOOR_PT", "13"))
 
 # Runs in the page: set every .gfit to the canonical BASE size; only if its
 # content overflows do we binary-search DOWN to the largest size that fits (never
@@ -107,12 +107,12 @@ _LAYOUT_FIT_JS = """
   document.querySelectorAll('.gdivider .dpanel').forEach((panel) => {
     const title = panel.querySelector('.t');
     if (!title) return;
-    let ok = shrinkToFit(title, 'fontSize', 14, 34, panel);
+    let ok = shrinkToFit(title, 'fontSize', 22, 34, panel);
     if (!ok) {
       // a single word is wider than the panel column even at the floor size:
       // allow a mid-word break as the last resort, then refit.
       title.classList.add('force-break');
-      ok = shrinkToFit(title, 'fontSize', 14, 34, panel);
+      ok = shrinkToFit(title, 'fontSize', 22, 34, panel);
     }
     if (!ok)
       stuck.push('divider:' + (title.textContent || '').trim().slice(0, 40));

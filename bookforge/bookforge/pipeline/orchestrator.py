@@ -14,8 +14,8 @@ from bookforge.clients import llm
 from bookforge.config import settings
 from bookforge.errors import GeometryError, LayoutError
 from bookforge.pipeline import (
-    assemble, bible as bible_stage, content, content_guide, guide_images, images, ingest,
-    layout_budget, qa,
+    assemble, bible as bible_stage, checkpoints, content, content_guide, guide_images,
+    images, ingest, layout_budget, qa,
 )
 from bookforge.schemas import BookArtifact, BookBible, Chapter
 
@@ -115,40 +115,60 @@ def run_book(
             "aborting before generation (no tokens spent): " + " | ".join(preflight[:2])
         )
 
-    from bookforge.errors import ReadinessError
-    from bookforge.pipeline.readiness import check_readiness
-
-    readiness = check_readiness()
-    if not readiness.can_generate:
-        raise ReadinessError(
-            readiness.title, readiness.message, readiness.reason_code,
-        )
+    from bookforge.pipeline.readiness import require_ready
 
     def stage(name: str) -> None:
         if on_stage:
             on_stage(name)
 
+    cached_bible = checkpoints.load_bible(book_id)
+    cached_chapters = checkpoints.load_chapters(book_id) if cached_bible else []
+    resuming = bool(cached_bible and cached_chapters and book_kind == "practical_guide")
+
+    if not resuming:
+        require_ready(fresh=True)
+
     stage("ingest")
     source = ingest.ingest(topic, text=text, youtube_url=youtube_url)
 
-    stage("bible")
-    book_bible = bible_stage.build_bible(
-        source, target_pages=target_pages, book_kind=book_kind,
-        description=description, toc=toc,
-        profile_overrides=profile_overrides,
-    )
+    if resuming:
+        log.info("checkpoint_resume", book_id=book_id,
+                 chapters=len(cached_chapters), stage="post-content")
+        book_bible = cached_bible
+        chapters = cached_chapters
+        qa_result = qa.run_guide_gate(chapters, source, book_bible)
+    else:
+        stage("bible")
+        book_bible = bible_stage.build_bible(
+            source, target_pages=target_pages, book_kind=book_kind,
+            description=description, toc=toc,
+            profile_overrides=profile_overrides,
+        )
+        checkpoints.save_bible(book_id, book_bible)
 
-    if book_bible.book_kind == "practical_guide":
+        if book_kind != "practical_guide":
+            stage("content")
+            chapters = content.write_book(book_bible, source, limit=limit)
+            stage("images")
+            all_images = []
+            for ch in chapters:
+                all_images.extend(images.generate_for_chapter(ch, book_bible))
+            stage("qa")
+            qa_result = qa.run_gate(chapters, source, book_bible.voice.banned_patterns)
+            if not qa_result.passed:
+                log.warning("qa_failed", grounded=qa_result.groundedness,
+                            unsupported=len(qa_result.unsupported_claims))
+            stage("layout")
+            artifact = assemble.assemble(book_id, book_bible, chapters, all_images, qa_result)
+            log.info("run_done", book_id=book_id, pages=artifact.page_count,
+                     mb=artifact.file_size_mb,
+                     qa_passed=artifact.qa.passed if artifact.qa else None)
+            return artifact
+
         stage("content")
         chapters = content.write_guide(book_bible, source, limit=limit)
-        # Content QA runs BEFORE images: a defective book (missing quantities,
-        # unsafe steps, mass duplication) must not spend the image budget.
         stage("qa")
         qa_result = qa.run_guide_gate(chapters, source, book_bible)
-        # Fix loop: when the gate finds actionable defects, feed them back into
-        # the writer and regenerate ONLY the offending sections, then re-check.
-        # We always ship a book — never fail on quality — so this iterates for
-        # quality, but the loop exits (and the book ships) either way.
         prev_defect_count: int | None = None
         for attempt in range(settings.max_qa_revisions):
             if qa_result.passed or not qa.deterministic_defects(qa_result):
@@ -157,7 +177,7 @@ def run_book(
             defect_count = (len(qa_result.layout_issues)
                             + len(qa_result.safety_findings))
             if not faults or defect_count == prev_defect_count:
-                break  # nothing actionable, or the last pass stopped improving
+                break
             prev_defect_count = defect_count
             stage(f"revise ({attempt + 1})")
             log.info("guide_qa_revision", attempt=attempt + 1,
@@ -166,9 +186,6 @@ def run_book(
                 chapters, book_bible, source, faults, registry_seed=chapters)
             qa_result = qa.run_guide_gate(chapters, source, book_bible)
 
-        # Ship no matter what. Any step still flagged unsafe after the loop is
-        # neutralized so a dangerous instruction never ships; remaining cosmetic
-        # defects ship best-effort with a warning.
         if not qa_result.safety_passed:
             n_fixed = qa.sanitize_unsafe_steps(chapters, qa_result.safety_findings)
             log.warning("unsafe_steps_sanitized", count=n_fixed)
@@ -178,12 +195,14 @@ def run_book(
                         grounded=qa_result.groundedness,
                         prose=qa_result.prose_quality_score,
                         audit_issues=len(qa_result.layout_issues))
+        checkpoints.save_chapters(book_id, chapters)
+
+    if book_kind == "practical_guide":
         stage("images")
         all_images, cover_key = guide_images.generate_all(
             book_bible, chapters, book_id,
         )
-        # The back-matter page is an optional extra — never let it sink the
-        # book (provider-wide failures still propagate to park).
+        checkpoints.save_images(book_id, all_images)
         try:
             pro = content_guide.make_pro(book_bible.pro_topic, book_bible)
         except Exception as exc:
@@ -192,24 +211,13 @@ def run_book(
             log.warning("pro_page_skipped", err=str(exc)[:200])
             pro = None
         stage("layout")
+        checkpoints.clear_pdf(book_id)
         artifact = _assemble_with_layout_revise(
             book_id, book_bible, chapters, all_images, qa_result,
             cover_key=cover_key, pro=pro, source=source, stage=stage,
         )
     else:
-        stage("content")
-        chapters = content.write_book(book_bible, source, limit=limit)
-        stage("images")
-        all_images = []
-        for ch in chapters:
-            all_images.extend(images.generate_for_chapter(ch, book_bible))
-        stage("qa")
-        qa_result = qa.run_gate(chapters, source, book_bible.voice.banned_patterns)
-        if not qa_result.passed:
-            log.warning("qa_failed", grounded=qa_result.groundedness,
-                        unsupported=len(qa_result.unsupported_claims))
-        stage("layout")
-        artifact = assemble.assemble(book_id, book_bible, chapters, all_images, qa_result)
+        raise AssertionError("unreachable")
 
     log.info("run_done", book_id=book_id, pages=artifact.page_count,
              mb=artifact.file_size_mb, qa_passed=artifact.qa.passed if artifact.qa else None)

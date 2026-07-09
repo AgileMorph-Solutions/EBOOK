@@ -27,7 +27,7 @@ export function getApiUrlSync(): string {
   return cachedApiUrl ?? BUILD_TIME_URL;
 }
 
-export type BookKind = "practical_guide" | "narrative";
+export type BookKind = "practical_guide";
 
 export type ErrorKind =
   | "quota_llm"
@@ -94,6 +94,8 @@ export type BookStatus = {
   attempts?: number;
   wait_reason?: string;
   unfunded?: boolean;
+  description?: string;
+  toc?: string[];
 };
 
 export type BookSummary = {
@@ -277,19 +279,6 @@ export async function createBook(
     method: "POST",
     body: JSON.stringify(body),
   });
-}
-
-export async function createBookFromFile(
-  formData: FormData
-): Promise<{ book_id: string; status: string }> {
-  return apiFetch(
-    "/books/upload",
-    {
-      method: "POST",
-      body: formData,
-    },
-    true
-  );
 }
 
 export async function getBook(bookId: string): Promise<BookStatus> {

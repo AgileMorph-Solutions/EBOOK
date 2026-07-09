@@ -113,8 +113,8 @@ Produce:
 - cards: EXACTLY {cards} complete {noun}s. For EACH card:
 {card_spec}
 - card_photos: EXACTLY {cards} short photo subjects (one per card, same order),
-  each a concrete scene to photograph (no text, no faces) showing that card's
-  finished result.
+  each a concrete scene to photograph (no text, no labels, no packaging, no faces)
+  showing that card's finished result.
 - quick_uses: EXACTLY {quick} short entries — quick ideas, variations, or
   compact versions related to this chapter. For EACH: a title (2-6 words) and
   an intro that is ONE line, 8-16 words. Leave steps empty.

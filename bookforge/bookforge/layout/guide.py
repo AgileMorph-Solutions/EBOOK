@@ -45,22 +45,31 @@ def _esc(t) -> str:
 
 
 _PASSAGE_ID_RE = re.compile(r"\bp\d{3,4}\b")
+_BRACKET_PASSAGE_RE = re.compile(r"\[p\d{3,4}\]", re.IGNORECASE)
 
 
 def _strip_passage_ids(text: str) -> str:
-    """Remove leaked internal passage ids (e.g. "p0003") and any empty
+    """Remove leaked internal passage ids (e.g. "p0003", "[p0002]") and any empty
     parenthetical / dangling-separator leftovers, so reader-facing text never
-    prints citations like "(p0003, p0002)"."""
+    prints citations like "(p0003, p0002)" or "Adapted from []"."""
     if not text:
         return text
-    t = _PASSAGE_ID_RE.sub("", text)
+    t = _BRACKET_PASSAGE_RE.sub("", text)
+    t = _PASSAGE_ID_RE.sub("", t)
     # tidy separators left dangling by the removed ids
     t = re.sub(r"\(\s*[,;·]\s*", "(", t)
     t = re.sub(r"\s*[,;·]\s*\)", ")", t)
     t = re.sub(r"\(\s*\)", "", t)          # drop now-empty "()"
+    t = re.sub(r"\[\s*\]", "", t)          # drop now-empty "[]"
     t = re.sub(r"\s{2,}", " ", t)           # collapse doubled spaces
     t = re.sub(r"\s+([,.;:])", r"\1", t)    # no space before punctuation
-    return t.strip().strip(",;· ").strip()
+    t = t.strip().strip(",;· ").strip()
+    # En/em dashes in dollar ranges → ASCII hyphen (condensed fonts overlap otherwise).
+    t = re.sub(r"(\$[\d,.]+)\s*[–—]\s*(\$?[\d,.]+)", r"\1-\2", t)
+    # A bare "Adapted from" with no source is worse than omitting the line.
+    if re.fullmatch(r"(?i)adapted from\.?", t):
+        return ""
+    return t
 
 
 class GuideDirector:
@@ -449,7 +458,7 @@ class GuideDirector:
                  f'{p["callouts"]}{p["foot"]}</div>')
         self.pages.append(
             f'<section class="page"{self._entry_attr(key)}>{self._chrome(folio)}'
-            f'<div class="gbody-box"><div class="gfit" data-fitmin="13">'
+            f'<div class="gbody-box"><div class="gfit" data-fitmin="14">'
             f'{inner}</div></div></section>')
 
     def _entry_spread(self, section: str, p: dict[str, str],
@@ -466,7 +475,7 @@ class GuideDirector:
                    f'{p["meta"]}{p["intro"]}{mid}</div>')
         self.pages.append(
             f'<section class="page"{self._entry_attr(key)}>{self._chrome(folio)}'
-            f'<div class="gbody-box"><div class="gfit" data-fitmin="13">'
+            f'<div class="gbody-box"><div class="gfit" data-fitmin="14">'
             f'{inner_a}</div></div></section>')
         # Page B — the working page: method, callouts, notes. No repeated full
         # title; just a small "(continued)" tag so the eye isn't hit twice.
@@ -478,7 +487,7 @@ class GuideDirector:
                    f'{p["steps_panel"]}{p["callouts"]}{p["foot"]}</div>')
         self.pages.append(
             f'<section class="page"{self._entry_attr(key)}>{self._chrome(folio)}'
-            f'<div class="gbody-box"><div class="gfit" data-fitmin="13">'
+            f'<div class="gbody-box"><div class="gfit" data-fitmin="14">'
             f'{inner_b}</div></div></section>')
 
     # Rough per-block line estimates for the flowed layout (page capacity at the
@@ -502,7 +511,7 @@ class GuideDirector:
         es = self.profile.entry_schema
         factor = 0.8 ** max(0, level - 2)
         shed_intro = level >= 3
-        flow_fitmin = ' data-fitmin="9"' if level >= 4 else ' data-fitmin="13"'
+        flow_fitmin = ' data-fitmin="9"' if level >= 4 else ' data-fitmin="14"'
         folio = self._pos()
         hero = (f'<figure class="entry-hero spread-hero grow">'
                 f'<img src="{hero_uri}"/></figure>' if hero_uri else "")

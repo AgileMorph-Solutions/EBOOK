@@ -51,6 +51,19 @@ class LayoutError(GeometryError):
         self.defects = defects or []
 
 
+class ImageCoverageError(RuntimeError):
+    """Too few required image slots were filled after generation + QA fallback.
+
+    Raised at the end of the images stage so a photo-less ebook never ships when
+    IMAGE_REQUIRE_COVERAGE demands full coverage."""
+
+    def __init__(self, message: str, *, required: int, got: int, missing: list[str]):
+        self.required = required
+        self.got = got
+        self.missing = missing
+        super().__init__(message)
+
+
 class ReadinessError(RuntimeError):
     """Services or request are not ready — fail before ingest/content spend."""
 
@@ -63,3 +76,7 @@ class ReadinessError(RuntimeError):
         self.title = title
         self.reason_code = reason_code
         super().__init__(message)
+
+
+class PipelineCancelledError(RuntimeError):
+    """User or operator cancelled the job — stop between stages, do not retry."""

@@ -7,14 +7,11 @@ import { StatusBadge } from "@/components/ui/Badge";
 import { Icon } from "@/components/ui/Icon";
 import { cn } from "@/lib/cn";
 
-function bookKindLabel(kind?: string) {
-  if (kind === "narrative") return "Narrative";
-  if (kind === "practical_guide") return "Practical Guide";
-  return "Guide";
+function bookKindLabel() {
+  return "Practical Guide";
 }
 
-function bookKindIcon(kind?: string) {
-  if (kind === "narrative") return "history_edu";
+function bookKindIcon() {
   return "book";
 }
 
@@ -101,12 +98,12 @@ export function JobCard({ book }: JobCardProps) {
         <div className="mt-2 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Icon
-              name={bookKindIcon(book.book_kind)}
+              name={bookKindIcon()}
               className="text-tertiary"
               size={14}
             />
             <span className="font-body text-body-sm text-secondary">
-              {bookKindLabel(book.book_kind)}
+              {bookKindLabel()}
             </span>
           </div>
           <span className="font-label text-label-sm text-outline">

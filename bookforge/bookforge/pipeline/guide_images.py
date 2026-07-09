@@ -5,8 +5,11 @@ import structlog
 from pydantic import BaseModel
 
 from bookforge.clients import llm
+from bookforge.config import settings
 from bookforge.cost import budget
+from bookforge.errors import ImageCoverageError
 from bookforge.pipeline import images as images_stage
+from bookforge.pipeline import checkpoints
 from bookforge.schemas import BookBible, Chapter, GeneratedImage, ImageBrief
 
 log = structlog.get_logger(__name__)
@@ -84,6 +87,50 @@ def ensure_divider_images(
     return added
 
 
+def required_image_slots(
+    bible: BookBible, chapters: list[Chapter],
+) -> list[tuple[str, str]]:
+    """(slot_id, label) for every image the layout expects for these chapters."""
+    slots: list[tuple[str, str]] = []
+    if (bible.cover_subject or "").strip():
+        slots.append(("cover", "cover photo"))
+    for ch in chapters:
+        for bi, block in enumerate(ch.blocks):
+            if block.image_brief:
+                slots.append((f"{ch.index}.{bi}", f"card {ch.index}.{bi}"))
+        slots.append((f"{ch.index}.divider", f"divider ch{ch.index}"))
+    return slots
+
+
+def _assert_image_coverage(
+    bible: BookBible,
+    chapters: list[Chapter],
+    images: list[GeneratedImage],
+    cover_key: str | None,
+) -> None:
+    """Hard-fail when required photo slots are empty — ebooks must ship with images."""
+    floor = settings.image_require_coverage
+    if floor <= 0:
+        return
+    required = required_image_slots(bible, chapters)
+    if not required:
+        return
+    have = {gi.block_ref for gi in images}
+    if cover_key:
+        have.add("cover")
+    missing = [label for slot_id, label in required if slot_id not in have]
+    got = len(required) - len(missing)
+    coverage = got / len(required)
+    if coverage >= floor:
+        return
+    msg = (f"image coverage {got}/{len(required)} ({coverage:.0%}) below required "
+           f"{floor:.0%}: missing {', '.join(missing[:6])}"
+           + ("…" if len(missing) > 6 else ""))
+    log.error("image_coverage_failed", required=len(required), got=got,
+              missing=missing[:10])
+    raise ImageCoverageError(msg, required=len(required), got=got, missing=missing)
+
+
 def generate_all(
     bible: BookBible,
     chapters: list[Chapter],
@@ -91,12 +138,14 @@ def generate_all(
 ) -> tuple[list[GeneratedImage], str | None]:
     """Cover, card heroes, and section divider images."""
     prefix = f"books/{book_id}"
-    images: list[GeneratedImage] = []
+    images: list[GeneratedImage] = list(checkpoints.load_images(book_id))
+    have_refs = {gi.block_ref for gi in images}
     cover_key: str | None = None
+    cover_path = f"{prefix}/cover.jpg"
+    if checkpoints.has_image(cover_path):
+        cover_key = cover_path
 
-    # The cover is the product's face — a silent failure used to fall back to
-    # an arbitrary tip photo. Retry once, then flag loudly for review.
-    if bible.cover_subject:
+    if bible.cover_subject and not cover_key:
         for attempt in (1, 2):
             cov = images_stage.generate_cover(
                 bible.cover_subject, bible, f"{prefix}/cover.jpg")
@@ -106,21 +155,36 @@ def generate_all(
             log.warning("cover_generation_failed", attempt=attempt,
                         subject=bible.cover_subject[:80])
         if not cover_key:
-            log.error("cover_missing_flagged_for_review", book_id=book_id)
+            log.error("cover_missing", book_id=book_id)
 
     for ch in chapters:
         for bi, block in enumerate(ch.blocks):
             if not block.image_brief:
                 continue
             ref = f"{ch.index}.{bi}"
+            if ref in have_refs:
+                continue
+            key = f"{prefix}/img_{ch.index}_{bi}.jpg"
+            if checkpoints.has_image(key):
+                images.append(GeneratedImage(
+                    block_ref=ref, storage_key=key, width=0, height=0,
+                    score=0.9, flagged_for_review=False,
+                ))
+                have_refs.add(ref)
+                continue
             gi = images_stage.generate_for_brief(
-                block.image_brief, bible, f"{prefix}/img_{ch.index}_{bi}.jpg",
+                block.image_brief, bible, key,
                 placement="card",
             )
             if gi:
                 gi.block_ref = ref
                 images.append(gi)
+            else:
+                log.warning("card_image_missing", book_id=book_id, ref=ref)
 
     ensure_divider_images(chapters, images, bible, prefix)
-    log.info("guide_images_done", count=len(images), cover=bool(cover_key))
+    _assert_image_coverage(bible, chapters, images, cover_key)
+    flagged = sum(1 for gi in images if gi.flagged_for_review)
+    log.info("guide_images_done", count=len(images), cover=bool(cover_key),
+             flagged=flagged)
     return images, cover_key

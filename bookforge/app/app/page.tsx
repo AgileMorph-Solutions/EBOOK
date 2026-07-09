@@ -33,8 +33,8 @@ export default function HomePage() {
             <span className="text-ember-gradient">print-ready</span> ebook
           </h1>
           <p className="font-body text-body-lg leading-relaxed text-on-surface-variant">
-            Provide a topic and source material — pasted text or an uploaded
-            file. BookForge grounds every claim, generates cinematic imagery,
+            Provide a topic and source material — pasted text.
+            BookForge grounds every claim, generates cinematic imagery,
             and delivers a KDP interior PDF.
           </p>
 

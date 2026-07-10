@@ -106,6 +106,8 @@ class Settings(BaseSettings):
     # the deterministic repair ladder) may regenerate just the offending blocks
     # with hard length budgets before the job fails. 0 = fail on first audit miss.
     max_layout_revisions: int = Field(2, alias="MAX_LAYOUT_REVISIONS")
+    # Post-layout page scaling: trim content and re-render when PDF exceeds target.
+    max_page_scale_revisions: int = Field(3, alias="MAX_PAGE_SCALE_REVISIONS")
     # Strict quality: treat a below-bar prose/editorial score as an ACTIONABLE
     # fault (regenerate the weak chapter) rather than a soft warning that ships.
     strict_quality: bool = Field(True, alias="STRICT_QUALITY")

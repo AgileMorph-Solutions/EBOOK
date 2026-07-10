@@ -68,10 +68,15 @@ def test_cookbook_profile_bias_forces_every_entry_and_spread_template():
 
 
 def test_smoke_density_five_pages():
+    # every_entry pamphlet: image_quota matches cards (not capped at 1).
     density = _guide_density(5, _pest_profile())
     assert density.list_quota == 0
     assert density.cards_per_section <= 3
-    assert density.image_quota <= 1
+    assert density.image_quota == density.cards_per_section
+
+    sparse = _pest_profile().model_copy(update={"image_density": "sparse"})
+    sparse_d = _guide_density(5, sparse)
+    assert sparse_d.image_quota <= 1
 
 
 def test_smoke_expand_and_shrink_to_subtitle_promise():
@@ -93,3 +98,18 @@ def test_smoke_expand_and_shrink_to_subtitle_promise():
         sections = shrink_sections_to_count(sections, promised)
     assert planned_use_count(sections) <= 21
     assert all(s.list_quota == 0 for s in sections)
+
+
+def test_cookbook_density_image_quota_standard():
+    profile = EditorialProfile(
+        genre="cookbook",
+        audience="seniors",
+        angle="nostalgic",
+        entry_schema=EntrySchema(entry_noun="recipe"),
+        structure_template="essay_entries",
+        image_density="standard",
+        pages_per_entry=2.0,
+    )
+    density = _guide_density(75, profile)
+    expected = max(1, min(density.cards_per_section, round(density.page_budget / 1.5)))
+    assert density.image_quota == expected

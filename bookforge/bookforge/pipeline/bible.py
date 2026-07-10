@@ -16,16 +16,23 @@ Practical guides: profile-driven planning in three steps —
 """
 from __future__ import annotations
 
+import json
 import structlog
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from bookforge.clients import llm
 from bookforge.config import settings
 from bookforge.layout import theme
 from bookforge.pipeline import templates
 from bookforge.pipeline.content_guardrails import (
-    parse_promised_count, planned_use_count, propagate_promised_count,
-    reconcile_promise, shrink_sections_to_count,
+    expand_sections_to_count, parse_promised_count, planned_use_count,
+    propagate_promised_count, reconcile_promise, shrink_sections_to_count,
+)
+from bookforge.pipeline.page_limits import (
+    allowed_page_range,
+    estimate_guide_pages,
+    max_planned_entries,
+    page_range_prompt_suffix,
 )
 from bookforge.schemas import (
     ArtStyle, BookBible, DesignKit, EditorialProfile, EntrySchema, HowToPage,
@@ -42,7 +49,7 @@ top studio. You are precise, opinionated, and allergic to generic AI phrasing.""
 _NARRATIVE_PROMPT = """Design the Book Bible for an illustrated nonfiction book.
 
 TOPIC: {topic}
-TARGET LENGTH: ~{pages} pages, chapter-wise, image-rich (one hero image per spread).
+TARGET LENGTH: ~{pages} pages, chapter-wise, richly illustrated.
 
 SOURCE MATERIAL (the book must be grounded in this — do not invent beyond it):
 \"\"\"
@@ -52,14 +59,17 @@ SOURCE MATERIAL (the book must be grounded in this — do not invent beyond it):
 Produce:
 - A compelling title + subtitle.
 - The intended audience and tone.
-- An ART STYLE guide so all ~{pages} images share one coherent look: medium, \
+- An ART STYLE guide so all images share one coherent look: medium, \
 palette, lighting, era, composition rules, a negative_prompt of things to avoid, \
-and a style_suffix string that will be appended to EVERY image prompt.
+and a style_suffix string that will be appended to EVERY image prompt. \
+Plan a hero image every 1–2 pages (~{pages_image_min} images minimum for the book).
 - A VOICE guide: narrator persona, register, POV, pacing, vocabulary, and a \
 banned_patterns list of clichés/AI-tells to never use.
 - A chapter plan: each chapter has a title, one-paragraph summary, 3-6 concrete \
 beats, and a page_budget. The page_budgets should sum to roughly {pages}.
 - recurring_motifs that tie the book together.
+
+{page_limit_note}
 
 Be specific and editorial. No filler."""
 
@@ -434,6 +444,20 @@ class _SpecialDraft(BaseModel):
         )
 
 
+def _coerce_nested(v, model: type[BaseModel]) -> BaseModel:
+    """LLM occasionally emits nested objects as JSON strings — parse them."""
+    if isinstance(v, model):
+        return v
+    if isinstance(v, str):
+        try:
+            v = json.loads(v)
+        except json.JSONDecodeError:
+            return v  # type: ignore[return-value]
+    if isinstance(v, dict):
+        return model.model_validate(v)
+    return v  # type: ignore[return-value]
+
+
 class _PracticalBibleDraft(BaseModel):
     title: str
     subtitle: str
@@ -441,13 +465,28 @@ class _PracticalBibleDraft(BaseModel):
     tone: str = ""
     art_style: ArtStyle
     voice: VoiceStyle
-    base_sections: list[_BaseSection] = Field(min_length=3)
+    base_sections: list[_BaseSection] = Field(min_length=1)
     how_to: HowToPage
     theme_name: str = ""
     list_lead: str = ""
     pro_topic: str = ""
     cover_subject: str = ""
     specials: list[_SpecialDraft] = Field(default_factory=list)
+
+    @field_validator("art_style", mode="before")
+    @classmethod
+    def _coerce_art_style(cls, v):
+        return _coerce_nested(v, ArtStyle)
+
+    @field_validator("voice", mode="before")
+    @classmethod
+    def _coerce_voice(cls, v):
+        return _coerce_nested(v, VoiceStyle)
+
+    @field_validator("how_to", mode="before")
+    @classmethod
+    def _coerce_how_to(cls, v):
+        return _coerce_nested(v, HowToPage)
 
 
 _GUIDE_SYSTEM_TPL = """You are a veteran commissioning editor at a premium \
@@ -480,16 +519,17 @@ STRUCTURE (follow this template): {spine}.
 Chapter rhythm: {rhythm}.
 
 Produce:
-- title + subtitle that honor the client's topic wording. COUNT HONESTY: if the
-  title or subtitle names a number of {entry_noun}s (or habits/steps/rules/etc.),
-  the book must contain EXACTLY that many — do not let the body claim any other
-  total. Roughly {planned_entries} {entry_noun}s are planned for ~{pages} pages;
-  if the client's title already fixes a number, match the plan to that number
-  instead. One honest count, used everywhere.
+- title + subtitle that honor the client's topic wording. PROMISED COUNT IS \
+SACRED: if the title or subtitle names a number (e.g. 100 recipes), plan \
+EXACTLY that many {entry_noun}s — never rewrite the count downward. \
+target_pages ({pages}) is a MINIMUM page count; the book may exceed it when \
+the promised count requires more pages. The book must contain EXACTLY the \
+count you promise — one honest number, used everywhere.
 - audience: {audience}. tone: fitting the angle — {angle}.
 - art_style: one coherent photographic/illustration look for the whole book,
   matched to the topic and era; negative_prompt must include "no text, no
-  clutter, no faces".
+  clutter, no faces". Plan for a photo every 1–2 pages — divider portraits,
+  card hero shots, and step photos wherever they teach.
 - voice: persona, register, POV, pacing, vocabulary, and banned_patterns
   (clichés/AI-tells to never use).
 - base_sections: EXACTLY {base_lo}-{base_hi} chapters. Organize them into 2-5
@@ -531,6 +571,8 @@ Produce:
   heading, and for charts: columns (3 strings) + rows (5-8); for checklists:
   about + items (8-12).{savings_note}
 
+{page_limit_note}
+
 Use correct spelling everywhere. Every chapter must reflect the source and the
 angle, never generic filler."""
 
@@ -561,7 +603,7 @@ OUTLINE:
 
 
 class _OutlineRevision(BaseModel):
-    base_sections: list[_BaseSection] = Field(min_length=3)
+    base_sections: list[_BaseSection] = Field(min_length=1)
 
 
 def _clamp(lo: int, hi: int, v: int) -> int:
@@ -597,6 +639,17 @@ class _Density(BaseModel):
     page_budget: int
 
 
+def _image_quota_for_section(
+    cards: int,
+    page_budget: int,
+    profile: EditorialProfile,
+) -> int:
+    """Target ~1 hero image every 1–2 pages per section."""
+    if profile.image_density == "every_entry":
+        return cards
+    return max(1, min(cards, round(page_budget / 1.5)))
+
+
 def _guide_density(target_pages: int, profile: EditorialProfile) -> _Density:
     """Template-driven density: fewer, deeper entries for entry-rich genres.
 
@@ -614,17 +667,22 @@ def _guide_density(target_pages: int, profile: EditorialProfile) -> _Density:
         ceiling = settings.max_base_sections
         if ceiling and ceiling > 0:
             n = min(n, ceiling)
-        # Pamphlet: at most one image per section — never every_entry density.
-        image_quota = min(1, cards)
+        pb = max(1, round(avail / max(1, n)))
+        # Honor every_entry even in pamphlet mode; otherwise cap at 1/section.
+        if profile.image_density == "every_entry":
+            image_quota = cards
+        else:
+            image_quota = min(1, cards)
         return _Density(
             base_sections=n, cards_per_section=cards, list_quota=0,
-            image_quota=image_quota, page_budget=max(1, round(avail / max(1, n))),
+            image_quota=image_quota, page_budget=pb,
         )
 
     if spec.key == "tips_cards":
         tiers = max(1, profile.tiers)
         n = _base_section_target(target_pages, tiers)
         fc, lq, iq, pb = _section_quotas(target_pages, n * tiers)
+        iq = _image_quota_for_section(fc, pb, profile) if profile.image_density != "every_entry" else iq
         return _Density(base_sections=n, cards_per_section=fc,
                         list_quota=lq, image_quota=iq, page_budget=pb)
 
@@ -646,16 +704,110 @@ def _guide_density(target_pages: int, profile: EditorialProfile) -> _Density:
     override = settings.image_density_override.strip().lower()
     if override in ("sparse", "standard", "every_entry"):
         profile.image_density = override  # type: ignore[assignment]
-    if profile.image_density == "every_entry":
-        image_quota = cards
-    elif profile.image_density == "standard":
-        image_quota = min(3, cards)
-    else:
-        image_quota = min(2, cards)
+    pb = round(pages_per_section)
+    image_quota = _image_quota_for_section(cards, pb, profile)
     return _Density(
         base_sections=n, cards_per_section=cards, list_quota=list_quota,
-        image_quota=image_quota, page_budget=round(pages_per_section),
+        image_quota=image_quota, page_budget=pb,
     )
+
+
+def _estimate_density_pages(
+    density: _Density, tiers: int, *, pamphlet: bool,
+) -> int:
+    num_sections = density.base_sections * max(1, tiers)
+    overhead = (2 if pamphlet else 9) + (0 if pamphlet else 4)
+    return overhead + num_sections * density.page_budget
+
+
+def _cap_density(
+    density: _Density,
+    target_pages: int,
+    profile: EditorialProfile,
+    *,
+    pamphlet: bool,
+) -> _Density:
+    """Ensure density planning cannot exceed the hard page ceiling."""
+    _, hi = allowed_page_range(target_pages)
+    tiers = max(1, profile.tiers)
+    d = density.model_copy()
+    while _estimate_density_pages(d, tiers, pamphlet=pamphlet) > hi:
+        if d.list_quota > 0:
+            d.list_quota = 0
+            continue
+        if d.cards_per_section > 2:
+            d.cards_per_section -= 1
+            continue
+        if d.base_sections > 1:
+            d.base_sections -= 1
+            continue
+        if d.page_budget > 1:
+            d.page_budget -= 1
+            continue
+        break
+    return d
+
+
+def _cap_sections_to_page_ceiling(
+    sections: list[SectionPlan],
+    target_pages: int,
+    profile: EditorialProfile,
+    *,
+    pamphlet: bool,
+    min_entries: int = 0,
+) -> list[SectionPlan]:
+    """Trim per-section budgets to fit the ceiling; never below min_entries."""
+    _, hi = allowed_page_range(target_pages)
+    max_entries = max_planned_entries(
+        target_pages, profile, len(sections), pamphlet=pamphlet,
+    )
+    planned = planned_use_count(sections)
+    cap = max(max_entries, min_entries)
+    if planned > cap and min_entries <= 0:
+        sections = shrink_sections_to_count(sections, cap)
+        log.info(
+            "sections_capped_to_page_ceiling",
+            max_entries=cap,
+            planned=planned_use_count(sections),
+        )
+
+    out = [s.model_copy() for s in sections]
+    while estimate_guide_pages(out, pamphlet=pamphlet) > hi:
+        reduced = False
+        for s in sorted(out, key=lambda x: x.page_budget, reverse=True):
+            if s.page_budget > 1:
+                s.page_budget -= 1
+                reduced = True
+                break
+        if not reduced:
+            break
+    return out
+
+
+def _normalize_narrative_budgets(
+    chapters: list,
+    target_pages: int,
+) -> None:
+    """Scale chapter page_budgets to target, never exceeding the hard ceiling."""
+    if not chapters:
+        return
+    lo, hi = allowed_page_range(target_pages)
+    total = sum(c.page_budget for c in chapters)
+    if total <= 0:
+        per = max(1, target_pages // len(chapters))
+        for ch in chapters:
+            ch.page_budget = per
+        total = per * len(chapters)
+    if total > hi:
+        scale = hi / total
+    elif total > target_pages:
+        scale = target_pages / total
+    elif total < lo:
+        scale = lo / total
+    else:
+        return
+    for ch in chapters:
+        ch.page_budget = max(1, round(ch.page_budget * scale))
 
 
 def _expand_sections(
@@ -892,9 +1044,13 @@ def build_bible(
 
     if book_kind == "narrative":
         toc_block = _narrative_toc_block(toc)
+        page_limit_note = page_range_prompt_suffix(target_pages)
         prompt = (
             _NARRATIVE_PROMPT.format(
-                topic=source.topic, pages=target_pages, source=excerpt)
+                topic=source.topic, pages=target_pages, source=excerpt,
+                page_limit_note=page_limit_note,
+                pages_image_min=max(1, target_pages // 2),
+            )
             + desc_block
             + toc_block
         )
@@ -916,6 +1072,7 @@ def build_bible(
                         page_budget=max(1, target_pages // len(toc)),
                     ))
             bible.chapters = bible.chapters[:len(toc)]
+        _normalize_narrative_budgets(bible.chapters, target_pages)
         log.info("bible_built", kind="narrative", title=bible.title,
                  chapters=len(bible.chapters), user_toc=bool(toc))
         return bible
@@ -931,7 +1088,12 @@ def build_bible(
         profile = profile.model_copy(update={"tiers": 1})
     design = derive_design(source, profile)
     spec = templates.spec_for(profile.structure_template)
-    density = _guide_density(target_pages, profile)
+    density = _cap_density(
+        _guide_density(target_pages, profile),
+        target_pages,
+        profile,
+        pamphlet=pamphlet,
+    )
     # When user supplies TOC, pin base section count to that length.
     if toc:
         base_lo = base_hi = len(toc)
@@ -950,6 +1112,7 @@ def build_bible(
                         "keep every number honest.")
 
     guide_toc_block = _guide_toc_block(toc)
+    page_limit_note = page_range_prompt_suffix(target_pages)
     draft = llm.structured(
         _GUIDE_PROMPT_TPL.format(
             genre=profile.genre, topic=source.topic, pages=target_pages,
@@ -968,6 +1131,7 @@ def build_bible(
             back_matter_angle=profile.back_matter_angle or
             "the closing reference page readers of this genre expect",
             savings_note=savings_note,
+            page_limit_note=page_limit_note,
         ) + desc_block + guide_toc_block,
         _PracticalBibleDraft,
         system=_GUIDE_SYSTEM_TPL.format(
@@ -987,6 +1151,9 @@ def build_bible(
         base_sections = _enforce_toc_sections(base_sections, toc)
         log.info("guide_toc_reenforced", count=len(base_sections))
     sections = _expand_sections(base_sections, density, profile)
+    sections = _cap_sections_to_page_ceiling(
+        sections, target_pages, profile, pamphlet=pamphlet,
+    )
     if draft.specials:
         raw_specials = [s.to_plan() for s in draft.specials]
     elif pamphlet:
@@ -995,17 +1162,27 @@ def build_bible(
         raw_specials = _default_specials(profile)
     specials = _map_specials(raw_specials, len(base_sections), tiers_per)
 
-    planned = planned_use_count(sections)
     title = draft.title
     subtitle = draft.subtitle
     promised = parse_promised_count(title, subtitle)
-
+    planned = planned_use_count(sections)
+    if promised and promised > planned:
+        sections = expand_sections_to_count(sections, promised)
+        planned = planned_use_count(sections)
+        log.info("sections_expanded_to_promise",
+                 promised=promised, planned=planned,
+                 target_pages=target_pages)
+    sections = _cap_sections_to_page_ceiling(
+        sections, target_pages, profile, pamphlet=pamphlet,
+        min_entries=promised or 0,
+    )
+    planned = planned_use_count(sections)
     if pamphlet and promised and planned > promised:
         sections = shrink_sections_to_count(sections, promised)
         planned = promised
         log.info("pamphlet_shrunk_to_promise", promised=promised,
                  sections=len(sections))
-    elif not pamphlet:
+    elif not pamphlet and promised and promised < planned:
         title, subtitle, promise_fixed = reconcile_promise(
             title, subtitle, planned)
         if promise_fixed:
@@ -1034,7 +1211,7 @@ def build_bible(
         pro_topic=draft.pro_topic or source.topic,
         specials=specials,
     )
-    bible.promised_uses = planned
+    bible.promised_uses = promised or planned
     # Make ALL planner-authored copy (title, kicker, how-to, part titles, …)
     # state the one promised count — the body is reconciled by the QA fix-loop.
     propagate_promised_count(bible)

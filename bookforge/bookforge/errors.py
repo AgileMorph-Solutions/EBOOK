@@ -78,5 +78,26 @@ class ReadinessError(RuntimeError):
         super().__init__(message)
 
 
+class PageLimitError(RuntimeError):
+    """The rendered PDF page count is outside the allowed range for target_pages.
+
+    Raised at assemble time so an over- or under-length book never ships."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        pages: int,
+        target: int,
+        lo: int,
+        hi: int,
+    ):
+        self.pages = pages
+        self.target = target
+        self.lo = lo
+        self.hi = hi
+        super().__init__(message)
+
+
 class PipelineCancelledError(RuntimeError):
     """User or operator cancelled the job — stop between stages, do not retry."""

@@ -163,8 +163,10 @@ class GuideDirector:
                     f'<div class="gh2">{title}</div>{lead_html}</div>')
             # keep the numbered badges continuous across the split
             counter = f' style="counter-reset: h {start}"' if start else ""
-            inner = f'{head}<ol class="gbodyfill fill-spread"{counter}>{lis}</ol>'
-            return (f'<section class="page howto{compact}" data-entry="howto">'
+            fill = "fill-stack" if cont else "fill-spread"
+            cont_cls = " howto-continued" if cont else ""
+            inner = f'{head}<ol class="gbodyfill {fill}"{counter}>{lis}</ol>'
+            return (f'<section class="page howto{compact}{cont_cls}" data-entry="howto">'
                     f'{self._chrome(self._pos())}'
                     f'<div class="gbody-box"><div class="gfit"{fitmin}>{inner}</div>'
                     f'</div></section>')
@@ -338,7 +340,7 @@ class GuideDirector:
         if len(boxes) <= 1:
             stack_cls = "gbodyfill feature-stack fill-center feature-solo"
         else:
-            stack_cls = "gbodyfill feature-stack fill-spread feature-multi"
+            stack_cls = "gbodyfill feature-stack fill-stack feature-multi"
         inner = (f'<div class="ghead"><div class="eyebrow">{_esc(eyebrow)}</div></div>'
                  f'<div class="{stack_cls}">{quote}{cards}</div>')
         self.pages.append(
@@ -480,7 +482,7 @@ class GuideDirector:
         # Page B — the working page: method, callouts, notes. No repeated full
         # title; just a small "(continued)" tag so the eye isn't hit twice.
         folio = self._pos()
-        inner_b = (f'<div class="entry-fit">'
+        inner_b = (f'<div class="entry-fit entry-continued">'
                    f'<div class="eyebrow">{_esc(section)}</div>'
                    f'<div class="entry-cont">{_esc(p["title"])} '
                    f'<span class="ec-tag">(continued)</span></div>'
@@ -579,7 +581,7 @@ class GuideDirector:
                     flush_steps()
                     body += payload  # type: ignore[operator]
             flush_steps()
-            inner = (f'<div class="entry-fit">'
+            inner = (f'<div class="entry-fit entry-continued">'
                      f'<div class="eyebrow">{_esc(section)}</div>'
                      f'<div class="entry-cont">{_esc(p["title"])} '
                      f'<span class="ec-tag">(continued)</span></div>{body}</div>')
@@ -652,9 +654,10 @@ class GuideDirector:
                     if table.note and ci == len(chunks) - 1 else "")
             lead_html = (f'<div class="glead">{_esc(lead)}</div>'
                          if lead and ci == 0 else "")
+            fill = "fill-start"
             inner = (f'<div class="ghead"><div class="eyebrow">{_esc(section)}</div>'
                      f'<div class="gh2">{head}</div>{lead_html}</div>'
-                     f'<div class="gbodyfill fill-center"><table class="gtable">'
+                     f'<div class="gbodyfill {fill}"><table class="gtable">'
                      f'<thead><tr>{ths}</tr></thead><tbody>{trs}</tbody></table>{note}</div>')
             self.pages.append(
                 f'<section class="page chartpage"{self._entry_attr(key)}>{self._chrome(folio)}'
@@ -672,30 +675,35 @@ class GuideDirector:
                 order.append(key)
             groups[key].append(it)
         cols = ""
-        for key in order:
-            head = f'<div class="ct">{_esc(key.title())}</div>' if key else ""
+        total_items = len(checklist.items)
+        row_fill = "fill-stack"
+        for grp_key in order:
+            head = f'<div class="ct">{_esc(grp_key.title())}</div>' if grp_key else ""
             rows = "".join(
                 f'<div class="check-row"><span class="check-box"></span>'
-                f'<span>{_esc(it.text)}</span></div>' for it in groups[key])
-            cols += f'<div class="check-grp">{head}<div class="check-rows fill-spread">{rows}</div></div>'
+                f'<span>{_esc(it.text)}</span></div>' for it in groups[grp_key])
+            cols += f'<div class="check-grp">{head}<div class="check-rows {row_fill}">{rows}</div></div>'
         lead_html = f'<div class="glead">{_esc(lead)}</div>' if lead else ""
+        compact = " checkpage-compact" if total_items < 8 else ""
         inner = (f'<div class="ghead"><div class="eyebrow">{_esc(section)}</div>'
                  f'<div class="gh2">{_esc(heading)}</div>{lead_html}</div>'
                  f'<div class="gbodyfill fill-row">{cols}</div>')
         self.pages.append(
-            f'<section class="page checkpage"{self._entry_attr(key)}>{self._chrome(folio)}'
+            f'<section class="page checkpage{compact}"{self._entry_attr(key)}>{self._chrome(folio)}'
             f'<div class="gbody-box"><div class="gfit"{self._fitmin(level)}>{inner}</div></div></section>')
 
     def pro_page(self, heading: str, lead: str, signs: list[str], reassure: str,
                  level: int = 0) -> None:
         folio = self._pos()
         lis = "".join(f"<li>{_esc(s)}</li>" for s in signs)
+        compact = " propage-compact" if len(signs) < 6 else ""
+        body_fill = "fill-stack" if len(signs) < 6 else "fill-spread"
         inner = (f'<div class="ghead"><div class="gh2">{_esc(heading)}</div>'
                  f'<div class="plead">{_esc(lead)}</div></div>'
-                 f'<div class="gbodyfill fill-spread"><ul>{lis}</ul>'
+                 f'<div class="gbodyfill {body_fill}"><ul>{lis}</ul>'
                  f'<div class="reassure">{_esc(reassure)}</div></div>')
         self.pages.append(
-            f'<section class="page propage" data-entry="pro">{self._chrome(folio)}'
+            f'<section class="page propage{compact}" data-entry="pro">{self._chrome(folio)}'
             f'<div class="gbody-box"><div class="gfit"{self._fitmin(level)}>{inner}</div></div></section>')
 
     def render(self) -> str:

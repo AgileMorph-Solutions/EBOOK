@@ -114,3 +114,40 @@ def test_audit_flags_abstract_materials_and_empty_when_no_materials():
         type=BlockType.use_card, heading="Drink Water", entries=[entry])])
     issues, _ = qa.audit_guide_chapters([ch], bible)
     assert any("abstractions" in i for i in issues), issues
+
+
+def test_audit_flags_short_chart_rows():
+    from bookforge.schemas import (
+        BookBible, Chapter, ContentBlock, BlockType, SpecialPlan, TableModel,
+    )
+    bible = BookBible.model_construct(
+        title="Poor Man Recipe Bible",
+        subtitle="100 Forgotten Cheap Meals",
+        sections=[],
+        promised_uses=100,
+        specials=[
+            SpecialPlan(
+                after_section=6,
+                kind="chart",
+                heading="When a Staple Runs Out: Smart Swaps",
+                columns=["If You're Out Of", "Use Instead", "How Much"],
+                rows=7,
+            ),
+        ],
+    )
+    ch = Chapter(
+        index=6,
+        title="Seniors",
+        blocks=[
+            ContentBlock(
+                type=BlockType.chart,
+                heading="When a Staple Runs Out: Smart Swaps",
+                table=TableModel(
+                    columns=["If You're Out Of", "Use Instead", "How Much"],
+                    rows=[["Fresh milk", "Evaporated milk plus water", "Half can"]],
+                ),
+            ),
+        ],
+    )
+    issues, _ = qa.audit_guide_chapters([ch], bible)
+    assert any("1/7 rows" in i for i in issues), issues

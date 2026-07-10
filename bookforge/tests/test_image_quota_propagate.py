@@ -12,7 +12,9 @@ from bookforge.schemas import BookBible
 
 def test_generate_best_propagates_quota():
     bible = MagicMock(spec=BookBible)
+    bible.art_style = MagicMock()
     bible.art_style.negative_prompt = ""
+    bible.voice = MagicMock()
     bible.voice.banned_patterns = []
     with patch("bookforge.pipeline.images.settings") as s:
         s.image_candidates_per_page = 1

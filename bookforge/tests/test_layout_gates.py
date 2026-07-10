@@ -134,6 +134,52 @@ def test_entry_card_force_spread_makes_two_pages():
     d.entry_card("Seasoning", _entry(), None, key="1.2", force_spread=True)
     assert len(d.pages) == 2
     assert "(continued)" in d.pages[1]
+    assert "entry-continued" in d.pages[1]
+    assert "entry-continued" not in d.pages[0]
+
+
+def test_spread_continued_page_is_top_aligned():
+    d = GuideDirector(_bible())
+    d.entry_card("Seasoning", _entry(), None, key="1.2", force_spread=True)
+    assert "entry-fit entry-continued" in d.pages[1]
+
+
+def test_entry_flow_continued_has_entry_continued_class():
+    long_steps = [
+        StepItem(text=" ".join(["patience"] * 55)) for _ in range(10)
+    ]
+    entry = _entry(steps=long_steps)
+    d = GuideDirector(_bible())
+    d.entry_card("Seasoning", entry, None, key="1.2", level=2)
+    cont_pages = [p for p in d.pages if "(continued)" in p]
+    assert cont_pages
+    assert all("entry-continued" in p for p in cont_pages)
+
+
+def test_howto_continued_uses_fill_stack_not_spread():
+    d = GuideDirector(_bible())
+    d.how_to_use("How to", "lead", ["a", "b", "c", "d"], level=2)
+    assert len(d.pages) == 2
+    assert "howto-continued" in d.pages[1]
+    assert "fill-stack" in d.pages[1]
+    assert "fill-spread" not in d.pages[1]
+    assert "fill-spread" in d.pages[0]
+
+
+def test_chart_page_always_fill_start():
+    from bookforge.schemas import TableModel
+
+    table = TableModel(columns=["A", "B"],
+                       rows=[[f"row {i}", "val"] for i in range(10)])
+    d = GuideDirector(_bible())
+    d.chart_page("Ref", "Chart", "lead", table, key="chart:1", level=0)
+    assert "fill-start" in d.pages[0]
+    assert "fill-center" not in d.pages[0]
+    d2 = GuideDirector(_bible())
+    d2.chart_page("Ref", "Big", "lead", table, key="chart:2", level=3)
+    for pg in d2.pages:
+        assert "fill-start" in pg
+        assert "fill-center" not in pg
 
 
 def test_entry_flow_level3_sheds_intro_from_presentation_page():

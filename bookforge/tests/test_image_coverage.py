@@ -96,3 +96,66 @@ def test_assert_image_coverage_passes_when_full(monkeypatch):
         GeneratedImage(block_ref="1.divider", storage_key="k2", width=10, height=10),
     ]
     guide_images._assert_image_coverage(bible, [ch], imgs, cover_key="books/x/cover.jpg")
+
+
+def test_sync_card_image_briefs_every_entry():
+    from bookforge.pipeline import content_guide
+    from bookforge.schemas import EditorialProfile, EntrySchema, SectionPlan, UseEntry
+
+    bible = _bible(
+        profile=EditorialProfile(
+            genre="cookbook",
+            audience="cooks",
+            angle="thrifty",
+            entry_schema=EntrySchema(entry_noun="recipe"),
+            image_density="every_entry",
+        ),
+        sections=[SectionPlan(index=1, title="S1", full_card_quota=3,
+                              image_quota=1)],
+    )
+    ch = Chapter(
+        index=1, title="S1",
+        blocks=[
+            ContentBlock(
+                type=BlockType.use_card, heading=f"R{i}",
+                entries=[UseEntry(number=i + 1, title=f"Recipe {i + 1}")],
+                image_brief=(ImageBrief(prompt="first", kind="photo", aspect="square")
+                             if i == 0 else None),
+            )
+            for i in range(3)
+        ],
+    )
+    added = content_guide.sync_card_image_briefs([ch], bible)
+    assert added == 2
+    assert all(b.image_brief for b in ch.blocks if b.type == BlockType.use_card)
+
+
+def test_sync_card_image_briefs_respects_quota_when_not_every_entry():
+    from bookforge.pipeline import content_guide
+    from bookforge.schemas import EditorialProfile, EntrySchema, SectionPlan, UseEntry
+
+    bible = _bible(
+        profile=EditorialProfile(
+            genre="guide",
+            audience="readers",
+            angle="helpful",
+            entry_schema=EntrySchema(entry_noun="tip"),
+            image_density="standard",
+        ),
+        sections=[SectionPlan(index=1, title="S1", full_card_quota=3,
+                              image_quota=1)],
+    )
+    ch = Chapter(
+        index=1, title="S1",
+        blocks=[
+            ContentBlock(
+                type=BlockType.use_card,
+                entries=[UseEntry(number=i + 1, title=f"Tip {i + 1}")],
+            )
+            for i in range(3)
+        ],
+    )
+    added = content_guide.sync_card_image_briefs([ch], bible)
+    assert added == 1
+    briefs = sum(1 for b in ch.blocks if b.image_brief)
+    assert briefs == 1

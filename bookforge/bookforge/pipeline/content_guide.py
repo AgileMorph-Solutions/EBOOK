@@ -114,7 +114,8 @@ Produce:
 {card_spec}
 - card_photos: EXACTLY {cards} short photo subjects (one per card, same order),
   each a concrete scene to photograph (no text, no labels, no packaging, no faces)
-  showing that card's finished result.
+  showing that card's finished result. Every card MUST have a card_photo — aim
+  for visual density of one illustration every 1–2 pages in this chapter.
 - quick_uses: EXACTLY {quick} short entries — quick ideas, variations, or
   compact versions related to this chapter. For EACH: a title (2-6 words) and
   an intro that is ONE line, 8-16 words. Leave steps empty.
@@ -382,6 +383,9 @@ def write_section(
         _SectionDraft, system=_voice(bible), max_tokens=12000,
     )
     draft = _revise(draft, bible)
+    # Hard clamp: QA revision must never inflate past section quotas.
+    draft.cards = draft.cards[: max(0, section.full_card_quota)]
+    draft.quick_uses = draft.quick_uses[: max(0, section.list_quota)]
 
     blocks: list[ContentBlock] = [
         ContentBlock(type=BlockType.section_intro, text=draft.intro.strip())
@@ -444,6 +448,49 @@ def write_section(
     return ch, n
 
 
+def sync_card_image_briefs(
+    chapters: list[Chapter],
+    bible: BookBible,
+) -> int:
+    """Ensure use_card blocks have image_briefs matching the book's density.
+
+    every_entry → brief on every card; otherwise up to section.image_quota
+    per chapter. Returns how many briefs were added.
+    """
+    profile = profile_of(bible)
+    every = profile.image_density == "every_entry"
+    quotas = {s.index: max(0, s.image_quota) for s in bible.sections}
+    added = 0
+    for ch in chapters:
+        cards = [b for b in ch.blocks if b.type == BlockType.use_card]
+        if not cards:
+            continue
+        if every:
+            target = len(cards)
+        else:
+            target = min(len(cards), quotas.get(ch.index, 1))
+        have = sum(1 for b in cards if b.image_brief)
+        need = max(0, target - have)
+        if need <= 0:
+            continue
+        for blk in cards:
+            if need <= 0:
+                break
+            if blk.image_brief:
+                continue
+            title = ""
+            if blk.entries:
+                title = blk.entries[0].title or blk.heading or ""
+            subject = title or blk.heading or ch.title
+            blk.image_brief = ImageBrief(
+                prompt=subject, kind="photo", aspect="square")
+            need -= 1
+            added += 1
+    if added:
+        log.info("card_image_briefs_synced", added=added)
+    return added
+
+
 _CHART_PROMPT = """Make a reference table for the "{section}" part of \
 "{book_title}" — a {genre} for {audience}.
 
@@ -451,6 +498,57 @@ Columns (exactly these, in order): {columns}
 Produce EXACTLY {rows} rows. Each cell is 2-6 words. Every row must be accurate,
 realistic, and genuinely useful to this book's reader.{savings_note}
 Do not inflate any counts or figures."""
+
+
+_CHART_TOPUP_PROMPT = """Add EXACTLY {need} more rows to this reference table for \
+"{book_title}" ({section}).
+
+Columns (exact order): {columns}
+Existing rows (do not repeat):
+{existing}
+
+Each new cell is 2-6 words. Return ONLY the {need} new rows as a JSON table."""
+
+
+def _ensure_table_rows(
+    table: TableModel,
+    *,
+    columns: list[str],
+    rows: int,
+    section: str,
+    heading: str,
+    bible: BookBible,
+) -> TableModel:
+    """Validate row count; top-up with a follow-up LLM call if short."""
+    p = profile_of(bible)
+    table.columns = columns
+    attempts = 0
+    while len(table.rows) < rows and attempts < 3:
+        need = rows - len(table.rows)
+        existing = "\n".join(" | ".join(r) for r in table.rows) or "(none)"
+        try:
+            extra = llm.structured(
+                _CHART_TOPUP_PROMPT.format(
+                    need=need, book_title=bible.title, section=section,
+                    columns=", ".join(columns), existing=existing,
+                ),
+                TableModel, system=_voice(bible), max_tokens=1500,
+            )
+            for row in extra.rows:
+                if len(table.rows) >= rows:
+                    break
+                if len(row) == len(columns):
+                    table.rows.append(row)
+        except Exception as exc:
+            if llm.is_provider_unavailable(exc):
+                raise
+            log.warning("chart_topup_failed", heading=heading, err=str(exc)[:120])
+        attempts += 1
+    if len(table.rows) < rows:
+        log.warning("chart_underfilled", heading=heading,
+                    got=len(table.rows), want=rows)
+    table.rows = table.rows[:rows]
+    return table
 
 
 def make_chart(section: str, heading: str, columns: list[str], rows: int,
@@ -468,7 +566,10 @@ def make_chart(section: str, heading: str, columns: list[str], rows: int,
             audience=p.audience, columns=", ".join(columns), rows=rows,
             savings_note=savings_note),
         TableModel, system=_voice(bible), max_tokens=2000)
-    table.columns = columns
+    table = _ensure_table_rows(
+        table, columns=columns, rows=rows,
+        section=section, heading=heading, bible=bible,
+    )
     table.note = note
     return ContentBlock(
         type=BlockType.chart, heading=heading,
@@ -491,6 +592,9 @@ def make_checklist(heading: str, about: str, items: int, bible: BookBible) -> Co
         _CHECK_PROMPT.format(heading=heading, about=about, items=items,
                              book_title=bible.title, audience=p.audience),
         ChecklistModel, system=_voice(bible), max_tokens=2000)
+    if len(cl.items) < items:
+        log.warning("checklist_underfilled", heading=heading,
+                    got=len(cl.items), want=items)
     return ContentBlock(type=BlockType.checklist, heading=heading,
                         text="Tick these off as you go — it keeps things easy.", checklist=cl)
 

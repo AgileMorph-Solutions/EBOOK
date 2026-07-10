@@ -39,6 +39,10 @@ Check for these VISUAL defects only:
 - Divider photo visible under the text panel
 - Unreadable text (too small or low contrast)
 - Wrong color theme for the topic (e.g. cleaning teal on a food book)
+- Large empty vertical band (more than ~25% of the body area) between the page
+  heading and the main content block, especially on pages marked "(continued)"
+- Table or chart rows bunched at the top with a large empty area below them
+  (underfilled reference table)
 
 Do NOT evaluate whether page numbers, a table of contents, or a reference
 list are numerically "in order" or "sequential" — folio numbers are computed

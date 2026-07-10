@@ -62,6 +62,10 @@ html { -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
 /* fill strategies (applied to .gbodyfill or a child) */
 .fill-spread { display: flex; flex-direction: column; justify-content: space-between;
   flex: 1 1 auto; min-height: 0; }
+.fill-stack { display: flex; flex-direction: column; justify-content: flex-start;
+  gap: var(--rhythm-gap, .14in); flex: 1 1 auto; min-height: 0; }
+.fill-start { display: flex; flex-direction: column; justify-content: flex-start;
+  flex: 1 1 auto; min-height: 0; }
 .fill-row { display: flex; flex-direction: row; gap: .5in; flex: 1 1 auto; min-height: 0; }
 .fill-row > * { flex: 1 1 0; min-width: 0; }
 /* `safe center` = center when there is spare room, but fall back to top-alignment
@@ -82,6 +86,8 @@ html { -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
   width: 1.7in !important; height: auto !important; max-height: none !important; }
 .gfit.measuring .entry-mid { align-items: flex-start !important; }
 .gfit.measuring .fill-spread,
+.gfit.measuring .fill-stack,
+.gfit.measuring .fill-start,
 .gfit.measuring .fill-row,
 .gfit.measuring .fill-center,
 /* entry-fit centers its stack post-fit; collapse to natural top-aligned flow
@@ -162,6 +168,9 @@ b, strong { font-weight: 700; }
 .howto-compact ol { gap: .14in; }
 .howto-compact ol li { padding: .18in .3in .18in .95in; line-height: 1.4; }
 .howto .gh2 .cont { font-size: .5em; font-weight: 600; color: var(--muted); }
+/* continued welcome page: top-aligned cards with fixed gaps, no stretch */
+.howto-continued ol { gap: .22in; }
+.howto-continued ol li { flex: 0 0 auto; justify-content: flex-start; }
 
 /* ============================ SAFETY PAGE ============================ */
 .gsafety { background: var(--paper); }
@@ -264,6 +273,8 @@ b, strong { font-weight: 700; }
    card top-aligned so its title can never clip off the top edge */
 .entry-fit { height: 100%; display: flex; flex-direction: column;
   justify-content: safe center; }
+/* continuation pages: top-align so short step tails don't float mid-page */
+.entry-fit.entry-continued { justify-content: flex-start; height: auto; min-height: 0; }
 /* CONSTANT title size — a fixed pt so it does NOT ride the per-page .gfit shrink
    (page A and page B, dense and light entries, all show the same title size). */
 .entry-title { font-family: var(--display); font-weight: 800; color: var(--accent);
@@ -358,7 +369,6 @@ b, strong { font-weight: 700; }
 /* chart fills the page: table grows to fill the height with roomy, even rows and
    sits right under the heading instead of floating centered with gaps */
 .chartpage .gbodyfill { justify-content: flex-start; }
-.chartpage .gtable { flex: 1 1 auto; }
 .chartpage .gtable tbody td { padding-top: .22in; padding-bottom: .22in; }
 /* tracker grids: an empty cell becomes an actual tickable checkbox square, so a
    "tick each square" page renders a real grid instead of blank cells */
@@ -383,6 +393,10 @@ b, strong { font-weight: 700; }
   border-bottom: 1px solid rgba(16,38,46,.12); }
 .checkpage .check-row:last-child { border-bottom: none; }
 .checkpage .check-box { margin-top: 0; }
+/* short checklists: natural row height instead of stretching to fill */
+.checkpage-compact .check-row { flex: 0 0 auto; align-items: flex-start;
+  margin-bottom: .14in; padding: 0; border-bottom: none; }
+.checkpage-compact .check-box { margin-top: .14em; }
 
 /* ============================ WHEN TO CALL A PRO ============================ */
 .propage .gh2 { font-size: 2.0em; }
@@ -399,6 +413,9 @@ b, strong { font-weight: 700; }
   align-items: center; justify-content: center; }
 .propage .reassure { flex: 0 0 auto; background: var(--panel); border-radius: 12px;
   padding: .26in .3in; font-size: 1.05em; line-height: 1.5; margin-top: .24in; }
+.propage-compact ul { flex: 0 0 auto; }
+.propage-compact li { flex: 0 0 auto; justify-content: flex-start;
+  padding: .12in .1in .12in 2.0em; }
 
 /* generic text/continuation page */
 .gtext .gh2 { font-size: 1.8em; margin-bottom: .16in; }
@@ -438,8 +455,8 @@ b, strong { font-weight: 700; }
    stretched to full page height */
 .feature-solo .feature-box { flex: 0 0 auto; padding: .5in .55in; }
 .feature-solo .feature-box .fb-body { font-size: 1.12em; }
-/* two boxes: grow to fill and space evenly down the page */
-.feature-multi .feature-box { flex: 1 1 0; }
+/* two boxes: fixed gap stack (no space-between stretch) */
+.feature-multi .feature-box { flex: 0 0 auto; }
 .feature-box .fb-head { font-family: var(--cond); text-transform: uppercase;
   letter-spacing: .14em; font-weight: 700; font-size: 1.0em; color: var(--accent);
   margin-bottom: .1in; }

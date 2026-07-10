@@ -204,7 +204,8 @@ export function CreateBookForm() {
             }
           />
           <p className="font-body text-body-sm italic text-secondary">
-            Maximum 300 pages per book.
+            Content scales to your target page count (±25 pages). Large source
+            lists (e.g. 365 recipes) are automatically reduced to fit.
           </p>
         </div>
         <div className="flex flex-col gap-2">

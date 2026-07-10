@@ -48,7 +48,8 @@ Return structured ContentBlocks for this chapter. Guidance:
 - For EACH block, extract atomic factual `claims`, each tied to the \
 source_passage_ids it comes from. Leave verdict as "pending".
 - Give blocks that deserve a hero image an `image_brief` with a vivid prompt \
-(the global art style is added later — describe subject, scene, mood). Set \
+(the global art style is added later — describe subject, scene, mood). Aim for \
+a hero image every 1–2 pages of chapter content. Set \
 needs_in_image_text=true only for labels/cards with words baked in.
 - `blocks` must NEVER be empty or missing — even a very short 1-page chapter \
 must return at least one `intro` block with a short paragraph.
@@ -189,7 +190,7 @@ def regenerate_guide_sections(
     Numbering: each rebuilt section reuses its original start number. Dedup: the
     Registry is seeded from every OTHER current chapter, so the redraft still
     avoids repeating the rest of the book but is free to reuse its own titles."""
-    from bookforge.schemas import profile_of
+    from bookforge.schemas import BlockType, profile_of
 
     sections_by_idx = {s.index: s for s in bible.sections}
     noun = profile_of(bible).entry_schema.entry_noun
@@ -206,11 +207,18 @@ def regenerate_guide_sections(
         for other in registry_seed:
             if other.index != ch.index:
                 registry.add_chapter(other)
+        # Remind the model of hard quotas so revision doesn't inflate past plan.
+        quota_faults = list(faults)
+        n_cards = sum(1 for b in ch.blocks if b.type == BlockType.use_card)
+        if n_cards > section.full_card_quota:
+            quota_faults.append(
+                f"this section must have EXACTLY {section.full_card_quota} "
+                f"full {noun} cards (not {n_cards}) — trim to the quota")
         try:
             new_ch, _ = _build_guide_section(
                 section, bible, source,
                 start_number=_chapter_start_number(ch),
-                registry=registry, list_lead=list_lead, feedback=faults,
+                registry=registry, list_lead=list_lead, feedback=quota_faults,
             )
         except Exception as exc:
             # Keep the prior draft rather than losing the section — the loop will

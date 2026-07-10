@@ -31,7 +31,8 @@ def main(argv=None):
     src.add_argument("--text-file", help="path to source text")
     src.add_argument("--text", help="source text inline")
     src.add_argument("--youtube", help="YouTube URL to transcribe")
-    ap.add_argument("--pages", type=int, default=100, help="target page count")
+    ap.add_argument("--pages", type=int, default=100,
+                    help="target page count (1–300)")
     ap.add_argument("--chapters", type=int, default=None,
                     help="limit chapters/sections; omit for full book")
     ap.add_argument("--book-kind", choices=["practical_guide"],
@@ -40,6 +41,9 @@ def main(argv=None):
                     help="JSON dict of EditorialProfile overrides "
                          '(e.g. \'{"genre": "cookbook", "audience": "..."}\')')
     args = ap.parse_args(argv)
+
+    if args.pages < 1 or args.pages > 300:
+        ap.error("--pages must be between 1 and 300")
 
     profile_overrides = None
     if args.profile_json:

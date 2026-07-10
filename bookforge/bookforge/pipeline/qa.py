@@ -320,6 +320,31 @@ def audit_guide_chapters(chapters: list[Chapter], bible: BookBible) -> tuple[lis
                                 excerpt=step_text[:120],
                                 fix="rewrite this step safely",
                             ))
+    for ch in chapters:
+        for bi, block in enumerate(ch.blocks):
+            if block.type == BlockType.chart and block.table:
+                planned = None
+                for sp in bible.specials_for(ch.index):
+                    if sp.kind == "chart" and (
+                        sp.heading == block.heading or not block.heading
+                    ):
+                        planned = sp.rows
+                        break
+                if planned and len(block.table.rows) < planned:
+                    issues.append(
+                        f"ch{ch.index}.{bi}: chart '{block.heading}' has "
+                        f"{len(block.table.rows)}/{planned} rows — regenerate "
+                        f"with all {planned} rows")
+            if block.type == BlockType.checklist and block.checklist:
+                planned_items = None
+                for sp in bible.specials_for(ch.index):
+                    if sp.kind == "checklist":
+                        planned_items = sp.items
+                        break
+                if planned_items and len(block.checklist.items) < planned_items:
+                    issues.append(
+                        f"ch{ch.index}.{bi}: checklist has "
+                        f"{len(block.checklist.items)}/{planned_items} items")
     return issues, findings
 
 

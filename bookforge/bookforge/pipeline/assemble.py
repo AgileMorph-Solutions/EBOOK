@@ -19,6 +19,7 @@ from bookforge.config import settings
 from bookforge.errors import GeometryError, LayoutError
 from bookforge.layout import build, guide, render
 from bookforge.pipeline import layout_budget, layout_qa, pdf_geometry
+from bookforge.pipeline.page_limits import allowed_page_range, is_within_page_range
 from bookforge.schemas import BookArtifact, BookBible, Chapter, GeneratedImage, QAResult
 
 log = structlog.get_logger(__name__)
@@ -40,6 +41,8 @@ _BLOCKING_LAYOUT_HINTS = (
 _NON_BLOCKING_PATTERNS = (
     "page order", "page numbering", "out of sequence", "page number",
     "page reference", "table of contents", "numerically", "folio",
+    "underfilled", "empty gap", "sparse table", "too few rows",
+    "single row", "under-filled", "whitespace below",
 )
 
 
@@ -313,15 +316,30 @@ def assemble(
             f"file {size_mb:.1f}MB exceeds budget {settings.max_file_size_mb}MB "
             "— recompress images"
         )
+    target = bible.target_pages or budget_pages or pages
+    lo, hi = allowed_page_range(target)
+    log.info(
+        "page_limit_check",
+        pages=pages,
+        target=target,
+        allowed_lo=lo,
+        allowed_hi=hi,
+        budget=budget_pages,
+    )
     if budget_pages:
         drift = abs(pages - budget_pages) / budget_pages
         log.info("page_budget_check", pages=pages, budget=budget_pages,
                  drift=round(drift, 2))
-        if drift > 0.30:
+        if lo <= pages <= hi and drift > 0.30:
             issues.append(
                 f"page count {pages} drifts {drift*100:.0f}% from budget "
                 f"{budget_pages} — review chapter sizing"
             )
+    if not is_within_page_range(pages, target):
+        issues.append(
+            f"page count {pages} outside target range {lo}–{hi} "
+            f"(target {target}) — content may need scaling"
+        )
 
     key = f"books/{book_id}/interior.pdf"
     storage.put(key, pdf, "application/pdf")

@@ -13,7 +13,7 @@ from bookforge.schemas import BookBible, Chapter, SectionPlan
 # plain \w+ silently failed there, so the subtitle promise was never parsed and
 # the book shipped 1,176 entries under a "200" subtitle.
 _COUNT_NOUNS = (
-    r"ways?|tips?|uses?|tricks?|methods?|ideas?|hacks?|recipes?|dishes?|"
+    r"ways?|tips?|uses?|tricks?|methods?|ideas?|hacks?|recipes?|dishes?|meals?|"
     r"fixes?|projects?|patterns?|exercises?|lessons?|entries|habits?|steps?|rules?|"
     r"principles?|moves?|shifts?|strategies|strategy|secrets?|mistakes?|"
     r"reasons?|laws?|keys?|changes?|foods?|drinks?|workouts?|stretches|poses?|"
@@ -87,15 +87,12 @@ def parse_promised_count(title: str, subtitle: str) -> int | None:
 
 def reconcile_promise(title: str, subtitle: str, planned: int,
                       *, tolerance: float = 0.10) -> tuple[str, str, bool]:
-    """If the title/subtitle promises a count more than `tolerance` away from
-    the planned entry total, deterministically rewrite the number in place.
-
-    Returns (title, subtitle, changed). The cheapest possible fix for the
-    "subtitle says 200, book contains 1,176" defect — applied at bible time,
-    before any content is written.
-    """
+    """If the title/subtitle promises a count far above planned, leave copy
+    unchanged — promised count wins and sections will expand to match."""
     promised = parse_promised_count(title, subtitle)
     if promised is None or planned <= 0:
+        return title, subtitle, False
+    if promised >= planned:
         return title, subtitle, False
     if abs(promised - planned) <= tolerance * promised:
         return title, subtitle, False
@@ -133,6 +130,32 @@ def shrink_sections_to_count(
     return trimmed
 
 
+def expand_sections_to_count(
+    sections: list[SectionPlan], target: int,
+) -> list[SectionPlan]:
+    """Raise full_card_quota (then list_quota) until planned count reaches target."""
+    out = [s.model_copy() for s in sections]
+    current = planned_use_count(out)
+    if current >= target:
+        return out
+
+    extra = target - current
+    n = len(out) or 1
+    # Distribute extra full cards first (deeper sections).
+    for i, s in enumerate(out):
+        if extra <= 0:
+            break
+        slots_left = n - i
+        add = extra // slots_left if i < n - 1 else extra
+        out[i] = s.model_copy(update={"full_card_quota": s.full_card_quota + add})
+        extra -= add
+
+    current = planned_use_count(out)
+    if current < target:
+        out = adjust_list_quotas(out, target - current)
+    return out
+
+
 def adjust_list_quotas(
     sections: list[SectionPlan], extra: int,
 ) -> list[SectionPlan]:
@@ -154,24 +177,17 @@ def rewrite_promised_number(
 
 
 def reconcile_promise_book(bible: BookBible) -> BookBible:
-    """Align section quotas and title copy with the promised marketing count."""
+    """Expand section quotas to match the promised marketing count."""
     promised = parse_promised_count(bible.title, bible.subtitle)
     planned = planned_use_count(bible.sections)
     if promised is None:
         return bible.model_copy(update={"promised_uses": planned})
 
-    if promised > planned * 5:
-        title, subtitle = rewrite_promised_number(
-            bible.title, bible.subtitle, planned)
-        return bible.model_copy(update={
-            "title": title, "subtitle": subtitle, "promised_uses": planned,
-        })
-
+    sections = list(bible.sections)
     if promised > planned:
-        sections = adjust_list_quotas(bible.sections, promised - planned)
-        return bible.model_copy(update={
-            "sections": sections, "promised_uses": promised,
-        })
+        sections = expand_sections_to_count(sections, promised)
+        planned = planned_use_count(sections)
+        bible = bible.model_copy(update={"sections": sections})
 
     return bible.model_copy(update={"promised_uses": promised})
 
@@ -217,6 +233,29 @@ def propagate_promised_count(bible: BookBible) -> None:
 def planned_use_count(sections: list[SectionPlan]) -> int:
     """Sum of full cards + quick uses the book will actually generate."""
     return sum(s.full_card_quota + s.list_quota for s in sections)
+
+
+def count_generated_entries(chapters: list[Chapter]) -> int:
+    """Count use_card + use_list entries actually present in chapter content."""
+    from bookforge.schemas import BlockType
+
+    total = 0
+    for ch in chapters:
+        for block in ch.blocks:
+            if block.type in (BlockType.use_card, BlockType.use_list):
+                total += len(block.entries or [])
+    return total
+
+
+def finalize_marketing_counts(bible: BookBible, chapters: list[Chapter]) -> None:
+    """Sync marketing copy to actual entries, never below the promised count."""
+    actual = count_generated_entries(chapters)
+    if actual <= 0:
+        return
+    floor = _promised(bible)
+    target = max(actual, floor) if floor > 0 else actual
+    bible.promised_uses = target
+    propagate_promised_count(bible)
 
 
 def _promised(bible: BookBible) -> int:

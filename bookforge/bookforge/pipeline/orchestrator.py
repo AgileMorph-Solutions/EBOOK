@@ -12,10 +12,20 @@ import structlog
 
 from bookforge.clients import llm
 from bookforge.config import settings
-from bookforge.errors import GeometryError, LayoutError
+from bookforge.errors import GeometryError, LayoutError, PageLimitError
 from bookforge.pipeline import (
     assemble, bible as bible_stage, checkpoints, content, content_guide, guide_images,
     images, ingest, layout_budget, qa,
+)
+from bookforge.pipeline.content_guardrails import finalize_marketing_counts
+from bookforge.pipeline.page_limits import (
+    allowed_page_range,
+    expand_chapters_for_pages,
+    is_acceptable_page_count,
+    is_within_page_range,
+    meets_page_floor,
+    scale_chapters_to_pages,
+    scale_images_for_chapters,
 )
 from bookforge.schemas import BookArtifact, BookBible, Chapter
 
@@ -23,11 +33,7 @@ log = structlog.get_logger(__name__)
 
 
 def _layout_faults(defects: list[dict], chapters: list[Chapter]) -> dict[int, list[str]]:
-    """Map audit overflow records to per-chapter rewrite instructions.
-
-    Keys look like "{ch}.{bi}" (entry), "essay:{ch}", "feature:{ch}.{bi}" —
-    anything with a parsable chapter index gets a concrete length budget so the
-    regeneration converges instead of guessing."""
+    """Map audit overflow records to per-chapter rewrite instructions."""
     faults: dict[int, list[str]] = {}
     for d in defects:
         key = str(d.get("entry") or "")
@@ -41,12 +47,32 @@ def _layout_faults(defects: list[dict], chapters: list[Chapter]) -> dict[int, li
             faults.setdefault(idx, []).append(
                 "the chapter-opener essay is too long for its pages even after "
                 "re-pagination — rewrite it at most 300 words, same substance")
+        elif key.startswith("chart:"):
+            faults.setdefault(idx, []).append(
+                "the reference chart has too few rows or bad layout — "
+                "regenerate the full chart with every planned row filled")
         else:
             faults.setdefault(idx, []).append(
                 f"the entry starting '{snippet}' cannot fit even a multi-page "
                 "layout — rewrite it tighter: intro ≤ 25 words, at most 5 steps "
                 "of ≤ 18 words each, ≤ 8 what_you_need items, variation/note "
                 "≤ 12 words each; keep every quantity and safety detail")
+    return faults
+
+
+def _vision_layout_faults(message: str, bible: BookBible) -> dict[int, list[str]]:
+    """Map vision QA chart/table defects to chapter regen faults."""
+    lower = message.lower()
+    if not any(k in lower for k in ("chart", "table", "reference", "swap", "row")):
+        return {}
+    faults: dict[int, list[str]] = {}
+    for sp in bible.specials:
+        if sp.kind != "chart":
+            continue
+        idx = sp.after_section
+        faults.setdefault(idx, []).append(
+            f"regenerate the chart '{sp.heading}' with EXACTLY {sp.rows} full rows "
+            f"in columns {', '.join(sp.columns)} — no sparse or single-row tables")
     return faults
 
 
@@ -74,6 +100,8 @@ def _assemble_with_layout_revise(
             )
         except LayoutError as exc:
             faults = _layout_faults(exc.defects, chapters)
+            if not faults:
+                faults = _vision_layout_faults(str(exc), book_bible)
             if not faults or attempt >= settings.max_layout_revisions:
                 raise
             stage(f"layout-revise ({attempt + 1})")
@@ -83,6 +111,142 @@ def _assemble_with_layout_revise(
                 chapters, book_bible, source, faults, registry_seed=chapters)
             chapters = layout_budget.trim_chapters(chapters, book_bible)
     raise AssertionError("unreachable")  # loop always returns or raises
+
+
+def _assemble_with_page_scale(
+    book_id: str,
+    book_bible: BookBible,
+    chapters: list[Chapter],
+    all_images: list,
+    qa_result,
+    *,
+    cover_key: str | None,
+    pro: dict | None,
+    source,
+    stage: Callable[[str], None],
+) -> BookArtifact:
+    """Assemble with layout repair; scale content to meet page floor/ceiling."""
+    target = book_bible.target_pages or 100
+    chapters_cur = chapters
+    images_cur = all_images
+    artifact: BookArtifact | None = None
+
+    for scale_attempt in range(settings.max_page_scale_revisions + 1):
+        artifact = _assemble_with_layout_revise(
+            book_id, book_bible, chapters_cur, images_cur, qa_result,
+            cover_key=cover_key, pro=pro, source=source, stage=stage,
+        )
+        pages = artifact.page_count
+        if is_acceptable_page_count(pages, target):
+            return artifact
+        if scale_attempt >= settings.max_page_scale_revisions:
+            lo, hi = allowed_page_range(target)
+            if pages < target:
+                raise PageLimitError(
+                    f"page count {pages} below minimum {target} after scaling",
+                    pages=pages, target=target, lo=lo, hi=hi,
+                )
+            warn = (
+                f"page count {pages} outside target range {lo}–{hi} "
+                f"after {scale_attempt} scale pass(es) — shipping with overshoot"
+            )
+            log.warning("page_scale_exhausted", pages=pages, target=target,
+                        lo=lo, hi=hi)
+            if artifact.qa:
+                artifact.qa.layout_issues.append(warn)
+            return artifact
+
+        if pages < target:
+            stage(f"page-expand ({scale_attempt + 1})")
+            expand_faults = {
+                s.index: [
+                    f"expand this section — the book must reach at least "
+                    f"{target} pages; add depth to headnotes and steps without "
+                    f"removing any {book_bible.profile.entry_schema.entry_noun if book_bible.profile else 'entry'}s",
+                ]
+                for s in book_bible.sections
+            }
+            chapters_cur = content.regenerate_guide_sections(
+                chapters_cur, book_bible, source, expand_faults,
+                registry_seed=chapters_cur,
+            )
+            chapters_cur, _ = expand_chapters_for_pages(
+                chapters_cur, book_bible,
+                current_pages=pages, target_pages=target,
+            )
+            content_guide.sync_card_image_briefs(chapters_cur, book_bible)
+            finalize_marketing_counts(book_bible, chapters_cur)
+            checkpoints.save_bible(book_id, book_bible)
+            checkpoints.save_chapters(book_id, chapters_cur)
+            images_cur, cover_key = guide_images.generate_all(
+                book_bible, chapters_cur, book_id,
+            )
+            checkpoints.save_images(book_id, images_cur)
+            log.info("page_scale_expand", attempt=scale_attempt + 1,
+                     pages_before=pages, target=target)
+            continue
+
+        stage(f"page-scale ({scale_attempt + 1})")
+        chapters_cur, removed = scale_chapters_to_pages(
+            chapters_cur, book_bible,
+            current_pages=pages, target_pages=target,
+        )
+        images_cur = scale_images_for_chapters(images_cur, chapters_cur)
+        content_guide.sync_card_image_briefs(chapters_cur, book_bible)
+        finalize_marketing_counts(book_bible, chapters_cur)
+        checkpoints.save_bible(book_id, book_bible)
+        checkpoints.save_chapters(book_id, chapters_cur)
+        checkpoints.save_images(book_id, images_cur)
+        # Fill any newly-needed image slots (briefs added after trim).
+        images_cur, cover_key = guide_images.generate_all(
+            book_bible, chapters_cur, book_id,
+        )
+        checkpoints.save_images(book_id, images_cur)
+        log.info("page_scale_trim", attempt=scale_attempt + 1,
+                 removed=removed, pages_before=pages, target=target)
+
+    raise AssertionError("unreachable")
+
+
+def _assemble_narrative_with_page_scale(
+    book_id: str,
+    book_bible: BookBible,
+    chapters: list[Chapter],
+    all_images: list,
+    qa_result,
+) -> BookArtifact:
+    """Narrative path: assemble and scale content if page count overshoots."""
+    target = book_bible.target_pages or 100
+    chapters_cur = chapters
+    images_cur = all_images
+    artifact: BookArtifact | None = None
+
+    for scale_attempt in range(settings.max_page_scale_revisions + 1):
+        artifact = assemble.assemble(
+            book_id, book_bible, chapters_cur, images_cur, qa_result,
+        )
+        pages = artifact.page_count
+        if is_within_page_range(pages, target):
+            return artifact
+        if scale_attempt >= settings.max_page_scale_revisions:
+            lo, hi = allowed_page_range(target)
+            warn = (
+                f"page count {pages} outside target range {lo}–{hi} "
+                f"after scaling — shipping best effort"
+            )
+            log.warning("page_scale_exhausted", pages=pages, target=target)
+            if artifact.qa:
+                artifact.qa.layout_issues.append(warn)
+            return artifact
+        chapters_cur, removed = scale_chapters_to_pages(
+            chapters_cur, book_bible,
+            current_pages=pages, target_pages=target,
+        )
+        images_cur = scale_images_for_chapters(images_cur, chapters_cur)
+        log.info("page_scale_trim", attempt=scale_attempt + 1,
+                 removed=removed, pages_before=pages)
+
+    raise AssertionError("unreachable")
 
 
 def run_book(
@@ -159,7 +323,9 @@ def run_book(
                 log.warning("qa_failed", grounded=qa_result.groundedness,
                             unsupported=len(qa_result.unsupported_claims))
             stage("layout")
-            artifact = assemble.assemble(book_id, book_bible, chapters, all_images, qa_result)
+            artifact = _assemble_narrative_with_page_scale(
+                book_id, book_bible, chapters, all_images, qa_result,
+            )
             log.info("run_done", book_id=book_id, pages=artifact.page_count,
                      mb=artifact.file_size_mb,
                      qa_passed=artifact.qa.passed if artifact.qa else None)
@@ -195,9 +361,18 @@ def run_book(
                         grounded=qa_result.groundedness,
                         prose=qa_result.prose_quality_score,
                         audit_issues=len(qa_result.layout_issues))
+        content_guide.sync_card_image_briefs(chapters, book_bible)
+        finalize_marketing_counts(book_bible, chapters)
+        checkpoints.save_bible(book_id, book_bible)
         checkpoints.save_chapters(book_id, chapters)
 
     if book_kind == "practical_guide":
+        # Resume path: still sync briefs + marketing counts before images.
+        if resuming:
+            content_guide.sync_card_image_briefs(chapters, book_bible)
+            finalize_marketing_counts(book_bible, chapters)
+            checkpoints.save_bible(book_id, book_bible)
+            checkpoints.save_chapters(book_id, chapters)
         stage("images")
         all_images, cover_key = guide_images.generate_all(
             book_bible, chapters, book_id,
@@ -212,7 +387,7 @@ def run_book(
             pro = None
         stage("layout")
         checkpoints.clear_pdf(book_id)
-        artifact = _assemble_with_layout_revise(
+        artifact = _assemble_with_page_scale(
             book_id, book_bible, chapters, all_images, qa_result,
             cover_key=cover_key, pro=pro, source=source, stage=stage,
         )

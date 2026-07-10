@@ -198,12 +198,26 @@ def _card_spec(profile: EditorialProfile) -> str:
     return "\n".join(lines)
 
 
-def _storyboard_spec(profile: EditorialProfile, *, pamphlet: bool = False) -> str:
+def _storyboard_spec(
+    profile: EditorialProfile,
+    *,
+    pamphlet: bool = False,
+    page_budget: int = 99,
+) -> str:
     spec = templates.spec_for(profile.structure_template)
     if not spec.has_opener_essay:
         return "- essay, sidebars, pull_quote: leave empty."
+    if pamphlet or page_budget <= 2:
+        return (
+            "- essay: the chapter-opener essay, 120-180 words, written like a top "
+            "magazine feature lede — grounded in the source material with at least "
+            "two specific, concrete details (names, dates, places, numbers) drawn "
+            "from it. No throat-clearing; start inside the subject.\n"
+            "- sidebars: leave empty.\n"
+            "- pull_quote: leave empty (tight page budget — no pull-quote page)."
+        )
     features = ", ".join(profile.feature_menu) or "a short contextual note"
-    essay_words = "120-180 words" if pamphlet else "300-500 words"
+    essay_words = "300-500 words"
     return (
         f"- essay: the chapter-opener essay, {essay_words}, written like a top "
         "magazine feature lede — grounded in the source material with at least "
@@ -213,7 +227,7 @@ def _storyboard_spec(profile: EditorialProfile, *, pamphlet: bool = False) -> st
         "heading (2-5 words), and a body of 40-80 words with one concrete "
         "detail.\n"
         "- pull_quote: one striking line lifted or distilled from the essay, "
-        "under 20 words."
+        "at most 18 words; never longer."
     )
 
 
@@ -373,7 +387,9 @@ def write_section(
             noun=es.entry_noun,
             card_spec=_card_spec(profile),
             storyboard_spec=_storyboard_spec(
-                profile, pamphlet=bible.target_pages <= 15,
+                profile,
+                pamphlet=bible.target_pages <= 15,
+                page_budget=section.page_budget,
             ),
             source_policy=_source_policy(profile),
             planned_entries=_planned_entries_block(section),
@@ -404,7 +420,7 @@ def write_section(
         blocks.append(ContentBlock(
             type=BlockType.history, heading=section.title,
             text=draft.essay.strip()))
-        if draft.pull_quote.strip():
+        if draft.pull_quote.strip() and section.page_budget > 2:
             blocks.append(ContentBlock(
                 type=BlockType.pull_quote, text=draft.pull_quote.strip()))
 

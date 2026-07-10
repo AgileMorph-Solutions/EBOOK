@@ -16,10 +16,14 @@ import structlog
 from bookforge import safety
 from bookforge.clients import storage
 from bookforge.config import settings
-from bookforge.errors import GeometryError, LayoutError
+from bookforge.errors import GeometryError, LayoutError, PageLimitError
 from bookforge.layout import build, guide, render
 from bookforge.pipeline import layout_budget, layout_qa, pdf_geometry
-from bookforge.pipeline.page_limits import allowed_page_range, is_within_page_range
+from bookforge.pipeline.page_limits import (
+    allowed_page_range,
+    check_page_count,
+    is_within_page_range,
+)
 from bookforge.schemas import BookArtifact, BookBible, Chapter, GeneratedImage, QAResult
 
 log = structlog.get_logger(__name__)
@@ -213,9 +217,9 @@ def rerender(book_id: str) -> BookArtifact:
         log.error("rerender_geometry_failed", book_id=book_id, issues=geometry_issues[:5])
         raise GeometryError("re-render geometry gate failed: " + " | ".join(geometry_issues[:3]))
     key = f"books/{book_id}/interior.pdf"
-    storage.put(key, pdf, "application/pdf")
     pages = _page_count(pdf)
     size_mb = round(len(pdf) / 1_048_576, 2)
+    storage.put(key, pdf, "application/pdf")
     log.info("rerendered", book_id=book_id, pages=pages, mb=size_mb)
     return BookArtifact(book_id=book_id, interior_pdf_key=key,
                         page_count=pages, file_size_mb=size_mb,
@@ -317,6 +321,7 @@ def assemble(
             "— recompress images"
         )
     target = bible.target_pages or budget_pages or pages
+    check_page_count(pages, target)
     lo, hi = allowed_page_range(target)
     log.info(
         "page_limit_check",

@@ -7,7 +7,11 @@ from __future__ import annotations
 
 import re
 
+import structlog
+
 from bookforge.schemas import BookBible, Chapter, SectionPlan
+
+log = structlog.get_logger(__name__)
 
 # NB: gap words must match hyphenated words (e.g. "200 Best-Loved Kitchen Tips") —
 # plain \w+ silently failed there, so the subtitle promise was never parsed and
@@ -177,19 +181,50 @@ def rewrite_promised_number(
 
 
 def reconcile_promise_book(bible: BookBible) -> BookBible:
-    """Expand section quotas to match the promised marketing count."""
+    """Expand section quotas toward the promised count, then cap to page ceiling."""
+    from bookforge.pipeline.page_limits import hard_page_ceiling, max_planned_entries
+
     promised = parse_promised_count(bible.title, bible.subtitle)
     planned = planned_use_count(bible.sections)
     if promised is None:
         return bible.model_copy(update={"promised_uses": planned})
 
     sections = list(bible.sections)
+    title, subtitle = bible.title, bible.subtitle
     if promised > planned:
         sections = expand_sections_to_count(sections, promised)
         planned = planned_use_count(sections)
-        bible = bible.model_copy(update={"sections": sections})
 
-    return bible.model_copy(update={"promised_uses": promised})
+    if bible.profile and bible.book_kind == "practical_guide":
+        target = bible.target_pages or 100
+        pamphlet = target <= 15
+        hi = hard_page_ceiling(target)
+        cap = max_planned_entries(
+            hi, bible.profile, len(sections) or 1, pamphlet=pamphlet,
+        )
+        if planned > cap:
+            sections = shrink_sections_to_count(sections, cap)
+            planned = planned_use_count(sections)
+            title, subtitle = rewrite_promised_number(title, subtitle, planned)
+            log.info(
+                "reconcile_promise_capped",
+                promised=promised,
+                fitted=planned,
+                ceiling=hi,
+            )
+            return bible.model_copy(update={
+                "sections": sections,
+                "title": title,
+                "subtitle": subtitle,
+                "promised_uses": planned,
+            })
+
+    return bible.model_copy(update={
+        "sections": sections,
+        "title": title,
+        "subtitle": subtitle,
+        "promised_uses": promised,
+    })
 
 
 def _rewrite_counts(text: str, target: int) -> str:

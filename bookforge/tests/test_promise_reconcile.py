@@ -7,7 +7,7 @@ from bookforge.pipeline.content_guardrails import (
     rewrite_promised_number,
     shrink_sections_to_count,
 )
-from bookforge.schemas import ArtStyle, BookBible, SectionPlan, VoiceStyle
+from bookforge.schemas import ArtStyle, BookBible, EditorialProfile, EntrySchema, SectionPlan, VoiceStyle
 
 
 def _minimal_bible(**kwargs) -> BookBible:
@@ -64,10 +64,18 @@ def test_reconcile_promise_book_expands_when_promised_high():
         subtitle="",
         sections=sections,
         target_pages=12,
+        profile=EditorialProfile(
+            genre="Home handbook",
+            audience="seniors",
+            angle="cheap DIY",
+            entry_schema=EntrySchema(entry_noun="hack"),
+            structure_template="tips_cards",
+        ),
     )
     out = reconcile_promise_book(bible)
-    assert out.promised_uses == 900
-    assert planned_use_count(out.sections) == 900
+    assert out.promised_uses < 900
+    assert planned_use_count(out.sections) == out.promised_uses
+    assert "900" not in out.title
 
 
 def test_rewrite_promised_number():

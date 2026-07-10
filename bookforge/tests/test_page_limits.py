@@ -8,6 +8,8 @@ from bookforge.pipeline.bible import (
     _cap_density,
     _cap_sections_to_page_ceiling,
     _guide_density,
+    _normalize_user_toc,
+    _parse_toc_lines,
 )
 from bookforge.pipeline.content_guardrails import (
     planned_use_count,
@@ -20,6 +22,7 @@ from bookforge.pipeline.page_limits import (
     allowed_page_range,
     check_page_count,
     hard_page_ceiling,
+    is_acceptable_page_count,
     is_within_page_range,
     max_planned_entries,
     page_range_prompt_suffix,
@@ -56,6 +59,17 @@ def _pest_profile() -> EditorialProfile:
     )
 
 
+def _essay_profile() -> EditorialProfile:
+    return EditorialProfile(
+        genre="cookbook",
+        audience="seniors",
+        angle="nostalgic",
+        entry_schema=EntrySchema(entry_noun="recipe"),
+        structure_template="essay_entries",
+        pages_per_entry=2.0,
+    )
+
+
 def _minimal_bible(**kwargs) -> BookBible:
     defaults = dict(
         title="Test Book",
@@ -78,15 +92,19 @@ def _minimal_bible(**kwargs) -> BookBible:
 
 
 def test_allowed_page_range_target_300():
-    assert allowed_page_range(300) == (300, 320)
+    assert allowed_page_range(300) == (300, 300)
+
+
+def test_allowed_page_range_target_200():
+    assert allowed_page_range(200) == (200, 200)
 
 
 def test_allowed_page_range_target_100():
-    assert allowed_page_range(100) == (100, 120)
+    assert allowed_page_range(100) == (100, 100)
 
 
 def test_allowed_page_range_target_5():
-    assert allowed_page_range(5) == (5, 25)
+    assert allowed_page_range(5) == (5, 5)
 
 
 def test_meets_page_floor():
@@ -96,56 +114,45 @@ def test_meets_page_floor():
 
 
 def test_is_acceptable_page_count():
-    from bookforge.pipeline.page_limits import is_acceptable_page_count
     assert is_acceptable_page_count(160, 160)
-    assert is_acceptable_page_count(200, 160)  # overshoot OK when count forces length
-    assert not is_acceptable_page_count(116, 160)
-    assert not is_acceptable_page_count(400, 160)
+    assert is_acceptable_page_count(120, 160)  # undershoot OK
+    assert not is_acceptable_page_count(161, 160)
+    assert not is_acceptable_page_count(301, 300)
+    assert is_acceptable_page_count(300, 300)
 
 
 def test_hard_ceiling_never_exceeds_absolute_max():
     assert hard_page_ceiling(300) == ABSOLUTE_PAGE_CEILING
-    assert hard_page_ceiling(290) == 310
+    assert hard_page_ceiling(290) == 290
+    assert hard_page_ceiling(400) == ABSOLUTE_PAGE_CEILING
 
 
 def test_check_page_count_in_range():
     check_page_count(100, 100)
-    check_page_count(320, 300)
+    check_page_count(99, 100)
+    check_page_count(300, 300)
 
 
-def test_check_page_count_raises_outside_range():
+def test_check_page_count_raises_over_ceiling():
     with pytest.raises(PageLimitError) as exc:
-        check_page_count(99, 100)
-    assert exc.value.pages == 99
-    assert exc.value.lo == 100
-    assert exc.value.hi == 120
+        check_page_count(201, 200)
+    assert exc.value.pages == 201
+    assert exc.value.hi == 200
+
+    with pytest.raises(PageLimitError):
+        check_page_count(301, 300)
 
 
 def test_max_planned_entries_uses_target_not_hi():
-    profile = EditorialProfile(
-        genre="cookbook",
-        audience="seniors",
-        angle="nostalgic",
-        entry_schema=EntrySchema(entry_noun="recipe"),
-        structure_template="essay_entries",
-        pages_per_entry=2.0,
-    )
+    profile = _essay_profile()
     at_75 = max_planned_entries(75, profile, 11, pamphlet=False)
     content_at_target = 75 - 13
-    content_at_hi = 100 - 13
     assert at_75 < 365
-    assert content_at_target < content_at_hi
+    assert content_at_target > 0
 
 
 def test_365_recipes_scaled_to_target_pages():
-    profile = EditorialProfile(
-        genre="cookbook",
-        audience="seniors",
-        angle="nostalgic",
-        entry_schema=EntrySchema(entry_noun="recipe"),
-        structure_template="essay_entries",
-        pages_per_entry=2.0,
-    )
+    profile = _essay_profile()
     sections = [
         SectionPlan(index=i, title=f"S{i}", full_card_quota=30, list_quota=0)
         for i in range(1, 12)
@@ -203,6 +210,25 @@ def test_cap_sections_to_page_ceiling_shrinks_oversized_plan():
     assert planned_use_count(capped) < planned_use_count(sections)
 
 
+def test_cap_sections_reduces_section_count():
+    profile = _essay_profile()
+    sections = [
+        SectionPlan(
+            index=i, title=f"S{i}", full_card_quota=6, list_quota=0,
+            page_budget=20, image_quota=6,
+        )
+        for i in range(1, 21)
+    ]
+    capped = _cap_sections_to_page_ceiling(
+        sections, 75, profile, pamphlet=False,
+    )
+    from bookforge.pipeline.page_limits import estimate_guide_pages
+
+    assert len(capped) < len(sections)
+    assert estimate_guide_pages(capped, pamphlet=False) <= hard_page_ceiling(75)
+    assert all(s.image_quota <= s.full_card_quota for s in capped)
+
+
 def test_expand_sections_to_count():
     from bookforge.pipeline.content_guardrails import expand_sections_to_count
     sections = [
@@ -240,7 +266,7 @@ def test_finalize_marketing_counts_never_below_promised():
     assert "100" in bible.subtitle
 
 
-def test_scale_chapters_respects_promised_floor():
+def test_scale_chapters_trims_overshoot():
     entries = [UseEntry(number=i, title=f"Tip {i}") for i in range(1, 21)]
     ch = Chapter(
         index=1, title="Section 1",
@@ -294,7 +320,7 @@ def test_scale_images_for_chapters_drops_orphan_refs():
     assert "1.99" not in refs
 
 
-def test_reconcile_promise_expands_to_promised_count():
+def test_reconcile_promise_capped_to_page_ceiling():
     sections = [
         SectionPlan(index=1, title="Kitchen", full_card_quota=7, list_quota=0),
     ]
@@ -306,12 +332,37 @@ def test_reconcile_promise_expands_to_promised_count():
         profile=_pest_profile().model_copy(update={"pages_per_entry": 2.0}),
     )
     out = reconcile_promise_book(bible)
-    assert out.promised_uses == 365
-    assert planned_use_count(out.sections) == 365
-    assert "365" in out.title
+    assert planned_use_count(out.sections) < 365
+    assert out.promised_uses == planned_use_count(out.sections)
+    assert "365" not in out.title
 
 
-def test_assemble_does_not_fail_oversized_pdf(monkeypatch):
+def test_parse_toc_lines_groups_recipes_under_sections():
+    toc = [
+        "Section 1: Breakfast",
+        "Pancakes",
+        "Eggs",
+        "Section 2: Lunch",
+        "Soup",
+    ]
+    parsed = _parse_toc_lines(toc)
+    assert len(parsed) == 2
+    assert parsed[0].title == "Section 1: Breakfast"
+    assert [e.title for e in parsed[0].entries] == ["Pancakes", "Eggs"]
+
+
+def test_normalize_user_toc_collapses_recipe_list():
+    toc = ["Section 1: Starters"] + [f"Recipe {i}" for i in range(1, 51)]
+    toc += ["Section 2: Mains"] + [f"Dish {i}" for i in range(1, 51)]
+    normalized = _normalize_user_toc(
+        toc, 300, _essay_profile(), pamphlet=False,
+    )
+    assert normalized is not None
+    assert len(normalized) <= 60
+    assert sum(len(s.entries) for s in normalized) >= 50
+
+
+def test_assemble_fails_oversized_pdf(monkeypatch):
     from bookforge.pipeline import assemble
     from bookforge.schemas import QAResult
 
@@ -330,14 +381,40 @@ def test_assemble_does_not_fail_oversized_pdf(monkeypatch):
     monkeypatch.setattr(assemble.pdf_geometry, "check_pdf_geometry", lambda pdf: [])
     monkeypatch.setattr(assemble.storage, "put", lambda *a, **k: None)
 
-    art = assemble.assemble("book1", bible, [], [], qa)
-    assert art.page_count == 37
-    assert not is_within_page_range(37, 5)
-    assert any("outside target range" in i for i in art.qa.layout_issues)
+    with pytest.raises(PageLimitError):
+        assemble.assemble("book1", bible, [], [], qa)
 
 
-def test_page_range_prompt_mentions_scaling():
+def test_orchestrator_raises_on_overshoot_after_scale(monkeypatch):
+    from bookforge.pipeline import orchestrator
+    from bookforge.schemas import BookArtifact, QAResult
+
+    bible = _minimal_bible(target_pages=50, sections=[])
+    qa = QAResult(groundedness=1.0, passed=True)
+
+    def _fake_assemble(*args, **kwargs):
+        return BookArtifact(
+            book_id="b1", interior_pdf_key="k", page_count=80,
+            file_size_mb=1.0, qa=qa,
+        )
+
+    monkeypatch.setattr(orchestrator, "_assemble_with_layout_revise", _fake_assemble)
+    monkeypatch.setattr(orchestrator.settings, "max_page_scale_revisions", 0)
+
+    with pytest.raises(PageLimitError):
+        orchestrator._assemble_with_page_scale(
+            "b1", bible, [], [], qa,
+            cover_key=None, pro=None, source=None, stage=lambda s: None,
+        )
+
+
+def test_page_range_prompt_mentions_hard_maximum():
     text = page_range_prompt_suffix(75)
     assert "75" in text
-    assert "MINIMUM" in text
-    assert "promised count" in text.lower()
+    assert "hard maximum" in text.lower()
+    assert "MINIMUM" not in text
+
+
+def test_is_within_page_range_undershoot_not_in_band():
+    assert not is_within_page_range(99, 100)
+    assert is_within_page_range(100, 100)

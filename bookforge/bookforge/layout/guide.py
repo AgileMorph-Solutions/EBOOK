@@ -306,22 +306,33 @@ class GuideDirector:
         for i, chunk in enumerate(chunks):
             folio = self._pos()
             body = "".join(f"<p>{_esc(p)}</p>" for p in chunk)
-            quote = (f"<blockquote>{_esc(pull_quote)}</blockquote>"
-                     if pull_quote and i == len(chunks) - 1 else "")
             if i == 0:
                 head = (f'<div class="ghead"><div class="eyebrow">{_esc(eyebrow)}</div>'
                         f'<div class="gh2">{_esc(heading)}</div></div>')
                 cls = "page gtext dropcap essaypage"
-                fill = ("gbodyfill essay-body fill-center" if single
+                fill = ("gbodyfill essay-body fill-center" if single and not pull_quote
                         else "gbodyfill essay-body")
             else:
                 head = f'<div class="ghead"><div class="eyebrow">{_esc(eyebrow)}</div></div>'
                 cls = "page gtext essaypage continued"
                 fill = "gbodyfill essay-body fill-start"
-            inner = (f'{head}<div class="{fill}">{body}{quote}</div>')
+            inner = (f'{head}<div class="{fill}">{body}</div>')
             attr = self._entry_attr(f"essay:{key}") if key else ""
             self.pages.append(
                 f'<section class="{cls}"{attr}>{self._chrome(folio)}'
+                f'<div class="gbody-box"><div class="gfit">{inner}</div></div></section>')
+
+        # Pull quotes on their own page so a full essay tail never clips the quote
+        # off the page bottom (vision QA blocking defect on long essays).
+        if pull_quote:
+            folio = self._pos()
+            head = f'<div class="ghead"><div class="eyebrow">{_esc(eyebrow)}</div></div>'
+            inner = (f'{head}<div class="gbodyfill essay-body essay-pull fill-center">'
+                     f'<blockquote>{_esc(pull_quote)}</blockquote></div>')
+            attr = self._entry_attr(f"essay:{key}") if key else ""
+            self.pages.append(
+                f'<section class="page gtext essaypage essay-pull"{attr}>'
+                f'{self._chrome(folio)}'
                 f'<div class="gbody-box"><div class="gfit">{inner}</div></div></section>')
 
     def feature_page(self, eyebrow: str, boxes: list[tuple[str, str]],
@@ -815,6 +826,7 @@ def build_practical_html(
     for ch in chapters:
         ci += 1
         plan = section_plans.get(ch.index)
+        tight_budget = bool(plan and plan.page_budget <= 2)
         kicker = plan.summary if plan and plan.summary else ""
         history_block = None
         pull_quote = ""
@@ -839,10 +851,10 @@ def build_practical_html(
                                for b in ch.blocks)
             essay_eyebrow = part if part != "Chapters" else profile.genre.title()
             d.essay_page(essay_eyebrow, ch.title, history_block.text,
-                         pull_quote="" if has_sidebars else pull_quote,
+                         pull_quote="" if has_sidebars or tight_budget else pull_quote,
                          key=str(ch.index),
                          squeeze=lvl(f"essay:{ch.index}", 0))
-            quote_used = not has_sidebars
+            quote_used = not has_sidebars and not tight_budget
 
         for bi, b in enumerate(ch.blocks):
             ref = f"{ch.index}.{bi}"

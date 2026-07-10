@@ -232,6 +232,19 @@ def test_essay_continuation_no_repeated_title():
     assert "(continued)" not in d.pages[1]
 
 
+def test_essay_pull_quote_on_own_page_not_inline():
+    text = " ".join(["Cast iron rewards patience and punishes neglect."] * 90)
+    quote = "You brought the dish full and came home with it empty."
+    d = GuideDirector(_bible())
+    d.essay_page("Seasoning", "Why It Works", text, pull_quote=quote, key="3")
+    essay_pages = [p for p in d.pages if 'data-entry="essay:3"' in p]
+    assert len(essay_pages) >= 2
+    assert all("<blockquote>" not in p or "essay-pull" in p for p in essay_pages[:-1])
+    assert "essay-pull" in essay_pages[-1]
+    assert quote in essay_pages[-1]
+    assert essay_pages[-1].count("<blockquote>") == 1
+
+
 def test_essay_page_tagged_and_squeeze_paginates_more():
     text = " ".join(["Cast iron rewards patience and punishes neglect."] * 90)
     d1 = GuideDirector(_bible())

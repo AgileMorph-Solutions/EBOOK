@@ -21,13 +21,14 @@ from bookforge.pipeline.content_guardrails import finalize_marketing_counts
 from bookforge.pipeline.page_limits import (
     allowed_page_range,
     expand_chapters_for_pages,
+    hard_page_ceiling,
     is_acceptable_page_count,
     is_within_page_range,
     meets_page_floor,
     scale_chapters_to_pages,
     scale_images_for_chapters,
 )
-from bookforge.schemas import BookArtifact, BookBible, Chapter
+from bookforge.schemas import BlockType, BookArtifact, BookBible, Chapter
 
 log = structlog.get_logger(__name__)
 
@@ -60,12 +61,28 @@ def _layout_faults(defects: list[dict], chapters: list[Chapter]) -> dict[int, li
     return faults
 
 
-def _vision_layout_faults(message: str, bible: BookBible) -> dict[int, list[str]]:
-    """Map vision QA chart/table defects to chapter regen faults."""
+def _vision_layout_faults(
+    message: str,
+    bible: BookBible,
+    chapters: list[Chapter] | None = None,
+) -> dict[int, list[str]]:
+    """Map vision QA defects to chapter regen faults."""
     lower = message.lower()
+    faults: dict[int, list[str]] = {}
+    if any(k in lower for k in ("pull-quote", "pull quote", "blockquote")) and any(
+        k in lower for k in ("clip", "clipped", "cut off", "overflow", "page edge")
+    ):
+        for ch in chapters or []:
+            has_essay = any(b.type == BlockType.history for b in ch.blocks)
+            has_quote = any(b.type == BlockType.pull_quote for b in ch.blocks)
+            if has_essay and has_quote:
+                faults.setdefault(ch.index, []).append(
+                    "the chapter-opener essay is too long — rewrite it at most "
+                    "280 words and shorten the pull quote to under 18 words")
+        if faults:
+            return faults
     if not any(k in lower for k in ("chart", "table", "reference", "swap", "row")):
         return {}
-    faults: dict[int, list[str]] = {}
     for sp in bible.specials:
         if sp.kind != "chart":
             continue
@@ -101,7 +118,7 @@ def _assemble_with_layout_revise(
         except LayoutError as exc:
             faults = _layout_faults(exc.defects, chapters)
             if not faults:
-                faults = _vision_layout_faults(str(exc), book_bible)
+                faults = _vision_layout_faults(str(exc), book_bible, chapters)
             if not faults or attempt >= settings.max_layout_revisions:
                 raise
             stage(f"layout-revise ({attempt + 1})")
@@ -140,20 +157,18 @@ def _assemble_with_page_scale(
         if is_acceptable_page_count(pages, target):
             return artifact
         if scale_attempt >= settings.max_page_scale_revisions:
-            lo, hi = allowed_page_range(target)
-            if pages < target:
+            hi = hard_page_ceiling(target)
+            if pages > hi:
+                lo, _ = allowed_page_range(target)
                 raise PageLimitError(
-                    f"page count {pages} below minimum {target} after scaling",
+                    f"page count {pages} exceeds hard maximum {hi} after scaling",
                     pages=pages, target=target, lo=lo, hi=hi,
                 )
-            warn = (
-                f"page count {pages} outside target range {lo}–{hi} "
-                f"after {scale_attempt} scale pass(es) — shipping with overshoot"
+            log.warning(
+                "page_scale_undershoot",
+                pages=pages, target=target,
+                msg="shipping below target after expand attempts",
             )
-            log.warning("page_scale_exhausted", pages=pages, target=target,
-                        lo=lo, hi=hi)
-            if artifact.qa:
-                artifact.qa.layout_issues.append(warn)
             return artifact
 
         if pages < target:
@@ -226,17 +241,21 @@ def _assemble_narrative_with_page_scale(
             book_id, book_bible, chapters_cur, images_cur, qa_result,
         )
         pages = artifact.page_count
-        if is_within_page_range(pages, target):
+        if is_acceptable_page_count(pages, target):
             return artifact
         if scale_attempt >= settings.max_page_scale_revisions:
-            lo, hi = allowed_page_range(target)
-            warn = (
-                f"page count {pages} outside target range {lo}–{hi} "
-                f"after scaling — shipping best effort"
+            hi = hard_page_ceiling(target)
+            if pages > hi:
+                lo, _ = allowed_page_range(target)
+                raise PageLimitError(
+                    f"page count {pages} exceeds hard maximum {hi} after scaling",
+                    pages=pages, target=target, lo=lo, hi=hi,
+                )
+            log.warning(
+                "page_scale_undershoot",
+                pages=pages, target=target,
+                msg="shipping below target after scaling",
             )
-            log.warning("page_scale_exhausted", pages=pages, target=target)
-            if artifact.qa:
-                artifact.qa.layout_issues.append(warn)
             return artifact
         chapters_cur, removed = scale_chapters_to_pages(
             chapters_cur, book_bible,

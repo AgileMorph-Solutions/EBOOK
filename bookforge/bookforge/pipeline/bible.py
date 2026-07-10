@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import structlog
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -27,12 +28,15 @@ from bookforge.layout import theme
 from bookforge.pipeline import templates
 from bookforge.pipeline.content_guardrails import (
     expand_sections_to_count, parse_promised_count, planned_use_count,
-    propagate_promised_count, reconcile_promise, shrink_sections_to_count,
+    propagate_promised_count, reconcile_promise, rewrite_promised_number,
+    shrink_sections_to_count,
 )
 from bookforge.pipeline.page_limits import (
     allowed_page_range,
     estimate_guide_pages,
+    hard_page_ceiling,
     max_planned_entries,
+    max_sections_for_target,
     page_range_prompt_suffix,
 )
 from bookforge.schemas import (
@@ -520,12 +524,10 @@ STRUCTURE (follow this template): {spine}.
 Chapter rhythm: {rhythm}.
 
 Produce:
-- title + subtitle that honor the client's topic wording. PROMISED COUNT IS \
-SACRED: if the title or subtitle names a number (e.g. 100 recipes), plan \
-EXACTLY that many {entry_noun}s — never rewrite the count downward. \
-target_pages ({pages}) is a MINIMUM page count; the book may exceed it when \
-the promised count requires more pages. The book must contain EXACTLY the \
-count you promise — one honest number, used everywhere.
+- title + subtitle that honor the client's topic wording. If the title names a \
+count (e.g. 100 recipes), plan only as many {entry_noun}s as fit within the \
+hard page maximum ({pages} pages — never exceed it). State the fitted count \
+honestly in title/subtitle when the source asks for more than fits.
 - audience: {audience}. tone: fitting the angle — {angle}.
 - art_style: one coherent photographic/illustration look for the whole book,
   matched to the topic and era; negative_prompt must include "no text, no
@@ -782,10 +784,10 @@ def _cap_sections_to_page_ceiling(
     pamphlet: bool,
     min_entries: int = 0,
 ) -> list[SectionPlan]:
-    """Trim per-section budgets to fit the ceiling; never below min_entries."""
-    _, hi = allowed_page_range(target_pages)
+    """Trim per-section budgets and section count to fit the hard page ceiling."""
+    hi = hard_page_ceiling(target_pages)
     max_entries = max_planned_entries(
-        target_pages, profile, len(sections), pamphlet=pamphlet,
+        hi, profile, len(sections) or 1, pamphlet=pamphlet,
     )
     planned = planned_use_count(sections)
     cap = max(max_entries, min_entries)
@@ -798,6 +800,21 @@ def _cap_sections_to_page_ceiling(
         )
 
     out = [s.model_copy() for s in sections]
+    for s in out:
+        if s.image_quota > s.full_card_quota:
+            s.image_quota = s.full_card_quota
+
+    while len(out) > 1 and estimate_guide_pages(out, pamphlet=pamphlet) > hi:
+        last = out.pop()
+        prev = out[-1]
+        prev.full_card_quota += last.full_card_quota
+        prev.list_quota += last.list_quota
+        prev.page_budget += last.page_budget
+        prev.image_quota = min(prev.image_quota + last.image_quota,
+                               prev.full_card_quota)
+        if last.planned_entries:
+            prev.planned_entries = (prev.planned_entries or []) + last.planned_entries
+
     while estimate_guide_pages(out, pamphlet=pamphlet) > hi:
         reduced = False
         for s in sorted(out, key=lambda x: x.page_budget, reverse=True):
@@ -934,6 +951,85 @@ def _enforce_toc_sections(
                 entries=[],
             ))
     return enforced
+
+
+_TOC_SECTION_HDR = re.compile(
+    r"^(?:section\s+\d+\s*:|part\s+\d+\s*:)", re.IGNORECASE,
+)
+_TOC_SKIP = frozenset({
+    "subtitle", "what's inside", "whats inside", "bonus pages",
+    "promise", "ideal length", "recipe count", "why this should exist",
+})
+
+
+def _is_toc_section_header(line: str) -> bool:
+    s = line.strip()
+    if _TOC_SECTION_HDR.match(s):
+        return True
+    return s.lower().startswith("section ") and ":" in s
+
+
+def _parse_toc_lines(toc: list[str]) -> list[_BaseSection]:
+    """Parse a flat TOC into section headers with recipe/entry lines."""
+    sections: list[_BaseSection] = []
+    cur: _BaseSection | None = None
+    for raw in toc:
+        line = raw.strip()
+        if not line or line.lower() in _TOC_SKIP:
+            continue
+        if _is_toc_section_header(line):
+            cur = _BaseSection(title=line, summary="", entries=[])
+            sections.append(cur)
+        else:
+            if cur is None:
+                cur = _BaseSection(title="Recipes", summary="", entries=[])
+                sections.append(cur)
+            cur.entries.append(_EntryBrief(title=line, brief=""))
+    return sections
+
+
+def _merge_base_sections_to_limit(
+    sections: list[_BaseSection], limit: int,
+) -> list[_BaseSection]:
+    if len(sections) <= limit:
+        return sections
+    out = sections[: limit - 1]
+    merged = sections[limit - 1].model_copy(deep=True)
+    for s in sections[limit:]:
+        merged.entries.extend(s.entries)
+    out.append(merged)
+    return out
+
+
+def _normalize_user_toc(
+    toc: list[str],
+    target_pages: int,
+    profile: EditorialProfile,
+    *,
+    pamphlet: bool,
+) -> list[_BaseSection] | None:
+    """Collapse recipe-list TOCs into page-feasible sections with planned entries."""
+    max_secs = max_sections_for_target(target_pages, profile, pamphlet=pamphlet)
+    if len(toc) <= max_secs:
+        headers = sum(1 for t in toc if _is_toc_section_header(t))
+        if headers >= 2 or len(toc) <= max(6, max_secs // 2):
+            return None
+
+    parsed = _parse_toc_lines(toc)
+    if not parsed:
+        return None
+    if not any(s.entries for s in parsed) and len(parsed) <= max_secs:
+        return None
+
+    merged = _merge_base_sections_to_limit(parsed, max_secs)
+    log.info(
+        "user_toc_normalized",
+        raw_lines=len(toc),
+        sections=len(merged),
+        entries=sum(len(s.entries) for s in merged),
+        max_sections=max_secs,
+    )
+    return merged
 
 
 def _is_cookbookish(
@@ -1122,14 +1218,24 @@ def build_bible(
         pamphlet=pamphlet,
         promised=promised_hint,
     )
-    # When user supplies TOC, pin base section count to that length.
+    normalized_toc_bases: list[_BaseSection] | None = None
     if toc:
+        normalized_toc_bases = _normalize_user_toc(
+            toc, target_pages, profile, pamphlet=pamphlet,
+        )
+    if normalized_toc_bases is not None:
+        base_lo = base_hi = len(normalized_toc_bases)
+        base_target = len(normalized_toc_bases)
+        guide_toc_block = _guide_toc_block([s.title for s in normalized_toc_bases])
+    elif toc:
         base_lo = base_hi = len(toc)
         base_target = len(toc)
+        guide_toc_block = _guide_toc_block(toc)
     else:
         base_target = density.base_sections
         base_lo = max(4, base_target - 1)
         base_hi = base_target + 2
+        guide_toc_block = ""
     tiers_per = max(1, profile.tiers)
     planned_estimate = (base_target * tiers_per
                         * (density.cards_per_section + density.list_quota))
@@ -1139,7 +1245,6 @@ def build_bible(
         savings_note = ("\nCharts may compare costs and name realistic savings; "
                         "keep every number honest.")
 
-    guide_toc_block = _guide_toc_block(toc)
     page_limit_note = page_range_prompt_suffix(target_pages)
     draft = llm.structured(
         _GUIDE_PROMPT_TPL.format(
@@ -1169,13 +1274,20 @@ def build_bible(
         model=settings.content_model, max_tokens=16000,
     )
 
-    if toc:
+    if normalized_toc_bases is not None:
+        draft = draft.model_copy(update={"base_sections": normalized_toc_bases})
+        log.info("guide_toc_normalized",
+                 sections=len(normalized_toc_bases),
+                 target_pages=target_pages)
+    elif toc:
         enforced = _enforce_toc_sections(draft.base_sections, toc)
         draft = draft.model_copy(update={"base_sections": enforced})
         log.info("guide_toc_enforced", titles=[s.title for s in enforced])
 
     base_sections = _critique_outline(draft, profile, target_pages)
-    if toc:
+    if normalized_toc_bases is not None:
+        base_sections = normalized_toc_bases
+    elif toc:
         base_sections = _enforce_toc_sections(base_sections, toc)
         log.info("guide_toc_reenforced", count=len(base_sections))
     sections = _expand_sections(base_sections, density, profile)
@@ -1205,7 +1317,7 @@ def build_bible(
                  target_pages=target_pages)
     sections = _cap_sections_to_page_ceiling(
         sections, target_pages, profile, pamphlet=pamphlet,
-        min_entries=promised or 0,
+        min_entries=0,
     )
     planned = planned_use_count(sections)
     if pamphlet and promised and planned > promised:
@@ -1213,6 +1325,11 @@ def build_bible(
         planned = promised
         log.info("pamphlet_shrunk_to_promise", promised=promised,
                  sections=len(sections))
+    elif promised and promised > planned:
+        title, subtitle = rewrite_promised_number(title, subtitle, planned)
+        log.info("promise_rewritten_to_fitted",
+                 promised=promised, planned=planned,
+                 title=title, subtitle=subtitle)
     elif not pamphlet and promised and promised < planned:
         title, subtitle, promise_fixed = reconcile_promise(
             title, subtitle, planned)

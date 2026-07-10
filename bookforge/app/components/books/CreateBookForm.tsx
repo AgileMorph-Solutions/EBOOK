@@ -204,8 +204,8 @@ export function CreateBookForm() {
             }
           />
           <p className="font-body text-body-sm italic text-secondary">
-            Content scales to your target page count (±25 pages). Large source
-            lists (e.g. 365 recipes) are automatically reduced to fit.
+            Content and images scale to fit at most your target (max 300).
+            Never exceeds target.
           </p>
         </div>
         <div className="flex flex-col gap-2">

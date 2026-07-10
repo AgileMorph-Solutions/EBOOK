@@ -423,6 +423,9 @@ b, strong { font-weight: 700; }
 
 .essaypage.continued .ghead { margin-bottom: .08in; min-height: 0; }
 .essaypage.continued .essay-body { max-width: var(--measure); }
+.essaypage.essay-pull .ghead { margin-bottom: .12in; }
+.essaypage.essay-pull .essay-pull { max-width: var(--measure); }
+.essaypage.essay-pull blockquote { margin: 0; }
 
 /* ============================ CHAPTER-OPENER ESSAY ============================ */
 .essaypage .essay-body { max-width: var(--measure); }

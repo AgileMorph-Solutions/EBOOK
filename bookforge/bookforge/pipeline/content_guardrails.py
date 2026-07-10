@@ -13,7 +13,7 @@ from bookforge.schemas import BookBible, Chapter, SectionPlan
 # plain \w+ silently failed there, so the subtitle promise was never parsed and
 # the book shipped 1,176 entries under a "200" subtitle.
 _COUNT_NOUNS = (
-    r"ways?|tips?|uses?|tricks?|methods?|ideas?|hacks?|recipes?|dishes?|meals?|"
+    r"ways?|tips?|uses?|tricks?|methods?|ideas?|hacks?|recipes?|dishes?|meals?|suppers?|"
     r"fixes?|projects?|patterns?|exercises?|lessons?|entries|habits?|steps?|rules?|"
     r"principles?|moves?|shifts?|strategies|strategy|secrets?|mistakes?|"
     r"reasons?|laws?|keys?|changes?|foods?|drinks?|workouts?|stretches|poses?|"

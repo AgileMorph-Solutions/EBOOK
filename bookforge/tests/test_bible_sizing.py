@@ -100,6 +100,21 @@ def test_smoke_expand_and_shrink_to_subtitle_promise():
     assert all(s.list_quota == 0 for s in sections)
 
 
+def test_pamphlet_density_honors_topic_promise():
+    profile = EditorialProfile(
+        genre="cookbook",
+        audience="home cooks",
+        angle="quick",
+        entry_schema=EntrySchema(entry_noun="recipe"),
+        structure_template="essay_entries",
+        image_density="sparse",
+        pages_per_entry=2.0,
+        tiers=1,
+    )
+    density = _guide_density(5, profile, promised=4)
+    assert density.base_sections * density.cards_per_section >= 4
+
+
 def test_cookbook_density_image_quota_standard():
     profile = EditorialProfile(
         genre="cookbook",

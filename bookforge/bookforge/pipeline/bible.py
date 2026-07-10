@@ -17,6 +17,7 @@ Practical guides: profile-driven planning in three steps —
 from __future__ import annotations
 
 import json
+import math
 import structlog
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -650,7 +651,12 @@ def _image_quota_for_section(
     return max(1, min(cards, round(page_budget / 1.5)))
 
 
-def _guide_density(target_pages: int, profile: EditorialProfile) -> _Density:
+def _guide_density(
+    target_pages: int,
+    profile: EditorialProfile,
+    *,
+    promised: int | None = None,
+) -> _Density:
     """Template-driven density: fewer, deeper entries for entry-rich genres.
 
     A 350-page essay_entries cookbook lands near 20-24 chapters × ~6 recipes
@@ -673,6 +679,12 @@ def _guide_density(target_pages: int, profile: EditorialProfile) -> _Density:
             image_quota = cards
         else:
             image_quota = min(1, cards)
+        if promised and promised > cards:
+            cards = max(cards, math.ceil(promised / max(1, n)))
+            if n == 1:
+                cards = max(cards, promised)
+            if profile.image_density == "every_entry":
+                image_quota = cards
         return _Density(
             base_sections=n, cards_per_section=cards, list_quota=0,
             image_quota=image_quota, page_budget=pb,
@@ -726,25 +738,39 @@ def _cap_density(
     profile: EditorialProfile,
     *,
     pamphlet: bool,
+    promised: int | None = None,
 ) -> _Density:
     """Ensure density planning cannot exceed the hard page ceiling."""
     _, hi = allowed_page_range(target_pages)
     tiers = max(1, profile.tiers)
     d = density.model_copy()
+    min_cards = (
+        math.ceil(promised / max(1, d.base_sections))
+        if promised and pamphlet else 0
+    )
     while _estimate_density_pages(d, tiers, pamphlet=pamphlet) > hi:
         if d.list_quota > 0:
             d.list_quota = 0
             continue
-        if d.cards_per_section > 2:
+        if d.cards_per_section > 2 and d.cards_per_section > min_cards:
             d.cards_per_section -= 1
             continue
-        if d.base_sections > 1:
+        if d.base_sections > 1 and (
+            not promised
+            or d.base_sections * max(d.cards_per_section, min_cards) > promised
+        ):
             d.base_sections -= 1
+            if promised and pamphlet:
+                min_cards = math.ceil(promised / max(1, d.base_sections))
             continue
         if d.page_budget > 1:
             d.page_budget -= 1
             continue
         break
+    if promised and pamphlet:
+        per = math.ceil(promised / max(1, d.base_sections))
+        if d.cards_per_section < per:
+            d = d.model_copy(update={"cards_per_section": per})
     return d
 
 
@@ -1086,13 +1112,15 @@ def build_bible(
     pamphlet = target_pages <= 15
     if pamphlet:
         profile = profile.model_copy(update={"tiers": 1})
+    promised_hint = parse_promised_count(source.topic, "")
     design = derive_design(source, profile)
     spec = templates.spec_for(profile.structure_template)
     density = _cap_density(
-        _guide_density(target_pages, profile),
+        _guide_density(target_pages, profile, promised=promised_hint),
         target_pages,
         profile,
         pamphlet=pamphlet,
+        promised=promised_hint,
     )
     # When user supplies TOC, pin base section count to that length.
     if toc:
@@ -1164,7 +1192,10 @@ def build_bible(
 
     title = draft.title
     subtitle = draft.subtitle
-    promised = parse_promised_count(title, subtitle)
+    promised = (
+        parse_promised_count(title, subtitle)
+        or parse_promised_count(source.topic, "")
+    )
     planned = planned_use_count(sections)
     if promised and promised > planned:
         sections = expand_sections_to_count(sections, promised)

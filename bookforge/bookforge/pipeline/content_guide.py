@@ -198,13 +198,14 @@ def _card_spec(profile: EditorialProfile) -> str:
     return "\n".join(lines)
 
 
-def _storyboard_spec(profile: EditorialProfile) -> str:
+def _storyboard_spec(profile: EditorialProfile, *, pamphlet: bool = False) -> str:
     spec = templates.spec_for(profile.structure_template)
     if not spec.has_opener_essay:
         return "- essay, sidebars, pull_quote: leave empty."
     features = ", ".join(profile.feature_menu) or "a short contextual note"
+    essay_words = "120-180 words" if pamphlet else "300-500 words"
     return (
-        "- essay: the chapter-opener essay, 300-500 words, written like a top "
+        f"- essay: the chapter-opener essay, {essay_words}, written like a top "
         "magazine feature lede — grounded in the source material with at least "
         "two specific, concrete details (names, dates, places, numbers) drawn "
         "from it. No throat-clearing; start inside the subject.\n"
@@ -371,7 +372,9 @@ def write_section(
             cards=section.full_card_quota, quick=section.list_quota,
             noun=es.entry_noun,
             card_spec=_card_spec(profile),
-            storyboard_spec=_storyboard_spec(profile),
+            storyboard_spec=_storyboard_spec(
+                profile, pamphlet=bible.target_pages <= 15,
+            ),
             source_policy=_source_policy(profile),
             planned_entries=_planned_entries_block(section),
             feedback=_feedback_block(feedback or []),
@@ -386,6 +389,13 @@ def write_section(
     # Hard clamp: QA revision must never inflate past section quotas.
     draft.cards = draft.cards[: max(0, section.full_card_quota)]
     draft.quick_uses = draft.quick_uses[: max(0, section.list_quota)]
+    if len(draft.cards) < section.full_card_quota:
+        log.warning(
+            "section_card_shortfall",
+            section=section.title,
+            expected=section.full_card_quota,
+            got=len(draft.cards),
+        )
 
     blocks: list[ContentBlock] = [
         ContentBlock(type=BlockType.section_intro, text=draft.intro.strip())

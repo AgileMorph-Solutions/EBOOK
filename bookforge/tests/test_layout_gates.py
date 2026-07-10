@@ -133,9 +133,17 @@ def test_entry_card_force_spread_makes_two_pages():
     d = GuideDirector(_bible())
     d.entry_card("Seasoning", _entry(), None, key="1.2", force_spread=True)
     assert len(d.pages) == 2
-    assert "(continued)" in d.pages[1]
+    assert "(continued)" not in d.pages[1]
     assert "entry-continued" in d.pages[1]
+    assert 'class="entry-cont"' not in d.pages[1]
     assert "entry-continued" not in d.pages[0]
+
+
+def test_spread_page_b_no_entry_cont():
+    d = GuideDirector(_bible())
+    d.entry_card("Seasoning", _entry(), None, key="1.2", force_spread=True)
+    assert 'class="entry-cont"' not in d.pages[1]
+    assert "ec-tag" not in d.pages[1]
 
 
 def test_spread_continued_page_is_top_aligned():
@@ -151,9 +159,10 @@ def test_entry_flow_continued_has_entry_continued_class():
     entry = _entry(steps=long_steps)
     d = GuideDirector(_bible())
     d.entry_card("Seasoning", entry, None, key="1.2", level=2)
-    cont_pages = [p for p in d.pages if "(continued)" in p]
+    cont_pages = [p for p in d.pages if "entry-continued" in p]
     assert cont_pages
-    assert all("entry-continued" in p for p in cont_pages)
+    assert all("(continued)" not in p for p in cont_pages)
+    assert all('class="entry-cont"' not in p for p in cont_pages)
 
 
 def test_howto_continued_uses_fill_stack_not_spread():
@@ -161,6 +170,7 @@ def test_howto_continued_uses_fill_stack_not_spread():
     d.how_to_use("How to", "lead", ["a", "b", "c", "d"], level=2)
     assert len(d.pages) == 2
     assert "howto-continued" in d.pages[1]
+    assert "(continued)" not in d.pages[1]
     assert "fill-stack" in d.pages[1]
     assert "fill-spread" not in d.pages[1]
     assert "fill-spread" in d.pages[0]
@@ -208,6 +218,18 @@ def test_entry_flow_continues_step_numbering_across_pages():
                or __import__("re").search(r"counter-reset: s [1-9]", p)
                for p in step_pages[1:])
     assert ' start="' not in "".join(step_pages[1:])
+
+
+def test_essay_continuation_no_repeated_title():
+    text = " ".join(["Cast iron rewards patience and punishes neglect."] * 90)
+    d = GuideDirector(_bible())
+    d.essay_page("Seasoning", "Why It Works", text, key="3")
+    assert len(d.pages) >= 2
+    assert "gh2" in d.pages[0]
+    assert "gh3" not in d.pages[1]
+    assert "essaypage continued" in d.pages[1]
+    assert "fill-start" in d.pages[1]
+    assert "(continued)" not in d.pages[1]
 
 
 def test_essay_page_tagged_and_squeeze_paginates_more():

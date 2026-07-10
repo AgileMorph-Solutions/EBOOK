@@ -78,6 +78,13 @@ def test_rewrite_promised_number():
     assert "50" not in title
 
 
+def test_parse_promised_count_quick_pan_suppers():
+    assert parse_promised_count(
+        "Spacing Test Cookbook: 4 Quick Pan Suppers", "",
+    ) == 4
+    assert parse_promised_count("4 Quick Pan Suppers", "") == 4
+
+
 def test_rewrite_meals_count_in_subtitle():
     title, sub = rewrite_promised_number(
         "The Poor Man Recipe Bible",

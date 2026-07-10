@@ -157,7 +157,7 @@ class GuideDirector:
 
         def page(pts: list[str], start: int, cont: bool) -> str:
             lis = "".join(f"<li>{_esc(p)}</li>" for p in pts)
-            title = _esc(heading) + (' <span class="cont">(continued)</span>' if cont else "")
+            title = _esc(heading)
             lead_html = "" if cont else f'<div class="glead">{_esc(lead)}</div>'
             head = (f'<div class="ghead"><div class="kick">Welcome</div>'
                     f'<div class="gh2">{title}</div>{lead_html}</div>')
@@ -234,11 +234,10 @@ class GuideDirector:
                     f'<div class="row"><span class="tt">{_esc(lbl)}</span>'
                     f'<span class="dots"></span><span class="pg">{pg}</span></div>')
             flush(cur_head, cur_rows)
-            cont = " (continued)" if pi else ""
             pages.append(
                 f'<section class="page toc">'
                 f'<div class="head"><div class="kick">The table of</div>'
-                f'<h2>Contents{_esc(cont)}</h2><div class="rule"></div></div>'
+                f'<h2>Contents</h2><div class="rule"></div></div>'
                 f'<div class="cols">{blocks}</div></section>')
         return pages
 
@@ -309,15 +308,16 @@ class GuideDirector:
             body = "".join(f"<p>{_esc(p)}</p>" for p in chunk)
             quote = (f"<blockquote>{_esc(pull_quote)}</blockquote>"
                      if pull_quote and i == len(chunks) - 1 else "")
-            head = (f'<div class="ghead"><div class="eyebrow">{_esc(eyebrow)}</div>'
-                    f'<div class="gh2">{_esc(heading)}</div></div>' if i == 0 else
-                    f'<div class="ghead"><div class="eyebrow">{_esc(eyebrow)}</div>'
-                    f'<div class="gh3">{_esc(heading)} <span class="cont">'
-                    f'(continued)</span></div></div>')
-            cls = ("page gtext dropcap essaypage" if i == 0
-                   else "page gtext essaypage")
-            fill = ("gbodyfill essay-body fill-center" if single
-                    else "gbodyfill essay-body")
+            if i == 0:
+                head = (f'<div class="ghead"><div class="eyebrow">{_esc(eyebrow)}</div>'
+                        f'<div class="gh2">{_esc(heading)}</div></div>')
+                cls = "page gtext dropcap essaypage"
+                fill = ("gbodyfill essay-body fill-center" if single
+                        else "gbodyfill essay-body")
+            else:
+                head = f'<div class="ghead"><div class="eyebrow">{_esc(eyebrow)}</div></div>'
+                cls = "page gtext essaypage continued"
+                fill = "gbodyfill essay-body fill-start"
             inner = (f'{head}<div class="{fill}">{body}{quote}</div>')
             attr = self._entry_attr(f"essay:{key}") if key else ""
             self.pages.append(
@@ -484,8 +484,6 @@ class GuideDirector:
         folio = self._pos()
         inner_b = (f'<div class="entry-fit entry-continued">'
                    f'<div class="eyebrow">{_esc(section)}</div>'
-                   f'<div class="entry-cont">{_esc(p["title"])} '
-                   f'<span class="ec-tag">(continued)</span></div>'
                    f'{p["steps_panel"]}{p["callouts"]}{p["foot"]}</div>')
         self.pages.append(
             f'<section class="page"{self._entry_attr(key)}>{self._chrome(folio)}'
@@ -568,7 +566,7 @@ class GuideDirector:
                 lis = "".join(f"<li>{_esc(_strip_passage_ids(t))}</li>"
                               for _, t in step_items)
                 counter_style = f' style="counter-reset: s {start}"' if start else ""
-                label = _esc(es.steps_label) + (" (continued)" if start else "")
+                label = _esc(es.steps_label)
                 body += (f'<div class="entry-steps"><div class="steps-label">'
                          f'{label}</div><ol class="steps-list"{counter_style}>'
                          f'{lis}</ol></div>')
@@ -582,9 +580,7 @@ class GuideDirector:
                     body += payload  # type: ignore[operator]
             flush_steps()
             inner = (f'<div class="entry-fit entry-continued">'
-                     f'<div class="eyebrow">{_esc(section)}</div>'
-                     f'<div class="entry-cont">{_esc(p["title"])} '
-                     f'<span class="ec-tag">(continued)</span></div>{body}</div>')
+                     f'<div class="eyebrow">{_esc(section)}</div>{body}</div>')
             self.pages.append(
                 f'<section class="page"{self._entry_attr(key)}>{self._chrome(folio)}'
                 f'<div class="gbody-box"><div class="gfit"{flow_fitmin}>'

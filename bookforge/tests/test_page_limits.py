@@ -96,15 +96,15 @@ def test_allowed_page_range_target_300():
 
 
 def test_allowed_page_range_target_200():
-    assert allowed_page_range(200) == (200, 200)
+    assert allowed_page_range(200) == (200, 300)
 
 
 def test_allowed_page_range_target_100():
-    assert allowed_page_range(100) == (100, 100)
+    assert allowed_page_range(100) == (100, 150)
 
 
 def test_allowed_page_range_target_5():
-    assert allowed_page_range(5) == (5, 5)
+    assert allowed_page_range(5) == (5, 8)
 
 
 def test_meets_page_floor():
@@ -115,32 +115,49 @@ def test_meets_page_floor():
 
 def test_is_acceptable_page_count():
     assert is_acceptable_page_count(160, 160)
-    assert is_acceptable_page_count(120, 160)  # undershoot OK
-    assert not is_acceptable_page_count(161, 160)
+    assert not is_acceptable_page_count(120, 160)
+    assert is_acceptable_page_count(240, 160)
+    assert not is_acceptable_page_count(241, 160)
     assert not is_acceptable_page_count(301, 300)
     assert is_acceptable_page_count(300, 300)
+    assert is_acceptable_page_count(120, 100)
+    assert not is_acceptable_page_count(99, 100)
+    assert is_acceptable_page_count(150, 100)
+    assert not is_acceptable_page_count(151, 100)
 
 
 def test_hard_ceiling_never_exceeds_absolute_max():
     assert hard_page_ceiling(300) == ABSOLUTE_PAGE_CEILING
-    assert hard_page_ceiling(290) == 290
+    assert hard_page_ceiling(290) == 300
+    assert hard_page_ceiling(200) == 300
+    assert hard_page_ceiling(100) == 150
     assert hard_page_ceiling(400) == ABSOLUTE_PAGE_CEILING
 
 
 def test_check_page_count_in_range():
     check_page_count(100, 100)
-    check_page_count(99, 100)
+    check_page_count(150, 100)
     check_page_count(300, 300)
 
 
 def test_check_page_count_raises_over_ceiling():
     with pytest.raises(PageLimitError) as exc:
-        check_page_count(201, 200)
-    assert exc.value.pages == 201
-    assert exc.value.hi == 200
+        check_page_count(301, 200)
+    assert exc.value.pages == 301
+    assert exc.value.hi == 300
 
     with pytest.raises(PageLimitError):
         check_page_count(301, 300)
+
+
+def test_check_page_count_raises_under_floor():
+    with pytest.raises(PageLimitError) as exc:
+        check_page_count(99, 100)
+    assert exc.value.pages == 99
+    assert exc.value.lo == 100
+
+    with pytest.raises(PageLimitError):
+        check_page_count(151, 100)
 
 
 def test_max_planned_entries_uses_target_not_hi():
@@ -170,10 +187,10 @@ def test_365_recipes_scaled_to_target_pages():
 def test_smoke_density_respects_ceiling():
     profile = _pest_profile().model_copy(update={"tiers": 1})
     density = _cap_density(_guide_density(5, profile), 5, profile, pamphlet=True)
-    _, hi = allowed_page_range(5)
+    plan_cap = 5
     num_sections = density.base_sections * profile.tiers
     overhead = 2
-    assert overhead + num_sections * density.page_budget <= hi
+    assert overhead + num_sections * density.page_budget <= plan_cap
 
 
 def test_standard_density_image_quota_from_page_budget():
@@ -205,8 +222,7 @@ def test_cap_sections_to_page_ceiling_shrinks_oversized_plan():
     )
     from bookforge.pipeline.page_limits import estimate_guide_pages
 
-    _, hi = allowed_page_range(5)
-    assert estimate_guide_pages(capped, pamphlet=True) <= hi
+    assert estimate_guide_pages(capped, pamphlet=True) <= 5
     assert planned_use_count(capped) < planned_use_count(sections)
 
 
@@ -225,7 +241,7 @@ def test_cap_sections_reduces_section_count():
     from bookforge.pipeline.page_limits import estimate_guide_pages
 
     assert len(capped) < len(sections)
-    assert estimate_guide_pages(capped, pamphlet=False) <= hard_page_ceiling(75)
+    assert estimate_guide_pages(capped, pamphlet=False) <= 75
     assert all(s.image_quota <= s.full_card_quota for s in capped)
 
 
@@ -410,9 +426,16 @@ def _fake_overshoot_scale(monkeypatch):
     return orchestrator, qa
 
 
-def test_orchestrator_ships_overshoot_with_warning(monkeypatch):
-    # Always-ship default: overshoot past every trim pass ships degraded with
-    # a warning instead of failing the job.
+def test_orchestrator_raises_on_overshoot_by_default(monkeypatch):
+    orchestrator, qa = _fake_overshoot_scale(monkeypatch)
+    with pytest.raises(PageLimitError):
+        orchestrator._assemble_with_page_scale(
+            "b1", _minimal_bible(target_pages=50, sections=[]), [], [], qa,
+            cover_key=None, pro=None, source=None, stage=lambda s: None,
+        )
+
+
+def test_orchestrator_ships_overshoot_with_escape_hatch(monkeypatch):
     orchestrator, qa = _fake_overshoot_scale(monkeypatch)
     monkeypatch.setattr(orchestrator.settings, "ship_on_page_overshoot", True)
     art = orchestrator._assemble_with_page_scale(
@@ -423,24 +446,27 @@ def test_orchestrator_ships_overshoot_with_warning(monkeypatch):
     assert any("exceeds ceiling" in w for w in art.warnings)
 
 
-def test_orchestrator_raises_on_overshoot_with_kill_switch(monkeypatch):
-    # SHIP_ON_PAGE_OVERSHOOT=false restores the old hard PageLimitError.
+def test_orchestrator_raises_on_undershoot(monkeypatch):
     orchestrator, qa = _fake_overshoot_scale(monkeypatch)
-    monkeypatch.setattr(orchestrator.settings, "ship_on_page_overshoot", False)
-    with pytest.raises(PageLimitError):
+    with pytest.raises(PageLimitError) as exc:
         orchestrator._assemble_with_page_scale(
-            "b1", _minimal_bible(target_pages=50, sections=[]), [], [], qa,
+            "b1", _minimal_bible(target_pages=100, sections=[]), [], [], qa,
             cover_key=None, pro=None, source=None, stage=lambda s: None,
         )
+    assert exc.value.pages == 80
+    assert exc.value.lo == 100
 
 
-def test_page_range_prompt_mentions_hard_maximum():
+def test_page_range_prompt_mentions_band():
     text = page_range_prompt_suffix(75)
     assert "75" in text
-    assert "hard maximum" in text.lower()
-    assert "MINIMUM" not in text
+    assert "113" in text
+    assert "at least" in text.lower()
+    assert "must not exceed" in text.lower()
 
 
-def test_is_within_page_range_undershoot_not_in_band():
+def test_is_within_page_range():
     assert not is_within_page_range(99, 100)
     assert is_within_page_range(100, 100)
+    assert is_within_page_range(150, 100)
+    assert not is_within_page_range(151, 100)

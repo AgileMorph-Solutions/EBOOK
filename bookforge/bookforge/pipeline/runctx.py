@@ -71,3 +71,8 @@ def checkpoint() -> None:
     run = _current.get()
     if run is not None:
         run.checkpoint()
+
+
+def active_job() -> JobRun | None:
+    """Return the bound JobRun, or None in CLI spikes / scripts."""
+    return _current.get()

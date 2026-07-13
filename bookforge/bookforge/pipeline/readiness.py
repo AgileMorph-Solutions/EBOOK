@@ -133,9 +133,12 @@ def _check_images() -> CheckResult:
         img_client.ping()
         return CheckResult(ok=True, reason_code="ok", detail="ok")
     except img_client.ImageQuotaError as exc:
+        # Daily/per-minute image quota — never hard-block generation; the image
+        # stage ships partial (or no) images and attaches a warning.
         return CheckResult(
-            ok=False, reason_code="quota_images",
-            detail=str(exc)[:200],
+            ok=True, reason_code="ok",
+            detail=f"image quota exhausted — book will ship with partial/no images: "
+                   f"{str(exc)[:160]}",
         )
     except img_client.ImageGenerationError as exc:
         detail = str(exc)[:200]

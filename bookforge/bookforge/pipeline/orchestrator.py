@@ -30,7 +30,6 @@ from bookforge.pipeline.content_guardrails import finalize_marketing_counts
 from bookforge.pipeline.page_limits import (
     allowed_page_range,
     expand_chapters_for_pages,
-    hard_page_ceiling,
     is_acceptable_page_count,
     scale_chapters_to_pages,
     scale_images_for_chapters,
@@ -264,9 +263,9 @@ def _assemble_with_page_scale(
     source,
     stage: Callable[[str], None],
 ) -> BookArtifact:
-    """Assemble with layout repair; scale content to meet page floor/ceiling.
-    Overshoot that survives every trim pass SHIPS with a warning (kill switch:
-    SHIP_ON_PAGE_OVERSHOOT=false restores the hard PageLimitError)."""
+    """Assemble with layout repair; scale content to meet the page band.
+    Books outside [target, 1.5× target] after all scale passes raise
+    PageLimitError unless SHIP_ON_PAGE_OVERSHOOT=true (overshoot only)."""
     target = book_bible.target_pages or 100
     chapters_cur = chapters
     images_cur = all_images
@@ -285,29 +284,21 @@ def _assemble_with_page_scale(
                 stage=stage,
             )
         if scale_attempt >= settings.max_page_scale_revisions:
-            hi = hard_page_ceiling(target)
-            if pages > hi:
-                if not settings.ship_on_page_overshoot:
-                    lo, _ = allowed_page_range(target)
-                    raise PageLimitError(
-                        f"page count {pages} exceeds hard maximum {hi} after scaling",
-                        pages=pages, target=target, lo=lo, hi=hi,
-                    )
+            lo, hi = allowed_page_range(target)
+            if pages > hi and settings.ship_on_page_overshoot:
                 artifact.warnings.append(
                     f"page count {pages} exceeds ceiling {hi} after "
                     f"{scale_attempt} trim passes — shipped anyway")
                 artifact.degraded = True
                 log.warning("page_overshoot_shipped", pages=pages, ceiling=hi)
-            else:
-                log.warning(
-                    "page_scale_undershoot",
-                    pages=pages, target=target,
-                    msg="shipping below target after expand attempts",
+                return _final_vision_qa(
+                    book_id, artifact, book_bible, chapters_cur, images_cur,
+                    qa_result, cover_key=cover_key, pro=pro, source=source,
+                    stage=stage,
                 )
-            return _final_vision_qa(
-                book_id, artifact, book_bible, chapters_cur, images_cur,
-                qa_result, cover_key=cover_key, pro=pro, source=source,
-                stage=stage,
+            raise PageLimitError(
+                f"page count {pages} outside allowed range {lo}–{hi} after scaling",
+                pages=pages, target=target, lo=lo, hi=hi,
             )
 
         if pages < target:
@@ -327,13 +318,11 @@ def _assemble_with_page_scale(
                 )
             except BudgetExceeded:
                 log.warning("page_expand_budget_exhausted")
-                artifact.warnings.append(
-                    "budget exhausted while expanding to the page target — "
-                    f"shipped at {pages} pages")
-                return _final_vision_qa(
-                    book_id, artifact, book_bible, chapters_cur, images_cur,
-                    qa_result, cover_key=cover_key, pro=pro, source=source,
-                    stage=stage,
+                lo, hi = allowed_page_range(target)
+                raise PageLimitError(
+                    f"budget exhausted while expanding to page target "
+                    f"({pages} pages, need {lo}–{hi})",
+                    pages=pages, target=target, lo=lo, hi=hi,
                 )
             chapters_cur, _ = expand_chapters_for_pages(
                 chapters_cur, book_bible,
@@ -376,7 +365,7 @@ def _assemble_narrative_with_page_scale(
     all_images: list,
     qa_result,
 ) -> BookArtifact:
-    """Narrative path: assemble and scale content if page count overshoots."""
+    """Narrative path: assemble and scale content to meet the page band."""
     target = book_bible.target_pages or 100
     chapters_cur = chapters
     images_cur = all_images
@@ -390,26 +379,18 @@ def _assemble_narrative_with_page_scale(
         if is_acceptable_page_count(pages, target):
             return artifact
         if scale_attempt >= settings.max_page_scale_revisions:
-            hi = hard_page_ceiling(target)
-            if pages > hi:
-                if not settings.ship_on_page_overshoot:
-                    lo, _ = allowed_page_range(target)
-                    raise PageLimitError(
-                        f"page count {pages} exceeds hard maximum {hi} after scaling",
-                        pages=pages, target=target, lo=lo, hi=hi,
-                    )
+            lo, hi = allowed_page_range(target)
+            if pages > hi and settings.ship_on_page_overshoot:
                 artifact.warnings.append(
                     f"page count {pages} exceeds ceiling {hi} after scaling — "
                     "shipped anyway")
                 artifact.degraded = True
                 log.warning("page_overshoot_shipped", pages=pages, ceiling=hi)
-            else:
-                log.warning(
-                    "page_scale_undershoot",
-                    pages=pages, target=target,
-                    msg="shipping below target after scaling",
-                )
-            return artifact
+                return artifact
+            raise PageLimitError(
+                f"page count {pages} outside allowed range {lo}–{hi} after scaling",
+                pages=pages, target=target, lo=lo, hi=hi,
+            )
         chapters_cur, removed = scale_chapters_to_pages(
             chapters_cur, book_bible,
             current_pages=pages, target_pages=target,

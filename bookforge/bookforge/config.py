@@ -145,7 +145,7 @@ class Settings(BaseSettings):
     ship_on_layout_defects: bool = Field(True, alias="SHIP_ON_LAYOUT_DEFECTS")
     # Ship a book that still exceeds its page ceiling after all trim passes
     # (with a warning) instead of raising PageLimitError.
-    ship_on_page_overshoot: bool = Field(True, alias="SHIP_ON_PAGE_OVERSHOOT")
+    ship_on_page_overshoot: bool = Field(False, alias="SHIP_ON_PAGE_OVERSHOOT")
     # How many times a DAILY image-quota exhaustion may park the book until the
     # quota horizon before we ship it with the images we have.
     image_quota_max_parks: int = Field(1, alias="IMAGE_QUOTA_MAX_PARKS")

@@ -32,9 +32,7 @@ from bookforge.pipeline.content_guardrails import (
     shrink_sections_to_count,
 )
 from bookforge.pipeline.page_limits import (
-    allowed_page_range,
     estimate_guide_pages,
-    hard_page_ceiling,
     max_planned_entries,
     max_sections_for_target,
     page_range_prompt_suffix,
@@ -742,15 +740,15 @@ def _cap_density(
     pamphlet: bool,
     promised: int | None = None,
 ) -> _Density:
-    """Ensure density planning cannot exceed the hard page ceiling."""
-    _, hi = allowed_page_range(target_pages)
+    """Ensure density planning cannot exceed the target page count."""
+    plan_cap = max(1, target_pages)
     tiers = max(1, profile.tiers)
     d = density.model_copy()
     min_cards = (
         math.ceil(promised / max(1, d.base_sections))
         if promised and pamphlet else 0
     )
-    while _estimate_density_pages(d, tiers, pamphlet=pamphlet) > hi:
+    while _estimate_density_pages(d, tiers, pamphlet=pamphlet) > plan_cap:
         if d.list_quota > 0:
             d.list_quota = 0
             continue
@@ -784,10 +782,10 @@ def _cap_sections_to_page_ceiling(
     pamphlet: bool,
     min_entries: int = 0,
 ) -> list[SectionPlan]:
-    """Trim per-section budgets and section count to fit the hard page ceiling."""
-    hi = hard_page_ceiling(target_pages)
+    """Trim per-section budgets and section count to fit the planning target."""
+    plan_cap = max(1, target_pages)
     max_entries = max_planned_entries(
-        hi, profile, len(sections) or 1, pamphlet=pamphlet,
+        plan_cap, profile, len(sections) or 1, pamphlet=pamphlet,
     )
     planned = planned_use_count(sections)
     cap = max(max_entries, min_entries)
@@ -804,7 +802,7 @@ def _cap_sections_to_page_ceiling(
         if s.image_quota > s.full_card_quota:
             s.image_quota = s.full_card_quota
 
-    while len(out) > 1 and estimate_guide_pages(out, pamphlet=pamphlet) > hi:
+    while len(out) > 1 and estimate_guide_pages(out, pamphlet=pamphlet) > plan_cap:
         last = out.pop()
         prev = out[-1]
         prev.full_card_quota += last.full_card_quota
@@ -815,7 +813,7 @@ def _cap_sections_to_page_ceiling(
         if last.planned_entries:
             prev.planned_entries = (prev.planned_entries or []) + last.planned_entries
 
-    while estimate_guide_pages(out, pamphlet=pamphlet) > hi:
+    while estimate_guide_pages(out, pamphlet=pamphlet) > plan_cap:
         reduced = False
         for s in sorted(out, key=lambda x: x.page_budget, reverse=True):
             if s.page_budget > 1:
@@ -831,24 +829,19 @@ def _normalize_narrative_budgets(
     chapters: list,
     target_pages: int,
 ) -> None:
-    """Scale chapter page_budgets to target, never exceeding the hard ceiling."""
+    """Scale chapter page_budgets to the planning target."""
     if not chapters:
         return
-    lo, hi = allowed_page_range(target_pages)
+    plan = max(1, target_pages)
     total = sum(c.page_budget for c in chapters)
     if total <= 0:
-        per = max(1, target_pages // len(chapters))
+        per = max(1, plan // len(chapters))
         for ch in chapters:
             ch.page_budget = per
-        total = per * len(chapters)
-    if total > hi:
-        scale = hi / total
-    elif total > target_pages:
-        scale = target_pages / total
-    elif total < lo:
-        scale = lo / total
-    else:
         return
+    if total == plan:
+        return
+    scale = plan / total
     for ch in chapters:
         ch.page_budget = max(1, round(ch.page_budget * scale))
 

@@ -58,12 +58,14 @@ def _clear_quota_parks(book_id: str) -> None:
 def _stop_or_raise(book_id: str, exc: Exception) -> str:
     """Decide between parking the book (re-raise) and shipping partial.
 
-    First IMAGE_QUOTA_MAX_PARKS provider failures re-raise so the job parks
-    (quota-aware: a daily quota parks until its reset without burning the
-    attempt cap). Past that budget, generation stops and the book ships with
-    whatever images exist — the returned string is the warning to attach."""
+    API jobs (JobRun bound) park on the first IMAGE_QUOTA_MAX_PARKS provider
+    failures so Celery can resume after the quota resets. CLI spikes have no
+    resume loop — they always return a warning and ship with partial images."""
+    from bookforge.pipeline import runctx
+
     parks = _load_quota_parks(book_id)
-    if parks < settings.image_quota_max_parks:
+    if (runctx.active_job() is not None
+            and parks < settings.image_quota_max_parks):
         _save_quota_parks(book_id, parks + 1)
         raise exc
     if isinstance(exc, img_client.ImageQuotaError):

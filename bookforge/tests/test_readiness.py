@@ -60,7 +60,7 @@ def test_writing_unfunded_blocks():
     assert "credits" in result.message.lower()
 
 
-def test_images_quota_blocks():
+def test_images_quota_allows_degraded_generation():
     with patch("bookforge.pipeline.readiness.llm.ping"):
         with patch(
             "bookforge.pipeline.readiness.img_client.ping",
@@ -71,8 +71,9 @@ def test_images_quota_blocks():
                 return_value=[],
             ):
                 result = check_readiness(active_jobs=0)
-    assert result.can_generate is False
-    assert result.reason_code == "quota_images"
+    assert result.can_generate is True
+    assert result.checks["images"].ok is True
+    assert "quota" in result.checks["images"].detail.lower()
 
 
 def test_layout_defect_blocks():

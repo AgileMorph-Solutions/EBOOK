@@ -65,7 +65,9 @@ def test_generate_best_returns_none_when_fallback_disabled(monkeypatch):
     assert images_mod._generate_best("p", "square", bible) is None
 
 
-def test_assert_image_coverage_raises_when_slots_missing(monkeypatch):
+def test_coverage_shortfall_warns_instead_of_raising(monkeypatch):
+    # Always-ship: missing slots are a WARNING (layout renders empty slots
+    # cleanly) — never an ImageCoverageError that kills a finished book.
     monkeypatch.setattr(guide_images.settings, "image_require_coverage", 1.0)
     bible = _bible(cover_subject="cover scene")
     ch = Chapter(
@@ -75,13 +77,12 @@ def test_assert_image_coverage_raises_when_slots_missing(monkeypatch):
             image_brief=ImageBrief(prompt="jar", kind="photo", aspect="square"),
         )],
     )
-    with pytest.raises(ImageCoverageError) as exc:
-        guide_images._assert_image_coverage(bible, [ch], [], cover_key=None)
-    assert exc.value.required == 3  # cover + card + divider
-    assert exc.value.got == 0
+    warning = guide_images._coverage_warning(bible, [ch], [], cover_key=None)
+    assert warning is not None
+    assert "0/3" in warning  # cover + card + divider
 
 
-def test_assert_image_coverage_passes_when_full(monkeypatch):
+def test_coverage_warning_none_when_full(monkeypatch):
     monkeypatch.setattr(guide_images.settings, "image_require_coverage", 1.0)
     bible = _bible(cover_subject="cover scene")
     ch = Chapter(
@@ -95,7 +96,8 @@ def test_assert_image_coverage_passes_when_full(monkeypatch):
         GeneratedImage(block_ref="1.0", storage_key="k1", width=10, height=10),
         GeneratedImage(block_ref="1.divider", storage_key="k2", width=10, height=10),
     ]
-    guide_images._assert_image_coverage(bible, [ch], imgs, cover_key="books/x/cover.jpg")
+    assert guide_images._coverage_warning(
+        bible, [ch], imgs, cover_key="books/x/cover.jpg") is None
 
 
 def test_sync_card_image_briefs_every_entry():

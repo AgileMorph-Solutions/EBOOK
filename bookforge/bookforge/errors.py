@@ -15,8 +15,16 @@ class EmptyBookError(RuntimeError):
 
 
 class IngestError(RuntimeError):
-    """Source ingestion failed (e.g. YouTube download/transcription). Treated as
-    transient by the API so the job retries, then parks."""
+    """Source ingestion failed (e.g. YouTube download/transcription). Input-side
+    and not self-healing, so the API classifies it as permanent and fails fast
+    with a clear "source unavailable" message instead of looping.
+
+    `reason` distinguishes actionable causes (e.g. "youtube_blocked") for the
+    user-facing message."""
+
+    def __init__(self, message: str, *, reason: str = ""):
+        self.reason = reason
+        super().__init__(message)
 
 
 class ContentQAError(RuntimeError):
@@ -101,3 +109,12 @@ class PageLimitError(RuntimeError):
 
 class PipelineCancelledError(RuntimeError):
     """User or operator cancelled the job — stop between stages, do not retry."""
+
+
+class JobDeadlineError(RuntimeError):
+    """The job's cooperative wall-clock deadline (JOB_TIMEOUT_MINUTES) was hit.
+
+    Raised from runctx.checkpoint() between LLM/image calls so a wedged stage
+    can't hold a concurrency slot forever. Classified as provider_unavailable
+    (park & auto-resume): checkpoints keep all completed work, so the resumed
+    attempt continues where this one stopped instead of re-spending."""

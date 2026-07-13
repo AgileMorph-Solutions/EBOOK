@@ -44,7 +44,11 @@ def put(key: str, data: bytes, content_type: str = "application/octet-stream") -
         return key
     path = _LOCAL_ROOT / key
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(data)
+    # Atomic write: a crash mid-write must never corrupt a checkpoint/PDF that
+    # resume logic will later trust.
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, path)
     return str(path)
 
 

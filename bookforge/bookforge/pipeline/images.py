@@ -236,11 +236,15 @@ def _generate_best(
         except (img_client.ImageQuotaError, img_client.ImageGenerationError):
             raise  # quota/auth — fail the stage immediately, don't burn every slot
         except Exception as exc:
+            if llm.never_swallow(exc):
+                raise
             log.warning("image_gen_failed", err=str(exc)[:200])
             continue
         try:
             s = _score(cand, subject)
         except Exception as exc:
+            if llm.never_swallow(exc):
+                raise
             log.warning("image_score_failed", err=str(exc)[:200])
             if fallback is None or 0.5 > fallback[0]:
                 fallback = (0.5, cand)
@@ -270,6 +274,11 @@ def _generate_best(
                 hard_reject = True
         if not hard_reject and (best is None or rank > best[0]):
             best = (rank, cand, flagged)
+        # Adaptive candidates: a clean, well-ranked first candidate wins the
+        # slot immediately — spending on more candidates buys nothing. Halves
+        # typical Imagen usage (~98 → ~64 calls/book, under the 70/day quota).
+        if settings.image_adaptive_candidates and best is not None and not best[2]:
+            break
 
     if best is not None:
         return best[1], best[0], best[2]
@@ -310,6 +319,8 @@ def generate_image(
         except (img_client.ImageQuotaError, img_client.ImageGenerationError):
             raise
         except Exception as exc:
+            if llm.never_swallow(exc):
+                raise
             log.warning("image_gen_failed", key=key, err=str(exc)[:200])
             return None
 

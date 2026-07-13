@@ -362,7 +362,9 @@ def test_normalize_user_toc_collapses_recipe_list():
     assert sum(len(s.entries) for s in normalized) >= 50
 
 
-def test_assemble_fails_oversized_pdf(monkeypatch):
+def test_assemble_ships_oversized_pdf_with_advisory(monkeypatch):
+    # Page limits are OWNED by the orchestrator's scale loops (which can trim
+    # and re-render); assemble only records an advisory so the loop can act.
     from bookforge.pipeline import assemble
     from bookforge.schemas import QAResult
 
@@ -375,21 +377,23 @@ def test_assemble_fails_oversized_pdf(monkeypatch):
     qa = QAResult(groundedness=1.0, passed=True)
 
     monkeypatch.setattr(assemble.build, "build_html", lambda *a, **k: "<html></html>")
-    monkeypatch.setattr(assemble.render, "html_to_pdf", lambda html: b"%PDF-1.4")
+    monkeypatch.setattr(assemble.render, "render_pdf",
+                        lambda html: (b"%PDF-1.4", {"stuck": [], "overflows": [],
+                                                    "rescued": [], "pages": []}))
     monkeypatch.setattr(assemble, "_linearize", lambda pdf: pdf)
     monkeypatch.setattr(assemble, "_page_count", lambda pdf: 37)
     monkeypatch.setattr(assemble.pdf_geometry, "check_pdf_geometry", lambda pdf: [])
     monkeypatch.setattr(assemble.storage, "put", lambda *a, **k: None)
 
-    with pytest.raises(PageLimitError):
-        assemble.assemble("book1", bible, [], [], qa)
+    art = assemble.assemble("book1", bible, [], [], qa)
+    assert art.page_count == 37
+    assert any("outside target range" in i for i in art.qa.layout_issues)
 
 
-def test_orchestrator_raises_on_overshoot_after_scale(monkeypatch):
+def _fake_overshoot_scale(monkeypatch):
     from bookforge.pipeline import orchestrator
     from bookforge.schemas import BookArtifact, QAResult
 
-    bible = _minimal_bible(target_pages=50, sections=[])
     qa = QAResult(groundedness=1.0, passed=True)
 
     def _fake_assemble(*args, **kwargs):
@@ -400,10 +404,32 @@ def test_orchestrator_raises_on_overshoot_after_scale(monkeypatch):
 
     monkeypatch.setattr(orchestrator, "_assemble_with_layout_revise", _fake_assemble)
     monkeypatch.setattr(orchestrator.settings, "max_page_scale_revisions", 0)
+    # Final vision QA has its own coverage; keep this test about page limits.
+    monkeypatch.setattr(orchestrator, "_final_vision_qa",
+                        lambda book_id, artifact, *a, **k: artifact)
+    return orchestrator, qa
 
+
+def test_orchestrator_ships_overshoot_with_warning(monkeypatch):
+    # Always-ship default: overshoot past every trim pass ships degraded with
+    # a warning instead of failing the job.
+    orchestrator, qa = _fake_overshoot_scale(monkeypatch)
+    monkeypatch.setattr(orchestrator.settings, "ship_on_page_overshoot", True)
+    art = orchestrator._assemble_with_page_scale(
+        "b1", _minimal_bible(target_pages=50, sections=[]), [], [], qa,
+        cover_key=None, pro=None, source=None, stage=lambda s: None,
+    )
+    assert art.degraded
+    assert any("exceeds ceiling" in w for w in art.warnings)
+
+
+def test_orchestrator_raises_on_overshoot_with_kill_switch(monkeypatch):
+    # SHIP_ON_PAGE_OVERSHOOT=false restores the old hard PageLimitError.
+    orchestrator, qa = _fake_overshoot_scale(monkeypatch)
+    monkeypatch.setattr(orchestrator.settings, "ship_on_page_overshoot", False)
     with pytest.raises(PageLimitError):
         orchestrator._assemble_with_page_scale(
-            "b1", bible, [], [], qa,
+            "b1", _minimal_bible(target_pages=50, sections=[]), [], [], qa,
             cover_key=None, pro=None, source=None, stage=lambda s: None,
         )
 

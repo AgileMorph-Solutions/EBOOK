@@ -24,22 +24,25 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from threading import BoundedSemaphore, Lock
+from threading import BoundedSemaphore, Lock, Thread, current_thread
 from typing import Any, Literal
 
 import anthropic
 import structlog
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field, model_validator
 
 from bookforge.clients import llm, storage
 from bookforge.config import get_settings
+from bookforge.cost import BudgetExceeded
 from bookforge.errors import (
     ContentQAError, EmptyBookError, GeometryError, ImageCoverageError,
-    IngestError, PipelineCancelledError, ReadinessError,
+    IngestError, JobDeadlineError, PageLimitError, PipelineCancelledError,
+    ReadinessError,
 )
+from bookforge.pipeline import runctx
 from bookforge.pipeline.readiness import (
     ReadinessRequest,
     ReadinessResult,
@@ -110,6 +113,18 @@ app = FastAPI(title="BookForge API", version=API_VERSION, lifespan=lifespan)
 # Chromium/RAM on a single node. Extra jobs stay "queued" until a slot frees.
 _pipeline_sem = BoundedSemaphore(max(1, get_settings().max_concurrent_books))
 
+# Resumed (previously parked) jobs may hold at most this many slots, so a
+# resume storm during a long provider outage can never starve fresh
+# submissions of every slot (observed live: both slots held by quota-loopers).
+_resume_slots = BoundedSemaphore(
+    max(1, min(get_settings().resume_max_concurrent,
+               get_settings().max_concurrent_books)))
+
+# Worker threads by book_id, so the watchdog can tell a live slow job from a
+# dead one whose thread is gone.
+_active_jobs: dict[str, Thread] = {}
+_active_jobs_lock = Lock()
+
 _cors_origins = os.environ.get(
     "CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000"
 ).split(",")
@@ -137,7 +152,11 @@ def _state_path(book_id: str) -> Path:
 def _write_state(book_id: str, state: dict[str, Any]) -> None:
     path = _state_path(book_id)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(state))
+    # Atomic replace: a crash mid-write must never leave a truncated status.json
+    # (readers treat unparseable state as "no job").
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(state))
+    os.replace(tmp, path)
 
 
 def _read_state(book_id: str) -> dict[str, Any] | None:
@@ -568,14 +587,15 @@ def download(book_id: str):
             status_code=409,
             detail=f"book not ready — status: {state.get('status')}",
         )
-    try:
-        data = storage.get(f"books/{book_id}/interior.pdf")
-    except Exception:
+    key = f"books/{book_id}/interior.pdf"
+    if not storage.exists(key):
         raise HTTPException(status_code=404, detail="PDF not found in storage")
-    return Response(
-        content=data,
+    # Stream from disk — 60MB-class PDFs must not round-trip through process
+    # memory (this process is also the render worker).
+    return FileResponse(
+        path=storage.local_path(key),
         media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="{book_id}.pdf"'},
+        filename=f"{book_id}.pdf",
     )
 
 
@@ -602,19 +622,23 @@ def rerender_book(book_id: str, background_tasks: BackgroundTasks):
 
     def _do_rerender() -> None:
         from bookforge.pipeline import assemble
-        try:
-            _set_state(book_id, status="running", stage="layout",
-                       stage_started_at=_now_iso())
-            artifact = assemble.rerender(book_id)
-            _set_state(book_id, status="done", artifact=artifact.model_dump(),
-                       error=None, error_type=None, error_detail=None)
-            log.info("rerender_done", book_id=book_id, pages=artifact.page_count)
-        except Exception as exc:
-            log.exception("rerender_failed", book_id=book_id)
-            _fail(book_id, exc, _failure_class(exc))
+        # Chromium renders of 300-page books are exactly what the pipeline
+        # semaphore exists for — rerenders must not stack on top of running
+        # books (that's how the box OOM'd).
+        _set_state(book_id, status="queued", stage="layout")
+        with _pipeline_sem:
+            try:
+                _set_state(book_id, status="running", stage="layout",
+                           stage_started_at=_now_iso(), heartbeat_at=_now_iso())
+                artifact = assemble.rerender(book_id)
+                _mark_done(book_id, artifact)
+                log.info("rerender_done", book_id=book_id, pages=artifact.page_count)
+            except Exception as exc:
+                log.exception("rerender_failed", book_id=book_id)
+                _fail(book_id, exc, _failure_class(exc))
 
     background_tasks.add_task(_do_rerender)
-    return {"book_id": book_id, "status": "running", "stage": "layout"}
+    return {"book_id": book_id, "status": "queued", "stage": "layout"}
 
 
 @app.post("/books/{book_id}/regenerate", status_code=202)
@@ -645,20 +669,21 @@ def regenerate_book(book_id: str, background_tasks: BackgroundTasks):
     if has_manifest:
         def _do_rerender() -> None:
             from bookforge.pipeline import assemble
-            try:
-                _set_state(book_id, status="running", stage="layout",
-                           stage_started_at=_now_iso())
-                artifact = assemble.rerender(book_id)
-                _set_state(book_id, status="done", artifact=artifact.model_dump(),
-                           error=None, error_type=None, error_detail=None)
-                log.info("regenerate_rerendered", book_id=book_id,
-                         pages=artifact.page_count)
-            except Exception as exc:
-                log.exception("regenerate_rerender_failed", book_id=book_id)
-                _fail(book_id, exc, _failure_class(exc))
+            _set_state(book_id, status="queued", stage="layout")
+            with _pipeline_sem:
+                try:
+                    _set_state(book_id, status="running", stage="layout",
+                               stage_started_at=_now_iso(), heartbeat_at=_now_iso())
+                    artifact = assemble.rerender(book_id)
+                    _mark_done(book_id, artifact)
+                    log.info("regenerate_rerendered", book_id=book_id,
+                             pages=artifact.page_count)
+                except Exception as exc:
+                    log.exception("regenerate_rerender_failed", book_id=book_id)
+                    _fail(book_id, exc, _failure_class(exc))
 
         background_tasks.add_task(_do_rerender)
-        return {"book_id": book_id, "status": "running", "stage": "layout",
+        return {"book_id": book_id, "status": "queued", "stage": "layout",
                 "mode": "rerender"}
 
     req = _read_request(book_id)
@@ -668,9 +693,8 @@ def regenerate_book(book_id: str, background_tasks: BackgroundTasks):
             detail="no render manifest or original request stored for this "
                    "book — it cannot be regenerated; create a new book instead",
         )
-    _set_state(book_id, status="queued", stage=None, error=None,
-               error_type=None, error_detail=None, attempts=0,
-               resume_attempts=0)
+    _set_state(book_id, status="queued", stage=None, attempts=0,
+               resume_attempts=0, quota_parks=0, **_DONE_CLEARS)
     background_tasks.add_task(_run_pipeline, book_id, req)
     return {"book_id": book_id, "status": "queued", "mode": "full_rerun"}
 
@@ -723,11 +747,16 @@ def _friendly_error(exc: Exception) -> str:
     Never leak raw exception text (paths, memory addresses, provider internals,
     or opaque tenacity RetryError reprs) to the UI — that goes to logs only.
     """
-    from bookforge.cost import BudgetExceeded
-
     if isinstance(exc, BudgetExceeded):
         return ("This book reached its generation cost limit before finishing. "
                 "Try a shorter book or contact support to raise the limit.")
+    if isinstance(exc, IngestError):
+        if getattr(exc, "reason", "") == "youtube_blocked":
+            return ("We couldn't read this YouTube video — YouTube is blocking "
+                    "access from our server. Please paste the transcript text "
+                    "or upload a file instead.")
+        return ("We couldn't read your source material. Please check the link "
+                "or paste the text directly, then try again.")
     if isinstance(exc, ReadinessError):
         return str(exc)
     if isinstance(exc, PipelineCancelledError):
@@ -770,6 +799,19 @@ def _failure_class(exc: Exception) -> str:
     """
     if isinstance(exc, (GeometryError, ContentQAError, PipelineCancelledError)):
         return "permanent"
+    if isinstance(exc, BudgetExceeded):
+        # The cap is per-book and persisted across resumes — retrying re-fails
+        # instantly. The orchestrator ships partial work where possible; if this
+        # propagates, nothing shippable existed. Fail fast with a clear message.
+        return "permanent"
+    if isinstance(exc, PageLimitError):
+        # Deterministic overshoot that survived every trim pass (and the
+        # ship-on-overshoot policy is off) — retrying regenerates the same book.
+        return "permanent"
+    if isinstance(exc, JobDeadlineError):
+        # Wall-clock breach: park with checkpoints intact; resume continues
+        # where this attempt stopped.
+        return "provider_unavailable"
     if isinstance(exc, ReadinessError):
         if exc.reason_code in ("quota_llm", "quota_images", "rate_limit"):
             return "provider_unavailable"
@@ -782,7 +824,8 @@ def _failure_class(exc: Exception) -> str:
     if llm.is_provider_unavailable(exc) or isinstance(exc, EmptyBookError):
         return "provider_unavailable"
     if isinstance(exc, (anthropic.APIConnectionError, anthropic.APITimeoutError,
-                        anthropic.RateLimitError, anthropic.InternalServerError)):
+                        anthropic.RateLimitError, anthropic.InternalServerError,
+                        anthropic.OverloadedError)):
         return "provider_unavailable"
     if isinstance(exc, IngestError):
         # Ingest failures (bad source, missing captions, blocked IP) are not
@@ -797,6 +840,10 @@ def _wait_reason(exc: Exception) -> str:
         return "unfunded"
     if isinstance(exc, anthropic.AuthenticationError | anthropic.PermissionDeniedError):
         return "invalid_key"
+    if isinstance(exc, JobDeadlineError):
+        return "timeout"
+    if getattr(exc, "quota_class", "") == "daily":
+        return "image_quota_daily"
     return "service"
 
 
@@ -808,6 +855,13 @@ def _waiting_message(reason: str) -> str:
     if reason == "invalid_key":
         return ("Paused: the AI service key is invalid or revoked. Once it's "
                 "fixed, your book will finish automatically.")
+    if reason == "timeout":
+        return ("Your book is taking longer than expected, so we've paused to "
+                "keep things healthy. Progress is saved — it will continue "
+                "automatically, no action needed.")
+    if reason == "image_quota_daily":
+        return ("Paused: today's image allowance is used up. Your book will "
+                "finish automatically when it resets — no action needed.")
     return ("We're preparing your book — this is taking a little longer than "
             "usual. It will finish automatically, no action needed.")
 
@@ -846,11 +900,29 @@ def _park(book_id: str, exc: Exception, cls: str) -> None:
     The wait_reason distinguishes the unfunded/out-of-credits case so the UI can
     show a clear 'unfunded' notice instead of a generic 'preparing' message.
     After _MAX_PARK_ATTEMPTS park cycles the job is failed to prevent infinite
-    loops when the provider issue doesn't self-heal."""
+    loops when the provider issue doesn't self-heal.
+
+    Quota-aware: an exception carrying `wait_until` (e.g. a DAILY image quota
+    that resets at midnight Pacific) is parked until that horizon instead of the
+    generic backoff, and daily-quota parks don't consume the attempt cap — the
+    old fixed 60..1800s schedule could never outlive a 24h quota, so jobs burned
+    all their attempts on guaranteed-futile resumes."""
     from bookforge.api.error_kinds import classify as _classify_error
 
     state = _read_state(book_id) or {}
-    attempts = int(state.get("attempts", 0)) + 1
+    now = datetime.now(timezone.utc)
+    wait_until = getattr(exc, "wait_until", None)
+    quota_parks = int(state.get("quota_parks", 0))
+    daily_quota = getattr(exc, "quota_class", "") == "daily"
+    if daily_quota:
+        quota_parks += 1
+        # Safety valve: if the quota keeps reporting "daily" past its own park
+        # budget (misclassified / never actually resets), fall back to normal
+        # attempt accounting so the job can't park forever.
+        if quota_parks > get_settings().image_quota_max_parks + 1:
+            daily_quota = False
+
+    attempts = int(state.get("attempts", 0)) + (0 if daily_quota else 1)
 
     if attempts > _MAX_PARK_ATTEMPTS:
         classified = _classify_error(exc)
@@ -859,19 +931,27 @@ def _park(book_id: str, exc: Exception, cls: str) -> None:
         _fail(book_id, exc, "permanent")
         return
 
-    delay = _backoff_seconds(attempts)
-    next_at = (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat()
+    if daily_quota and wait_until is not None:
+        next_dt = wait_until
+    else:
+        next_dt = now + timedelta(seconds=_backoff_seconds(attempts))
+        # A short provider-suggested wait (per-minute limits) may exceed the
+        # early backoff steps — honor whichever is later.
+        if wait_until is not None and wait_until > next_dt:
+            next_dt = wait_until
+    delay = max(0, int((next_dt - now).total_seconds()))
     reason = _wait_reason(exc)
     classified = _classify_error(exc)
     _set_state(book_id, status="waiting", attempts=attempts,
+               quota_parks=quota_parks,
                wait_reason=reason, unfunded=(reason == "unfunded"),
-               next_retry_at=next_at, error=_waiting_message(reason),
+               next_retry_at=next_dt.isoformat(), error=_waiting_message(reason),
                error_kind=classified.kind,
                error_type=type(exc).__name__, error_detail=str(exc)[:2000])
     _operator_alert(book_id, reason, exc)
     log.warning("job_parked", book_id=book_id, attempts=attempts,
-                retry_in_s=delay, failure_class=cls, wait_reason=reason,
-                error_kind=classified.kind)
+                quota_parks=quota_parks, retry_in_s=delay, failure_class=cls,
+                wait_reason=reason, error_kind=classified.kind)
 
 
 def _fail(book_id: str, exc: Exception, cls: str) -> None:
@@ -894,18 +974,77 @@ def _fail(book_id: str, exc: Exception, cls: str) -> None:
         _operator_alert(book_id, cls, exc)
 
 
-def _run_pipeline(book_id: str, req: CreateBook) -> None:
+# Error/wait metadata left over from parked or retried attempts; cleared the
+# moment a job reaches done so a finished book never shows stale failure state.
+_DONE_CLEARS: dict[str, Any] = {
+    "error": None, "error_type": None, "error_detail": None, "error_kind": None,
+    "wait_reason": None, "unfunded": None, "next_retry_at": None,
+}
+
+
+def _mark_done(book_id: str, artifact) -> None:
+    warnings = list(getattr(artifact, "warnings", []) or [])
+    degraded = bool(getattr(artifact, "degraded", False))
+    _set_state(book_id, status="done", artifact=artifact.model_dump(),
+               done_at=_now_iso(), warnings=warnings or None,
+               degraded=degraded or None, **_DONE_CLEARS)
+    if warnings:
+        # The book SHIPPED (never-fail policy) but with degradations — make
+        # sure an operator sees what quality was traded to get it out.
+        _operator_alert(book_id, "degraded_ship",
+                        RuntimeError("; ".join(warnings[:3])))
+
+
+def _defer_resume(book_id: str) -> None:
+    """No slot free for a resumed job: stay 'waiting' and try again next tick.
+    Deliberately does NOT touch `attempts` — waiting for capacity is not a
+    failure."""
+    next_at = (datetime.now(timezone.utc)
+               + timedelta(seconds=get_settings().resume_poll_interval_s)).isoformat()
+    _set_state(book_id, status="waiting", next_retry_at=next_at)
+
+
+def _run_pipeline(book_id: str, req: CreateBook, *, resumed: bool = False) -> None:
+    if resumed:
+        # Resumed jobs must not block a thread on the semaphore (that's how
+        # parked jobs starved fresh submissions): take a reserved resume slot
+        # AND a pipeline slot non-blockingly, or go back to waiting.
+        if not _resume_slots.acquire(blocking=False):
+            _defer_resume(book_id)
+            return
+        try:
+            if not _pipeline_sem.acquire(blocking=False):
+                _defer_resume(book_id)
+                return
+            try:
+                _execute_pipeline(book_id, req)
+            finally:
+                _pipeline_sem.release()
+        finally:
+            _resume_slots.release()
+        return
+
+    # Fresh submission: block here (still "queued") until a slot is free.
+    with _pipeline_sem:
+        _execute_pipeline(book_id, req)
+
+
+def _execute_pipeline(book_id: str, req: CreateBook) -> None:
     def on_stage(stage: str) -> None:
         if _is_cancelled(book_id):
             raise PipelineCancelledError(f"cancelled at stage {stage}")
-        _set_state(book_id, stage=stage, stage_started_at=_now_iso())
+        from bookforge.cost import budget as _budget
+        _set_state(book_id, stage=stage, stage_started_at=_now_iso(),
+                   heartbeat_at=_now_iso(), cost_usd=round(_budget.spent, 2))
 
-    # Block here (still "queued") until a pipeline slot is free.
-    with _pipeline_sem:
-        if _is_cancelled(book_id):
-            _fail(book_id, PipelineCancelledError("cancelled before start"), "permanent")
-            return
-        _set_state(book_id, status="running", started_at=_now_iso())
+    if _is_cancelled(book_id):
+        _fail(book_id, PipelineCancelledError("cancelled before start"), "permanent")
+        return
+    _set_state(book_id, status="running", started_at=_now_iso(),
+               heartbeat_at=_now_iso())
+    with _active_jobs_lock:
+        _active_jobs[book_id] = current_thread()
+    try:
         from bookforge.pipeline.orchestrator import run_book
 
         inline_retries = get_settings().max_job_retries
@@ -914,24 +1053,32 @@ def _run_pipeline(book_id: str, req: CreateBook) -> None:
             if _is_cancelled(book_id):
                 _fail(book_id, PipelineCancelledError("cancelled"), "permanent")
                 return
+            # Fresh cooperative deadline per attempt; checked (with the cancel
+            # flag + heartbeat) at every LLM/image call boundary via runctx.
+            run = runctx.JobRun(
+                book_id,
+                deadline_ts=time.monotonic() + get_settings().job_timeout_minutes * 60,
+                cancel_cb=lambda: _is_cancelled(book_id),
+                heartbeat_cb=lambda: _set_state(book_id, heartbeat_at=_now_iso()),
+            )
             try:
-                artifact = run_book(
-                    book_id, req.topic,
-                    text=req.text, youtube_url=req.youtube_url,
-                    target_pages=req.target_pages,
-                    chapter_limit=req.chapter_limit,
-                    section_limit=req.section_limit,
-                    book_kind=req.book_kind,
-                    description=req.description,
-                    toc=req.toc,
-                    profile_overrides=req.profile_overrides,
-                    on_stage=on_stage,
-                )
+                with runctx.bind(run):
+                    artifact = run_book(
+                        book_id, req.topic,
+                        text=req.text, youtube_url=req.youtube_url,
+                        target_pages=req.target_pages,
+                        chapter_limit=req.chapter_limit,
+                        section_limit=req.section_limit,
+                        book_kind=req.book_kind,
+                        description=req.description,
+                        toc=req.toc,
+                        profile_overrides=req.profile_overrides,
+                        on_stage=on_stage,
+                    )
                 if _is_cancelled(book_id):
                     _fail(book_id, PipelineCancelledError("cancelled"), "permanent")
                     return
-                _set_state(book_id, status="done", artifact=artifact.model_dump(),
-                           error=None, error_type=None, error_detail=None)
+                _mark_done(book_id, artifact)
                 return
             except Exception as exc:
                 cls = _failure_class(exc)
@@ -945,6 +1092,9 @@ def _run_pipeline(book_id: str, req: CreateBook) -> None:
                 else:  # provider_unavailable, or transient that exhausted retries
                     _park(book_id, exc, cls)
                 return
+    finally:
+        with _active_jobs_lock:
+            _active_jobs.pop(book_id, None)
 
 
 # --------------------------------------------------------------------------- #
@@ -969,8 +1119,44 @@ def _resume_one(book_id: str) -> None:
                    error="Generation failed due to an unexpected error. Please try again.",
                    error_detail="cannot resume: request payload missing")
         return
-    _set_state(book_id, status="queued")  # claim it so the next tick skips it
-    _run_pipeline(book_id, req)
+    # Push next_retry_at forward so the next tick doesn't double-claim while
+    # this attempt is acquiring slots. Status stays "waiting" until a slot is
+    # actually held — a merely-waiting job must not count as active capacity.
+    _defer_resume(book_id)
+    _run_pipeline(book_id, req, resumed=True)
+
+
+def _watchdog_tick() -> None:
+    """Re-park 'running' jobs whose worker thread is gone (stale heartbeat and
+    no live thread) — e.g. after a partial recovery from an executor death.
+    Never touches a job whose thread is alive: the cooperative deadline
+    (JOB_TIMEOUT_MINUTES) handles live-but-slow, and killing threads is unsafe."""
+    stale_after = timedelta(minutes=get_settings().heartbeat_stale_minutes)
+    now = datetime.now(timezone.utc)
+    books_dir = _ARTIFACTS / "books"
+    if not books_dir.is_dir():
+        return
+    for path in books_dir.glob("*/status.json"):
+        book_id = path.parent.name
+        state = _read_state(book_id)
+        if not state or state.get("status") != "running":
+            continue
+        beat = _parse_ts(state.get("heartbeat_at")) or _parse_ts(state.get("started_at"))
+        if beat is None or now - beat < stale_after:
+            continue
+        with _active_jobs_lock:
+            thread = _active_jobs.get(book_id)
+        if thread is not None and thread.is_alive():
+            if not state.get("watchdog_alerted"):
+                _set_state(book_id, watchdog_alerted=True)
+                _operator_alert(book_id, "stale_heartbeat", RuntimeError(
+                    f"running with no heartbeat since {state.get('heartbeat_at')}"))
+            continue
+        log.warning("watchdog_reparked", book_id=book_id,
+                    last_heartbeat=state.get("heartbeat_at"))
+        _set_state(book_id, status="waiting", wait_reason="watchdog",
+                   next_retry_at=_now_iso(),
+                   error=_waiting_message("timeout"))
 
 
 async def _resume_loop() -> None:
@@ -979,6 +1165,7 @@ async def _resume_loop() -> None:
     while True:
         try:
             await asyncio.sleep(interval)
+            _watchdog_tick()
             books_dir = _ARTIFACTS / "books"
             if not books_dir.is_dir():
                 continue

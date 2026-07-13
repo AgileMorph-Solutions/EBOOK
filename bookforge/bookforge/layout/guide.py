@@ -672,32 +672,47 @@ class GuideDirector:
 
     def checklist_page(self, section: str, heading: str, lead: str, checklist,
                        key: str = "", level: int = 0) -> None:
-        folio = self._pos()
-        groups: dict[str, list] = {}
-        order: list[str] = []
-        for it in checklist.items:
-            key = it.cadence or ""
-            if key not in groups:
-                groups[key] = []
-                order.append(key)
-            groups[key].append(it)
-        cols = ""
-        total_items = len(checklist.items)
-        row_fill = "fill-stack"
-        for grp_key in order:
-            head = f'<div class="ct">{_esc(grp_key.title())}</div>' if grp_key else ""
-            rows = "".join(
-                f'<div class="check-row"><span class="check-box"></span>'
-                f'<span>{_esc(it.text)}</span></div>' for it in groups[grp_key])
-            cols += f'<div class="check-grp">{head}<div class="check-rows {row_fill}">{rows}</div></div>'
-        lead_html = f'<div class="glead">{_esc(lead)}</div>' if lead else ""
-        compact = " checkpage-compact" if total_items < 8 else ""
-        inner = (f'<div class="ghead"><div class="eyebrow">{_esc(section)}</div>'
-                 f'<div class="gh2">{_esc(heading)}</div>{lead_html}</div>'
-                 f'<div class="gbodyfill fill-row">{cols}</div>')
-        self.pages.append(
-            f'<section class="page checkpage{compact}"{self._entry_attr(key)}>{self._chrome(folio)}'
-            f'<div class="gbody-box"><div class="gfit"{self._fitmin(level)}>{inner}</div></div></section>')
+        """Checklist spread. Repair ladder: 1 = lower fit floor; 2+ = the items
+        SPLIT across two pages (a long checklist overflows structurally — no
+        font floor can fit it on one page)."""
+        # NB: must not shadow the `key` parameter — it becomes the page's
+        # data-entry repair key; shadowing it broke the repair ladder for every
+        # checklist page (repairs planned for the cadence name, never applied).
+        pairs = [(it.cadence or "", it) for it in checklist.items]
+
+        def page(page_pairs: list, cont: bool) -> str:
+            folio = self._pos() + (1 if cont else 0)
+            groups: dict[str, list] = {}
+            order: list[str] = []
+            for grp, it in page_pairs:
+                if grp not in groups:
+                    groups[grp] = []
+                    order.append(grp)
+                groups[grp].append(it)
+            cols = ""
+            for grp_key in order:
+                head = f'<div class="ct">{_esc(grp_key.title())}</div>' if grp_key else ""
+                rows = "".join(
+                    f'<div class="check-row"><span class="check-box"></span>'
+                    f'<span>{_esc(it.text)}</span></div>' for it in groups[grp_key])
+                cols += f'<div class="check-grp">{head}<div class="check-rows fill-stack">{rows}</div></div>'
+            lead_html = "" if cont else (
+                f'<div class="glead">{_esc(lead)}</div>' if lead else "")
+            compact = " checkpage-compact" if len(page_pairs) < 8 else ""
+            title = heading + (" (continued)" if cont else "")
+            inner = (f'<div class="ghead"><div class="eyebrow">{_esc(section)}</div>'
+                     f'<div class="gh2">{_esc(title)}</div>{lead_html}</div>'
+                     f'<div class="gbodyfill fill-row">{cols}</div>')
+            return (f'<section class="page checkpage{compact}"{self._entry_attr(key)}>'
+                    f'{self._chrome(folio)}'
+                    f'<div class="gbody-box"><div class="gfit"{self._fitmin(level)}>{inner}</div></div></section>')
+
+        if level >= 2 and len(pairs) > 4:
+            half = (len(pairs) + 1) // 2
+            self.pages.append(page(pairs[:half], False))
+            self.pages.append(page(pairs[half:], True))
+        else:
+            self.pages.append(page(pairs, False))
 
     def pro_page(self, heading: str, lead: str, signs: list[str], reassure: str,
                  level: int = 0) -> None:

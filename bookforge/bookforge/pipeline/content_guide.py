@@ -10,6 +10,8 @@ book. The book's generated safety brief is injected into every prompt.
 """
 from __future__ import annotations
 
+import threading
+
 import structlog
 from pydantic import BaseModel, Field, field_validator
 
@@ -31,25 +33,33 @@ log = structlog.get_logger(__name__)
 class Registry:
     """Cross-chapter memory: what the book has already used, injected into
     every section call so nothing repeats (facts have a half-life — the rule
-    must be restated every call, then enforced deterministically in QA)."""
+    must be restated every call, then enforced deterministically in QA).
+
+    Thread-safe: parallel section workers add finished chapters and snapshot
+    the prompt block concurrently; the bounded pool means later sections still
+    see most earlier titles, and the deterministic QA dedup remains the
+    enforcement backstop either way."""
 
     def __init__(self) -> None:
         self.entry_titles: list[str] = []
         self.openings: list[str] = []
+        self._lock = threading.Lock()
 
     def add_chapter(self, chapter: Chapter) -> None:
-        for block in chapter.blocks:
-            for e in block.entries:
-                if e.title:
-                    self.entry_titles.append(e.title)
-                if e.intro:
-                    self.openings.append(" ".join(e.intro.split()[:4]))
+        with self._lock:
+            for block in chapter.blocks:
+                for e in block.entries:
+                    if e.title:
+                        self.entry_titles.append(e.title)
+                    if e.intro:
+                        self.openings.append(" ".join(e.intro.split()[:4]))
 
     def prompt_block(self) -> str:
-        if not self.entry_titles:
-            return ""
-        titles = "; ".join(self.entry_titles[-80:])
-        opens = "; ".join(f'"{o}…"' for o in self.openings[-40:])
+        with self._lock:
+            if not self.entry_titles:
+                return ""
+            titles = "; ".join(self.entry_titles[-80:])
+            opens = "; ".join(f'"{o}…"' for o in self.openings[-40:])
         return (
             "ALREADY IN THIS BOOK — never repeat or lightly rephrase any of "
             f"these entries: {titles}.\n"
@@ -93,32 +103,28 @@ class _SectionDraft(BaseModel):
     quick_uses: list[UseEntry] = Field(description="Short one-line entries for a compact list.")
 
 
-_SECTION_PROMPT = """Write the content for the "{title}" chapter of the book.
-
-WHAT THIS CHAPTER COVERS: {summary}
-
-{grounding}
-
-{source_policy}
-
-{planned_entries}
-
-{feedback}
-
-{registry}
+# Stable per-book output contract — lives in the SYSTEM blocks so the prompt
+# prefix (tools + system) is identical across every section call of a book and
+# gets served from the Anthropic prompt cache. Per-chapter specifics (exact
+# counts, grounding, feedback, live registry) go in the user message.
+_SECTION_SPEC = """OUTPUT CONTRACT for every chapter of this book. The exact
+card/quick counts for the current chapter are given in the CHAPTER BRIEF.
 
 Produce:
 - intro: one lead paragraph, 25-40 words, for the chapter opener panel.
 {storyboard_spec}
-- cards: EXACTLY {cards} complete {noun}s. For EACH card:
+- cards: EXACTLY the number of complete {noun}s the CHAPTER BRIEF specifies. For EACH card:
 {card_spec}
-- card_photos: EXACTLY {cards} short photo subjects (one per card, same order),
+- card_photos: one short photo subject per card (same order as cards),
   each a concrete scene to photograph (no text, no labels, no packaging, no faces)
   showing that card's finished result. Every card MUST have a card_photo — aim
   for visual density of one illustration every 1–2 pages in this chapter.
-- quick_uses: EXACTLY {quick} short entries — quick ideas, variations, or
-  compact versions related to this chapter. For EACH: a title (2-6 words) and
-  an intro that is ONE line, 8-16 words. Leave steps empty.
+- quick_uses: EXACTLY the number of short entries the CHAPTER BRIEF specifies —
+  quick ideas, variations, or compact versions related to this chapter. For
+  EACH: a title (2-6 words) and an intro that is ONE line, 8-16 words. Leave
+  steps empty.
+
+{source_policy}
 
 {safety}
 
@@ -128,6 +134,21 @@ substance, technique, OR main subject — each must stand alone as its own idea;
 vary form and register across the chapter. If you cannot make a card genuinely
 distinct and specific, make an existing idea deeper instead of repeating it.
 Do not mention any entry total that contradicts the book title or subtitle."""
+
+_SECTION_USER = """CHAPTER BRIEF — write the content for the "{title}" chapter.
+
+WHAT THIS CHAPTER COVERS: {summary}
+
+COUNTS FOR THIS CHAPTER: EXACTLY {cards} cards and EXACTLY {quick} quick_uses
+(and one card_photo per card).
+{storyboard_override}
+{grounding}
+
+{planned_entries}
+
+{feedback}
+
+{registry}"""
 
 
 def _card_spec(profile: EditorialProfile) -> str:
@@ -294,6 +315,55 @@ def _format_passages(passages: list[Passage]) -> str:
     )
 
 
+def _planned_elsewhere_block(bible: BookBible) -> str:
+    """Stable cross-section subject map: every section's planned entries.
+
+    Parallel section workers can't all see each other's finished titles, so
+    this book-level manifest (part of the cached prefix) carries the dedup
+    pressure the serial ordering used to provide."""
+    lines: list[str] = []
+    for s in bible.sections:
+        if s.planned_entries:
+            lines.append(f'  {s.title}: {"; ".join(s.planned_entries)}')
+    if not lines:
+        return ""
+    return (
+        "PLANNED ELSEWHERE IN THIS BOOK — every chapter's planned subjects. "
+        "Cover ONLY the current chapter's own planned entries; never write a "
+        "card that belongs to another chapter:\n" + "\n".join(lines)
+    )
+
+
+def _section_system(bible: BookBible) -> list[dict]:
+    """The stable per-book system blocks for section calls, ordered stable-
+    first; llm.structured caches the tools+system prefix across all of a
+    book's section writes, regens, and revisions."""
+    profile = profile_of(bible)
+    spec_block = _SECTION_SPEC.format(
+        noun=profile.entry_schema.entry_noun,
+        card_spec=_card_spec(profile),
+        storyboard_spec=_storyboard_spec(
+            profile, pamphlet=bible.target_pages <= 15, page_budget=99),
+        source_policy=_source_policy(profile),
+        safety=safety.rules_for_bible(bible),
+        quality_line=_quality_line(profile),
+    )
+    blocks = [
+        {"type": "text", "text": _voice(bible)},
+        {"type": "text", "text": spec_block},
+    ]
+    manifest = _planned_elsewhere_block(bible)
+    if manifest:
+        blocks.append({"type": "text", "text": manifest})
+    return blocks
+
+
+def warm_section_cache(bible: BookBible) -> None:
+    """Write the tools+system cache entry BEFORE the section pool starts, so
+    parallel first-wave workers all read the cache instead of each writing it."""
+    llm.warm_cache(_SectionDraft, _section_system(bible))
+
+
 class _Revision(BaseModel):
     essay: str = ""
     intros: list[str] = Field(default_factory=list)
@@ -346,7 +416,7 @@ def _revise(draft: _SectionDraft, bible: BookBible) -> _SectionDraft:
             model=settings.draft_model, max_tokens=6000,
         )
     except Exception as exc:
-        if llm.is_provider_unavailable(exc):
+        if llm.never_swallow(exc):
             raise
         log.warning("revision_pass_skipped", err=str(exc)[:160])
         return draft
@@ -380,26 +450,25 @@ def write_section(
     es = profile.entry_schema
     spec = templates.spec_for(profile.structure_template)
 
+    # Tight-budget chapters override the (stable, cached) full storyboard spec.
+    storyboard_override = ""
+    if spec.has_opener_essay and (bible.target_pages <= 15
+                                  or section.page_budget <= 2):
+        storyboard_override = (
+            "TIGHT PAGE BUDGET for this chapter: essay 120-180 words; leave "
+            "sidebars empty and pull_quote empty.\n")
+
     draft = llm.structured(
-        _SECTION_PROMPT.format(
+        _SECTION_USER.format(
             title=section.title, summary=section.summary,
             cards=section.full_card_quota, quick=section.list_quota,
-            noun=es.entry_noun,
-            card_spec=_card_spec(profile),
-            storyboard_spec=_storyboard_spec(
-                profile,
-                pamphlet=bible.target_pages <= 15,
-                page_budget=section.page_budget,
-            ),
-            source_policy=_source_policy(profile),
+            storyboard_override=storyboard_override,
             planned_entries=_planned_entries_block(section),
             feedback=_feedback_block(feedback or []),
             registry=registry.prompt_block() if registry else "",
-            safety=safety.rules_for_bible(bible),
-            quality_line=_quality_line(profile),
             grounding=_format_passages(passages),
         ),
-        _SectionDraft, system=_voice(bible), max_tokens=12000,
+        _SectionDraft, system=_section_system(bible), max_tokens=12000,
     )
     draft = _revise(draft, bible)
     # Hard clamp: QA revision must never inflate past section quotas.
@@ -566,7 +635,7 @@ def _ensure_table_rows(
                 if len(row) == len(columns):
                     table.rows.append(row)
         except Exception as exc:
-            if llm.is_provider_unavailable(exc):
+            if llm.never_swallow(exc):
                 raise
             log.warning("chart_topup_failed", heading=heading, err=str(exc)[:120])
         attempts += 1

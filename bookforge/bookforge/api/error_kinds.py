@@ -1,9 +1,9 @@
 """Classify pipeline exceptions into user-friendly (kind, message) pairs.
 
-The pipeline wraps LLM calls in `tenacity.retry`, so raw exceptions arrive as
-`RetryError[<Future ... raised OriginalError>]`. That string is useless to the
-user. This module unwraps the retry, inspects the underlying error, and returns
-a short, actionable message plus a machine-readable `kind` the UI can key on.
+Inspects the root cause (walking ExceptionGroup and __cause__/__context__
+chains) and returns a short, actionable message plus a machine-readable `kind`
+the UI can key on. All tenacity retries in the codebase use `reraise=True`, so
+raw provider exceptions arrive directly — never wrapped in RetryError.
 """
 from __future__ import annotations
 
@@ -12,27 +12,17 @@ from dataclasses import dataclass
 
 @dataclass
 class ClassifiedError:
-    kind: str            # "quota_llm" | "quota_images" | "rate_limit" | "auth" | "network" | "unknown"
+    kind: str            # "quota_llm" | "quota_images" | "rate_limit" | "auth" | "network" | "budget" | "source_unavailable" | "unknown"
     message: str         # short user-facing sentence
     detail: str = ""     # trimmed original error text (for the "details" disclosure)
 
 
 def _root_cause(exc: BaseException) -> BaseException:
-    """Unwrap tenacity.RetryError, ExceptionGroup, __cause__/__context__ chains."""
+    """Unwrap ExceptionGroup and __cause__/__context__ chains."""
     seen: set[int] = set()
     cur: BaseException = exc
     while cur is not None and id(cur) not in seen:
         seen.add(id(cur))
-        # tenacity: RetryError.last_attempt is a concurrent.futures.Future
-        last_attempt = getattr(cur, "last_attempt", None)
-        if last_attempt is not None:
-            try:
-                inner = last_attempt.exception()
-                if inner is not None:
-                    cur = inner
-                    continue
-            except Exception:
-                pass
         # ExceptionGroup / async
         exceptions = getattr(cur, "exceptions", None)
         if isinstance(exceptions, (list, tuple)) and exceptions:
@@ -48,6 +38,34 @@ def _root_cause(exc: BaseException) -> BaseException:
 
 
 def classify(exc: BaseException) -> ClassifiedError:
+    # Domain exceptions carry intent directly — classify them from the TOP-level
+    # exception before root-cause walking, so the chained original error (e.g.
+    # the google 429 behind an ImageQuotaError) can't shadow them.
+    top_name = type(exc).__name__
+    top_msg = str(exc)
+    top_detail = (top_msg[:500] + "…") if len(top_msg) > 500 else top_msg
+    if top_name == "BudgetExceeded":
+        return ClassifiedError(
+            kind="budget",
+            message="This book reached its generation cost limit before finishing. "
+                    "Try a shorter book or contact support to raise the limit.",
+            detail=top_detail,
+        )
+    if top_name == "IngestError":
+        return ClassifiedError(
+            kind="source_unavailable",
+            message="We couldn't read your source material. Please check the "
+                    "link or paste the text directly, then try again.",
+            detail=top_detail,
+        )
+    if top_name == "JobDeadlineError":
+        return ClassifiedError(
+            kind="timeout",
+            message="Your book is taking longer than expected — it's been "
+                    "paused with progress saved and will continue automatically.",
+            detail=top_detail,
+        )
+
     root = _root_cause(exc)
     cls_name = type(root).__name__
     module = type(root).__module__ or ""
@@ -155,26 +173,6 @@ def classify(exc: BaseException) -> ClassifiedError:
         return ClassifiedError(
             kind="network",
             message="BookForge lost its connection mid-way. Check your internet, then try again.",
-            detail=detail,
-        )
-
-    # ---------- Legacy-string pattern-match fallback ----------
-    if "retryerror" in lower:
-        if "badrequesterror" in lower or "invalidrequesterror" in lower:
-            return ClassifiedError(
-                kind="quota_llm",
-                message="BookForge has temporarily run out of writing credits. Please try again in a little while.",
-                detail=detail,
-            )
-        if "ratelimiterror" in lower:
-            return ClassifiedError(
-                kind="rate_limit",
-                message="The service is a bit busy right now. Wait a minute, then click Retry.",
-                detail=detail,
-            )
-        return ClassifiedError(
-            kind="unknown",
-            message="Something unexpected happened. Please try again — if it keeps failing, contact support.",
             detail=detail,
         )
 

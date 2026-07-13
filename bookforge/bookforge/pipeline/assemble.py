@@ -1,9 +1,15 @@
 """Stage 6 — assembly, file-size preflight, delivery.
 
-Renders the print HTML to PDF, linearizes it, checks page count and the
+Renders the print HTML to PDF, linearizes it, checks geometry and the
 file-size budget, and stores the final interior PDF. (CMYK/PDF-X conversion via
 Ghostscript runs in the `pdftools` Docker service; the spike ships the RGB PDF
 KDP accepts.)
+
+Always-ship contract: every gate here repairs first (measured self-repair,
+terminal rescue, geometry re-render) and, when SHIP_ON_LAYOUT_DEFECTS is on,
+degrades to shipping the best rendered PDF with `warnings` on the artifact
+instead of raising. LayoutError still exists so the orchestrator's block-regen
+loop gets first shot at MAPPABLE defects — but it is no longer job-fatal.
 """
 from __future__ import annotations
 
@@ -16,12 +22,11 @@ import structlog
 from bookforge import safety
 from bookforge.clients import storage
 from bookforge.config import settings
-from bookforge.errors import GeometryError, LayoutError, PageLimitError
+from bookforge.errors import GeometryError, LayoutError
 from bookforge.layout import build, guide, render
-from bookforge.pipeline import layout_budget, layout_qa, pdf_geometry
+from bookforge.pipeline import checkpoints, layout_budget, layout_qa, pdf_geometry
 from bookforge.pipeline.page_limits import (
     allowed_page_range,
-    check_page_count,
     is_within_page_range,
 )
 from bookforge.schemas import BookArtifact, BookBible, Chapter, GeneratedImage, QAResult
@@ -55,25 +60,40 @@ def _is_non_blocking_content_nit(issue: str) -> bool:
     return any(p in lower for p in _NON_BLOCKING_PATTERNS)
 
 
-def _render_gated(html: str) -> bytes:
-    """Render HTML → PDF and HARD-FAIL on any in-page layout defect.
+def blocking_vision_issues(issues: list[str]) -> list[str]:
+    """The subset of vision-QA issue strings that indicate a real print defect.
+    Shared by the inline gate here and the final-pass gate in the orchestrator."""
+    hard = [i for i in issues
+            if "(info)" not in i and "(skipped)" not in i
+            and not _is_non_blocking_content_nit(i)]
+    if settings.layout_qa_block:
+        return hard
+    return [i for i in hard if any(k in i.lower() for k in _BLOCKING_LAYOUT_HINTS)]
 
-    The fit pass inside the renderer audits every text clip-container (divider
-    panels, .gfit regions, safety bands, body boxes) and reports text that is
-    still clipped or overflowing after fitting. Zero API cost, runs on every
-    page of every book — a broken layout is never stored or shipped."""
-    pdf = _linearize(render.html_to_pdf(html))
-    defects = render.layout_defects(render.last_fit_report)
+
+def _render_gated(html: str) -> tuple[bytes, list[str]]:
+    """Render HTML → (PDF, warnings) for the narrative path.
+
+    The fit pass inside the renderer audits every text clip-container and
+    reports text that is still clipped or overflowing after fitting. With the
+    always-ship policy on, residual defects ship as warnings (narrative has no
+    block-regen ladder to feed); with it off, this hard-fails as before."""
+    pdf_raw, report = render.render_pdf(html)
+    pdf = _linearize(pdf_raw)
+    warnings = render.layout_warnings(report)
+    defects = render.layout_defects(report)
     if defects:
         log.error("layout_audit_failed", defects=defects[:8])
-        raise LayoutError(
-            "layout audit failed — refusing to ship clipped/overflowing text: "
-            + " | ".join(defects[:3])
-        )
-    if render.last_fit_report is None:
+        if not settings.ship_on_layout_defects:
+            raise LayoutError(
+                "layout audit failed — refusing to ship clipped/overflowing text: "
+                + " | ".join(defects[:3])
+            )
+        warnings.extend(f"layout defect shipped: {d}" for d in defects[:10])
+    if report is None:
         # remote render service path: no fit JS ran, so no audit is available
         log.warning("layout_audit_unavailable", reason="render_service_path")
-    return pdf
+    return pdf, warnings
 
 
 def _plan_repairs(overflows: list[dict], prev: dict[str, int]) -> dict[str, int]:
@@ -119,35 +139,39 @@ def _plan_repairs(overflows: list[dict], prev: dict[str, int]) -> dict[str, int]
 
 
 def _render_practical(bible, chapters, images, *, cover_key, how_to,
-                      safety_data, pro) -> tuple[str, bytes]:
+                      safety_data, pro,
+                      degraded: bool = False) -> tuple[str, bytes, dict | None, list[str]]:
     """Build + render a practical guide with MEASURED one-shot self-repair.
 
     Render once, and if the in-page audit reports overflows, compute the exact
     repair for every offender from its measured overflow ratio (chart → exact
     page split, entry → the right flow level, essay → the right squeeze) and
     rebuild with ALL repairs applied — expected clean on the second render,
-    with at most two corrective rounds (measurements shift slightly after a
-    rebuild). Offenders that exhaust structural reflow land on the terminal
-    9pt rescue floor, which always fits schema-bounded content — so a book
-    never fails for layout; rescued pages are logged loudly. LayoutError
-    remains only as an assertion of last resort (untagged page or divider
-    stuck even after force-break)."""
+    with at most two corrective rounds. Fixed display regions (cover/divider/
+    safety bands) resolve via the in-render terminal rescue and surface as
+    warnings. What remains after 4 rounds raises LayoutError with structured
+    defects so the orchestrator can regenerate the offending blocks — unless
+    `degraded` is set, in which case the best render ships with the residual
+    defects as warnings (the orchestrator's last resort, never a dead job)."""
     repairs: dict[str, int] = {}
     defects: list[str] = []
     raw: list[dict] = []
+    html = ""
+    pdf = b""
+    report: dict | None = None
     for _ in range(4):
         html = guide.build_practical_html(
             bible, chapters, images, cover_key=cover_key,
             how_to=layout_budget.trim_how_to(how_to), safety=safety_data, pro=pro,
             repairs=dict(repairs) if repairs else None,
         )
-        pdf = _linearize(render.html_to_pdf(html))
-        report = render.last_fit_report
+        pdf_raw, report = render.render_pdf(html)
+        pdf = _linearize(pdf_raw)
         defects = render.layout_defects(report)
         if not defects:
             if report is None:
                 log.warning("layout_audit_unavailable", reason="render_service_path")
-            return html, pdf
+            return html, pdf, report, render.layout_warnings(report)
         raw = (report or {}).get("overflows", [])
         new_plan = _plan_repairs(raw, repairs)
         if new_plan == repairs:
@@ -159,7 +183,11 @@ def _render_practical(bible, chapters, images, *, cover_key, how_to,
             log.warning("layout_rescue_floor", keys=rescued)
         repairs = new_plan
         log.info("layout_selfrepair", repairs=repairs)
-    log.error("layout_audit_failed", defects=defects[:8])
+    log.error("layout_audit_failed", defects=defects[:8], degraded_ship=degraded)
+    if degraded:
+        warnings = render.layout_warnings(report)
+        warnings.extend(f"layout defect shipped: {d}" for d in defects[:10])
+        return html, pdf, report, warnings
     raise LayoutError(
         "layout audit failed — refusing to ship clipped/overflowing text: "
         + " | ".join(defects[:3]),
@@ -197,33 +225,66 @@ def _save_render_manifest(book_id, bible, chapters, images, cover_key,
         log.warning("render_manifest_save_failed", book_id=book_id, err=str(exc)[:160])
 
 
+def _geometry_gate(html: str, pdf: bytes,
+                   warnings: list[str]) -> tuple[bytes, list[str]]:
+    """Deterministic geometry gate on the ACTUAL delivered PDF (zero API cost).
+
+    On failure: one full re-render + re-check first (a Chromium hiccup is
+    transient); if the defect persists, ship-with-warning under the always-ship
+    policy (loud log + operator alert via the warnings channel) or hard-fail
+    with SHIP_ON_LAYOUT_DEFECTS=false."""
+    issues = pdf_geometry.check_pdf_geometry(pdf)
+    if not issues:
+        return pdf, warnings
+    log.warning("pdf_geometry_retry", issues=issues[:3])
+    try:
+        pdf_raw, _report = render.render_pdf(html)
+        pdf2 = _linearize(pdf_raw)
+    except Exception as exc:  # keep the first render if the retry itself dies
+        log.warning("pdf_geometry_retry_render_failed", err=str(exc)[:160])
+        pdf2 = pdf
+    issues2 = pdf_geometry.check_pdf_geometry(pdf2)
+    if not issues2:
+        return pdf2, warnings
+    if settings.ship_on_layout_defects:
+        log.error("pdf_geometry_failed_shipping_degraded", issues=issues2[:5])
+        return pdf2, warnings + [f"geometry: {g}" for g in issues2[:5]]
+    log.error("pdf_geometry_failed", issues=issues2[:5])
+    raise GeometryError(
+        "PDF geometry gate failed — refusing to ship a broken layout: "
+        + " | ".join(issues2[:3])
+    )
+
+
 def rerender(book_id: str) -> BookArtifact:
     """Re-render a practical guide's PDF from its cached manifest (no API cost).
 
     Applies the current layout/CSS, re-runs the geometry gate, and overwrites the
     stored interior.pdf. Used to apply design fixes without regenerating content.
-    """
+    Follows the same always-ship policy as the pipeline path."""
     data = json.loads(storage.get(f"books/{book_id}/render_manifest.json"))
     bible = BookBible(**data["bible"])
     chapters = [Chapter(**c) for c in data["chapters"]]
     images = [GeneratedImage(**i) for i in data["images"]]
-    _, pdf = _render_practical(
+    html, pdf, report, warnings = _render_practical(
         bible, chapters, images, cover_key=data.get("cover_key"),
         how_to=data.get("how_to"), safety_data=data.get("safety"),
         pro=data.get("pro"),
+        degraded=settings.ship_on_layout_defects,
     )
-    geometry_issues = pdf_geometry.check_pdf_geometry(pdf)
-    if geometry_issues:
-        log.error("rerender_geometry_failed", book_id=book_id, issues=geometry_issues[:5])
-        raise GeometryError("re-render geometry gate failed: " + " | ".join(geometry_issues[:3]))
+    checkpoints.save_fit_report(book_id, report)
+    pdf, warnings = _geometry_gate(html, pdf, warnings)
     key = f"books/{book_id}/interior.pdf"
     pages = _page_count(pdf)
     size_mb = round(len(pdf) / 1_048_576, 2)
     storage.put(key, pdf, "application/pdf")
-    log.info("rerendered", book_id=book_id, pages=pages, mb=size_mb)
+    log.info("rerendered", book_id=book_id, pages=pages, mb=size_mb,
+             warnings=len(warnings))
     return BookArtifact(book_id=book_id, interior_pdf_key=key,
                         page_count=pages, file_size_mb=size_mb,
-                        qa=QAResult(groundedness=1.0, passed=True))
+                        qa=QAResult(groundedness=1.0, passed=not warnings,
+                                    layout_issues=list(warnings)),
+                        warnings=warnings, degraded=bool(warnings))
 
 
 def _linearize(pdf: bytes) -> bytes:
@@ -248,7 +309,9 @@ def assemble(
     *,
     cover_key: str | None = None,
     pro: dict | None = None,
+    degraded: bool = False,
 ) -> BookArtifact:
+    warnings: list[str] = []
     if bible.book_kind == "practical_guide":
         how_to = bible.how_to.model_dump() if bible.how_to else None
         # Safety page content: the book's own generated brief (profile books)
@@ -260,68 +323,67 @@ def assemble(
                               cover_key, how_to, safety_data, pro)
         # Deterministic render + audit + self-repair FIRST (free), so vision QA
         # credits are never spent on a layout the audit already rejects.
-        html, pdf = _render_practical(
+        html, pdf, report, render_warnings = _render_practical(
             bible, chapters, images, cover_key=cover_key,
-            how_to=how_to, safety_data=safety_data, pro=pro,
+            how_to=how_to, safety_data=safety_data, pro=pro, degraded=degraded,
         )
+        warnings.extend(render_warnings)
+        # Page-class map of THIS render, for the final vision QA page picker.
+        checkpoints.save_fit_report(book_id, report)
         budget_pages = sum(p.page_budget for p in bible.sections)
-        layout_issues = layout_qa.run_layout_qa(
-            html, bible, section_count=len(bible.sections),
-        )
-        qa.layout_issues.extend(layout_issues)
-        # "(info)" = advisory nit; "(skipped)" = vision QA couldn't inspect the
-        # page (no credits/API error) — surfaced loudly, never a silent pass.
-        skipped = [i for i in layout_issues if "(skipped)" in i]
-        if skipped:
-            log.warning("layout_qa_incomplete", pages=len(skipped),
-                        sample=skipped[:2])
-        hard = [i for i in layout_issues
-                if "(info)" not in i and "(skipped)" not in i]
-        # Content/page-numbering commentary is never a visual print defect —
-        # filter it out before hint-matching so it can't masquerade as one.
-        hard = [i for i in hard if not _is_non_blocking_content_nit(i)]
-        # Classify: real print defects block; whitespace nits only warn.
-        blocking = hard if settings.layout_qa_block else [
-            i for i in hard if any(k in i.lower() for k in _BLOCKING_LAYOUT_HINTS)]
-        if blocking and (settings.layout_qa_block or bible.profile is not None):
-            # Never ship a visible print defect — fail the job loudly instead
-            # of setting a flag nothing downstream enforces.
-            qa.passed = False
-            log.error("layout_qa_blocking", issues=blocking[:5])
-            raise LayoutError(
-                "vision layout QA found print defects: " + " | ".join(blocking[:3])
+        # Inline vision QA runs only in legacy mode; the default final-only mode
+        # inspects the accepted artifact once, in the orchestrator (cheaper —
+        # intermediate page-scale renders are discarded anyway).
+        if settings.layout_qa_enabled and not settings.layout_qa_final_only:
+            layout_issues = layout_qa.run_layout_qa(
+                html, bible, section_count=len(bible.sections),
             )
+            qa.layout_issues.extend(layout_issues)
+            # "(info)" = advisory nit; "(skipped)" = vision QA couldn't inspect the
+            # page (no credits/API error) — surfaced loudly, never a silent pass.
+            skipped = [i for i in layout_issues if "(skipped)" in i]
+            if skipped:
+                log.warning("layout_qa_incomplete", pages=len(skipped),
+                            sample=skipped[:2])
+            blocking = blocking_vision_issues(layout_issues)
+            if blocking and (settings.layout_qa_block or bible.profile is not None):
+                # A vision-only hit on a layout the deterministic audit passed
+                # clean is (observed in prod) usually a false positive — it may
+                # only BLOCK when the audit corroborates that something was
+                # actually degraded on this render. Uncorroborated hits ship as
+                # loud warnings instead of killing the book.
+                corroborated = degraded or bool(render_warnings) or bool(
+                    (report or {}).get("rescued") or (report or {}).get("stuck"))
+                if corroborated and not degraded:
+                    qa.passed = False
+                    log.error("layout_qa_blocking", issues=blocking[:5])
+                    raise LayoutError(
+                        "vision layout QA found print defects: " + " | ".join(blocking[:3])
+                    )
+                warnings.extend(f"vision QA (uncorroborated): {b}"
+                                for b in blocking[:5])
+                log.warning("layout_qa_uncorroborated_shipped", issues=blocking[:5])
     else:
         html = build.build_html(bible, chapters, images)
         budget_pages = sum(p.page_budget for p in bible.chapters)
-        pdf = _render_gated(html)
+        pdf, render_warnings = _render_gated(html)
+        warnings.extend(render_warnings)
+
+    # Geometry gate with one re-render retry, then ship-with-warning policy.
+    pdf, warnings = _geometry_gate(html, pdf, warnings)
 
     size_mb = len(pdf) / 1_048_576
     pages = _page_count(pdf)
     issues = list(qa.layout_issues)
-
-    # Deterministic geometry gate on the ACTUAL delivered PDF. Runs with zero API
-    # cost on every book and HARD-FAILS a page-size/scale/clip defect, so a broken
-    # render can never be stored or reach "done" (unlike the vision QA, which
-    # inspects a different, correct-looking render path).
-    geometry_issues = pdf_geometry.check_pdf_geometry(pdf)
-    if geometry_issues:
-        issues.extend(geometry_issues)
-        qa.passed = False
-        qa.layout_issues = issues
-        log.error("pdf_geometry_failed", book_id=book_id, issues=geometry_issues[:5])
-        raise GeometryError(
-            "PDF geometry gate failed — refusing to ship a broken layout: "
-            + " | ".join(geometry_issues[:3])
-        )
 
     if size_mb > settings.max_file_size_mb:
         issues.append(
             f"file {size_mb:.1f}MB exceeds budget {settings.max_file_size_mb}MB "
             "— recompress images"
         )
+    # Page-count limits are OWNED by the orchestrator's scale loops (they see
+    # the artifact and can trim/expand); assemble only records advisories.
     target = bible.target_pages or budget_pages or pages
-    check_page_count(pages, target)
     lo, hi = allowed_page_range(target)
     log.info(
         "page_limit_check",
@@ -348,10 +410,14 @@ def assemble(
 
     key = f"books/{book_id}/interior.pdf"
     storage.put(key, pdf, "application/pdf")
+    if warnings:
+        qa.passed = False
+        issues.extend(warnings)
     qa.layout_issues = issues
 
     art = BookArtifact(book_id=book_id, interior_pdf_key=key, page_count=pages,
-                       file_size_mb=round(size_mb, 2), qa=qa)
+                       file_size_mb=round(size_mb, 2), qa=qa,
+                       warnings=warnings, degraded=degraded or bool(warnings))
     log.info("assembled", book_id=book_id, pages=pages, mb=art.file_size_mb,
-             kind=bible.book_kind)
+             kind=bible.book_kind, warnings=len(warnings), degraded=art.degraded)
     return art

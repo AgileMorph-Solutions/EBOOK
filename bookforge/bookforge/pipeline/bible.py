@@ -268,7 +268,7 @@ def derive_profile(
         )
         draft = checked
     except Exception as exc:  # self-check is best-effort polish
-        if llm.is_provider_unavailable(exc):
+        if llm.never_swallow(exc):
             raise
         log.warning("profile_check_skipped", err=str(exc)[:160])
 
@@ -368,7 +368,7 @@ def derive_design(source: SourceDoc, profile: EditorialProfile) -> DesignKit | N
             model=settings.content_model, max_tokens=1500,
         )
     except Exception as exc:
-        if llm.is_provider_unavailable(exc):
+        if llm.never_swallow(exc):
             raise
         log.warning("design_kit_skipped", err=str(exc)[:160])
         return None
@@ -1091,7 +1091,7 @@ def _critique_outline(
             model=settings.draft_model, max_tokens=16000,
         )
     except Exception as exc:
-        if llm.is_provider_unavailable(exc):
+        if llm.never_swallow(exc):
             raise
         log.warning("outline_critique_skipped", err=str(exc)[:160])
         return draft.base_sections

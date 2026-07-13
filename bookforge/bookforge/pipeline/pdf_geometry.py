@@ -14,6 +14,8 @@ centred folio — are never falsely failed.
 """
 from __future__ import annotations
 
+import threading
+import time
 from pathlib import Path
 
 import structlog
@@ -21,6 +23,11 @@ import structlog
 from bookforge.config import settings
 
 log = structlog.get_logger(__name__)
+
+# Preflight validates the RENDERER (a fixed probe page), not the book — cache
+# its verdict per-process so every job doesn't relaunch Chromium for it.
+_preflight_lock = threading.Lock()
+_preflight_cache: tuple[float, list[str]] | None = None  # (checked_at, issues)
 
 _RASTER_DPI = 48
 # White beyond the intended ~0.75in safe margin. The real bug left ~2.85in right
@@ -122,23 +129,78 @@ def _probe_html() -> str:
             f'<style>{root}{guide_css}</style></head><body>{page}{page}</body></html>')
 
 
-def preflight_render_check() -> list[str]:
+def rasterize_pages(pdf: bytes, page_numbers: list[int], dpi: int = 108,
+                    out_dir: str | Path = ".") -> dict[int, Path]:
+    """Rasterize specific 1-indexed pages of the SHIPPED PDF to PNG files.
+
+    Used by the vision layout QA: inspecting the exact bytes that ship is both
+    cheaper (no second Chromium render of the whole book) and more faithful than
+    screenshotting a separate HTML render path.
+    """
+    try:
+        import pypdfium2 as pdfium
+    except Exception as exc:  # pragma: no cover - dependency guard
+        log.warning("rasterize_pages_unavailable", err=str(exc)[:120])
+        return {}
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    result: dict[int, Path] = {}
+    try:
+        doc = pdfium.PdfDocument(pdf)
+    except Exception as exc:
+        log.warning("rasterize_pages_open_failed", err=str(exc)[:120])
+        return {}
+    total = len(doc)
+    scale = dpi / 72.0
+    for pno in page_numbers:
+        if not 1 <= pno <= total:
+            continue
+        try:
+            im = doc[pno - 1].render(scale=scale).to_pil().convert("RGB")
+            path = out / f"page-{pno:03d}.png"
+            im.save(path, format="PNG")
+            result[pno] = path
+        except Exception as exc:
+            log.warning("rasterize_page_failed", page=pno, err=str(exc)[:120])
+    return result
+
+
+def pdf_page_count(pdf: bytes) -> int:
+    try:
+        import pypdfium2 as pdfium
+
+        return len(pdfium.PdfDocument(pdf))
+    except Exception:
+        return 0
+
+
+def preflight_render_check(force: bool = False) -> list[str]:
     """Render a representative page through the REAL render path and gate it
     BEFORE any content/image generation, so a render-geometry regression fails
     fast (~2s, ~$0) instead of after a full expensive run. Infra errors (e.g.
     Chromium missing) do NOT block generation — only a real geometry defect does.
+
+    The verdict is cached per-process for PREFLIGHT_TTL_S (it validates the
+    renderer, not the book); pass force=True to bypass the cache.
     """
+    global _preflight_cache
     if not settings.pdf_geometry_check:
         return []
-    try:
-        from bookforge.layout import render
-        pdf = render.html_to_pdf(_probe_html())
-    except Exception as exc:  # pragma: no cover - probe infra guard
-        log.warning("preflight_render_failed", err=str(exc)[:160])
-        return []
-    issues = check_pdf_geometry(pdf)
-    if issues:
-        log.error("preflight_geometry_failed", issues=issues[:3])
-    else:
-        log.info("preflight_geometry_ok")
-    return issues
+    with _preflight_lock:
+        if not force and _preflight_cache is not None:
+            checked_at, cached = _preflight_cache
+            if time.monotonic() - checked_at < settings.preflight_ttl_s:
+                return list(cached)
+        try:
+            from bookforge.layout import render
+            pdf, _report = render.render_pdf(_probe_html())
+        except Exception as exc:  # pragma: no cover - probe infra guard
+            log.warning("preflight_render_failed", err=str(exc)[:160])
+            return []
+        issues = check_pdf_geometry(pdf)
+        if issues:
+            log.error("preflight_geometry_failed", issues=issues[:3])
+        else:
+            log.info("preflight_geometry_ok")
+        _preflight_cache = (time.monotonic(), list(issues))
+        return issues

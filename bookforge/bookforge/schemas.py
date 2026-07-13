@@ -469,6 +469,11 @@ class BookArtifact(BaseModel):
     page_count: int = 0
     file_size_mb: float = 0.0
     qa: QAResult | None = None
+    # Always-ship policy: when a repair ladder is exhausted the book still
+    # ships; what was degraded is recorded here (surfaced in status.json and
+    # operator alerts) instead of failing the job.
+    warnings: list[str] = Field(default_factory=list)
+    degraded: bool = False
 
 
 # resolve forward refs

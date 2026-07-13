@@ -5,12 +5,17 @@ Practical-guide path: structured card/list blocks for the guide card layout.
 """
 from __future__ import annotations
 
+import threading
+from collections.abc import Callable
+
 import structlog
 from pydantic import BaseModel
 
 from bookforge.clients import llm
+from bookforge.config import settings
 from bookforge.errors import EmptyBookError
 from bookforge.pipeline import content_guide, content_guardrails, grounding, layout_budget
+from bookforge.pipeline.pools import ctx_pool
 from bookforge.schemas import (
     BookBible, Chapter, ChapterPlan, Claim, SectionPlan, SourceDoc, SpecialPlan,
 )
@@ -83,43 +88,97 @@ def write_guide(
     source: SourceDoc,
     *,
     limit: int | None = None,
+    existing: list[Chapter] | None = None,
+    on_section: Callable[[Chapter], None] | None = None,
 ) -> list[Chapter]:
-    """Generate practical-guide sections as structured card/list chapters."""
+    """Generate practical-guide sections as structured card/list chapters.
+
+    `existing` (per-section checkpoints from a prior attempt) are kept as-is:
+    their indices are skipped, the dedup registry is seeded from them, and
+    numbering continues after their highest entry — a resumed run re-spends
+    only the unfinished sections. `on_section` fires after each fresh section
+    (checkpoint hook)."""
     from bookforge.schemas import profile_of
 
     sections = bible.sections[:limit] if limit else bible.sections
-    chapters: list[Chapter] = []
-    n = 1
+    done: dict[int, Chapter] = {ch.index: ch for ch in (existing or [])}
     noun = profile_of(bible).entry_schema.entry_noun
     list_lead = bible.list_lead or f"Quick {noun} ideas, one line each."
     registry = content_guide.Registry()
-    skipped = 0
-    for section in sections:
+    for ch in done.values():
+        registry.add_chapter(ch)
+    todo = [s for s in sections if s.index not in done]
+
+    # Warm the tools+system prompt cache so parallel workers all READ the
+    # cached prefix instead of every first-wave call writing it.
+    if todo:
+        content_guide.warm_section_cache(bible)
+
+    abort = threading.Event()
+
+    def _one(section: SectionPlan) -> tuple[int, Chapter | None, Exception | None]:
+        if abort.is_set():
+            return section.index, None, None
         try:
-            ch, n = _build_guide_section(
-                section, bible, source, start_number=n,
+            # Sections generate concurrently with per-section numbering; the
+            # serial _renumber pass below reproduces the global sequence
+            # byte-identically (numbers are assigned in Python, not the LLM).
+            ch, _ = _build_guide_section(
+                section, bible, source, start_number=1,
                 registry=registry, list_lead=list_lead,
             )
         except Exception as exc:
             # Degrade, don't die: a failed section is skipped so the rest of the
-            # book still ships. If the provider is down, EVERY section fails and
-            # the empty-book guard below re-raises for park & auto-resume.
-            if llm.is_provider_unavailable(exc):
-                raise
-            skipped += 1
+            # book still ships. Fatal classes (provider down, budget, cancel/
+            # deadline) abort the pool and re-raise for park & auto-resume.
+            if llm.never_swallow(exc):
+                abort.set()
+                return section.index, None, exc
             log.warning("section_skipped", title=section.title, err=str(exc)[:200])
-            continue
-        chapters.append(ch)
+            return section.index, None, None
+        if on_section is not None:
+            on_section(ch)
+        return section.index, ch, None
+
+    fresh: dict[int, Chapter] = {}
+    skipped = 0
+    if todo:
+        with ctx_pool(settings.section_concurrency, "section") as pool:
+            results = list(pool.map(_one, todo))
+        fatal = next((err for _, _, err in results if err is not None), None)
+        if fatal is not None:
+            raise fatal
+        for idx, ch, _ in results:
+            if ch is not None:
+                fresh[idx] = ch
+            else:
+                skipped += 1
+    merged = {**done, **fresh}
+    chapters = [merged[s.index] for s in sections if s.index in merged]
     if not chapters:
         raise EmptyBookError(
             f"all {len(sections)} sections failed to generate — nothing to ship"
         )
+    uses = _renumber(chapters)
     drift = content_guardrails.scan_chapters_for_count_drift(chapters, bible)
     for issue in drift:
         log.warning("count_drift", issue=issue)
-    log.info("guide_written", sections=len(chapters), skipped=skipped, uses=n - 1,
-             count_drift=len(drift))
+    log.info("guide_written", sections=len(chapters), resumed=len(done),
+             skipped=skipped, uses=uses, count_drift=len(drift))
     return chapters
+
+
+def _renumber(chapters: list[Chapter]) -> int:
+    """Assign the global entry sequence in reading order (chapters are already
+    in plan order; within a chapter, blocks then entries in order) — exactly
+    what the serial writer produced. Returns the total numbered entries."""
+    n = 1
+    for ch in chapters:
+        for block in ch.blocks:
+            for e in block.entries:
+                e.number = n
+                n += 1
+    return n - 1
 
 
 def _make_special(sp: SpecialPlan, section_title: str, bible: BookBible):
@@ -132,7 +191,7 @@ def _make_special(sp: SpecialPlan, section_title: str, bible: BookBible):
             )
         return content_guide.make_checklist(sp.heading, sp.about, sp.items, bible)
     except Exception as exc:
-        if llm.is_provider_unavailable(exc):
+        if llm.never_swallow(exc):
             raise
         log.warning("special_skipped", kind=sp.kind, heading=sp.heading,
                     err=str(exc)[:200])
@@ -196,13 +255,9 @@ def regenerate_guide_sections(
     noun = profile_of(bible).entry_schema.entry_noun
     list_lead = bible.list_lead or f"Quick {noun} ideas, one line each."
 
-    out: list[Chapter] = []
-    for ch in chapters:
-        faults = faults_by_idx.get(ch.index)
-        section = sections_by_idx.get(ch.index)
-        if not faults or section is None:
-            out.append(ch)
-            continue
+    def _rebuild(ch: Chapter) -> tuple[int, Chapter]:
+        faults = faults_by_idx[ch.index]
+        section = sections_by_idx[ch.index]
         registry = content_guide.Registry()
         for other in registry_seed:
             if other.index != ch.index:
@@ -223,14 +278,23 @@ def regenerate_guide_sections(
         except Exception as exc:
             # Keep the prior draft rather than losing the section — the loop will
             # ship best-effort regardless.
-            if llm.is_provider_unavailable(exc):
+            if llm.never_swallow(exc):
                 raise
             log.warning("section_regen_skipped", idx=ch.index, err=str(exc)[:200])
-            out.append(ch)
-            continue
+            return ch.index, ch
         log.info("section_regenerated", idx=ch.index, faults=len(faults))
-        out.append(new_ch)
-    return out
+        return ch.index, new_ch
+
+    # Rebuilt sections are independent (each seeds its own registry from the
+    # OTHER current chapters and keeps its own start number) — regenerate the
+    # faulted subset concurrently.
+    faulted = [ch for ch in chapters
+               if faults_by_idx.get(ch.index) and ch.index in sections_by_idx]
+    rebuilt: dict[int, Chapter] = {}
+    if faulted:
+        with ctx_pool(settings.section_concurrency, "regen") as pool:
+            rebuilt = dict(pool.map(_rebuild, faulted))
+    return [rebuilt.get(ch.index, ch) for ch in chapters]
 
 
 def write_chapter(
@@ -262,14 +326,14 @@ def write_chapter(
         final = llm.structured(_DEV_EDIT.format(draft=draft.model_dump_json()),
                                Chapter, system=system, max_tokens=8000)
     except Exception as exc:
-        if llm.is_provider_unavailable(exc):
+        if llm.never_swallow(exc):
             raise
         log.warning("dev_edit_skipped", idx=plan.index, err=str(exc)[:200])
     try:
         final = llm.structured(_LINE_EDIT.format(chapter=final.model_dump_json()),
                               Chapter, system=system, max_tokens=8000)
     except Exception as exc:
-        if llm.is_provider_unavailable(exc):
+        if llm.never_swallow(exc):
             raise
         log.warning("line_edit_skipped", idx=plan.index, err=str(exc)[:200])
     final.index, final.title = plan.index, plan.title
@@ -277,7 +341,7 @@ def write_chapter(
     try:
         attribute_claims(final, passages)
     except Exception as exc:
-        if llm.is_provider_unavailable(exc):
+        if llm.never_swallow(exc):
             raise
         log.warning("claims_skipped", idx=plan.index, err=str(exc)[:200])
     log.info("chapter_written", idx=plan.index, blocks=len(final.blocks),
@@ -344,7 +408,7 @@ def summarize_for_memory(chapter: Chapter) -> str:
             model=None, max_tokens=300,
         )
     except Exception as exc:
-        if llm.is_provider_unavailable(exc):
+        if llm.never_swallow(exc):
             raise
         log.warning("memory_summary_skipped", idx=chapter.index, err=str(exc)[:200])
         return ""
@@ -361,7 +425,7 @@ def write_book(bible: BookBible, source: SourceDoc, *, limit: int | None = None)
         except Exception as exc:
             # A failed chapter is skipped so the rest of the book still ships;
             # provider-wide failures propagate to the empty-book guard below.
-            if llm.is_provider_unavailable(exc):
+            if llm.never_swallow(exc):
                 raise
             skipped += 1
             log.warning("chapter_skipped", idx=plan.index, title=plan.title,

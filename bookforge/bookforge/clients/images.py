@@ -5,26 +5,36 @@ Providers:
   * openai  -> gpt-image-1  (high quality + best in-image text rendering)
 
 Routing: `IMAGE_PRIMARY_PROVIDER` and `IMAGE_PRIMARY_MODEL` select the engine.
-`IMAGE_ALLOW_PROVIDER_FALLBACK` controls whether Imagen failures fall back to OpenAI.
-Returns raw image bytes; right-sizing/upscaling happens in pipeline.images.
+`IMAGE_ALLOW_PROVIDER_FALLBACK` controls whether gemini failures — INCLUDING
+quota exhaustion — fall back to OpenAI (a Gemini daily quota says nothing about
+the OpenAI account). Returns raw image bytes; right-sizing happens in
+pipeline.images.
 """
 from __future__ import annotations
 
 import base64
+import time
 
 import structlog
 from tenacity import retry, retry_if_not_exception_type, stop_after_attempt, wait_exponential
 
+from bookforge.clients import quota as quota_mod
 from bookforge.config import settings
 from bookforge.cost import budget
+from bookforge.pipeline import runctx
 
 
 class ImageQuotaError(RuntimeError):
-    """Raised when the image provider returns a quota / rate-limit (429) error.
+    """The image provider returned a quota / rate-limit (429) error.
 
-    This is not retryable — callers must propagate it so the pipeline fails
-    immediately with a clear error rather than grinding through every brief.
+    Carries `quota_class` ("daily" | "per_minute" | "unknown") and `wait_until`
+    (aware UTC datetime or None) so the API can park until retrying can
+    actually succeed instead of burning attempts on a daily quota.
     """
+
+    def __init__(self, message: str):
+        super().__init__(message)
+        self.quota_class, self.wait_until = quota_mod.parse_quota(message)
 
 
 class ImageGenerationError(RuntimeError):
@@ -60,7 +70,8 @@ def _openai():
 
         if not settings.openai_api_key:
             raise RuntimeError("OPENAI_API_KEY is not set — populate .env")
-        _openai_client = OpenAI(api_key=settings.openai_api_key)
+        _openai_client = OpenAI(api_key=settings.openai_api_key,
+                                timeout=settings.image_timeout_s, max_retries=1)
     return _openai_client
 
 
@@ -88,10 +99,14 @@ def _is_fatal_imagen_error(exc: Exception) -> bool:
     return False
 
 
+# reraise=True on both generators: callers and the API's failure classifier
+# must see the ORIGINAL exception, never an opaque tenacity RetryError.
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=20),
-       retry=retry_if_not_exception_type((ImageQuotaError, ImageGenerationError)))
+       retry=retry_if_not_exception_type((ImageQuotaError, ImageGenerationError)),
+       reraise=True)
 def _gen_openai(prompt: str, aspect: str, negative_prompt: str = "") -> bytes:
-    model = settings.image_primary_model or "gpt-image-1"
+    model = "gpt-image-1" if settings.image_primary_provider != "openai" else (
+        settings.image_primary_model or "gpt-image-1")
     # gpt-image-1 has no negative-prompt slot — fold it into the positive prompt.
     full = f"{prompt} Avoid: {negative_prompt}." if negative_prompt else prompt
     try:
@@ -118,14 +133,18 @@ _IMAGEN_FALLBACKS = [
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=20),
-       retry=retry_if_not_exception_type((ImageQuotaError, ImageGenerationError)))
+       retry=retry_if_not_exception_type((ImageQuotaError, ImageGenerationError)),
+       reraise=True)
 def _gen_gemini(prompt: str, aspect: str, negative_prompt: str = "") -> bytes:
     from google import genai
     from google.genai import types
 
     if not settings.gemini_api_key:
         raise RuntimeError("GEMINI_API_KEY is not set — populate .env")
-    client = genai.Client(api_key=settings.gemini_api_key)
+    client = genai.Client(
+        api_key=settings.gemini_api_key,
+        http_options=types.HttpOptions(timeout=int(settings.image_timeout_s * 1000)),
+    )
     # Imagen on the Developer API rejects `negative_prompt` (Enterprise/Vertex
     # only). Fold it into the positive prompt instead.
     full = f"{prompt} Avoid: {negative_prompt}." if negative_prompt else prompt
@@ -145,7 +164,7 @@ def _gen_gemini(prompt: str, aspect: str, negative_prompt: str = "") -> bytes:
         except Exception as exc:
             if _is_quota_error(exc):
                 # 429 means the API key is exhausted — no point trying other models
-                # or letting tenacity retry. Raise immediately so the pipeline fails.
+                # or letting tenacity retry. Raise so generate() can classify it.
                 raise ImageQuotaError(str(exc)) from exc
             if _is_fatal_imagen_error(exc):
                 # 400/403 billing or auth — no point trying other models.
@@ -209,10 +228,21 @@ def _ping_openai(probe: str) -> None:
         raise
 
 
+def _openai_fallback_ok() -> bool:
+    return bool(settings.image_allow_provider_fallback and settings.openai_api_key)
+
+
 def generate(prompt: str, *, aspect: str = "full_bleed", in_image_text: bool = False,
              negative_prompt: str = "") -> bytes:
     """Generate one image. `in_image_text` is informational — gpt-image-1 renders
-    text well natively; Imagen should avoid baked-in text."""
+    text well natively; Imagen should avoid baked-in text.
+
+    Gemini failure handling, cheapest exit first:
+      per-minute 429 -> one in-stage backoff retry on gemini;
+      any quota/fatal/unknown failure -> OpenAI fallback when enabled;
+      otherwise raise the classified error for the caller/park logic.
+    """
+    runctx.checkpoint()
     budget.assert_ok()
     provider = settings.image_primary_provider.lower()
     model = settings.image_primary_model
@@ -222,14 +252,38 @@ def generate(prompt: str, *, aspect: str = "full_bleed", in_image_text: bool = F
     if provider == "gemini":
         try:
             data = _gen_gemini(prompt, aspect, negative_prompt=negative_prompt)
-        except (ImageQuotaError, ImageGenerationError):
-            raise  # fatal — don't silently skip or fall back
-        except Exception as exc:
-            if settings.image_allow_provider_fallback:
-                log.warning("gemini_fallback_openai", err=str(exc)[:160])
-                _validate_provider("openai")
+        except ImageQuotaError as exc:
+            data = None
+            if exc.quota_class == quota_mod.PER_MINUTE:
+                # A per-minute rate limit clears in seconds — one bounded wait
+                # beats parking the whole job for it.
+                log.warning("imagen_per_minute_limit_retry", err=str(exc)[:160])
+                time.sleep(45)
+                runctx.checkpoint()
+                try:
+                    data = _gen_gemini(prompt, aspect, negative_prompt=negative_prompt)
+                except (ImageQuotaError, ImageGenerationError):
+                    data = None
+            if data is None:
+                if _openai_fallback_ok():
+                    log.warning("gemini_quota_fallback_openai",
+                                quota_class=exc.quota_class, err=str(exc)[:160])
+                    data = _gen_openai(prompt, aspect, negative_prompt=negative_prompt)
+                    provider, model, fallback_used = "openai", "gpt-image-1", True
+                else:
+                    raise
+        except ImageGenerationError as exc:
+            if _openai_fallback_ok():
+                log.warning("gemini_fatal_fallback_openai", err=str(exc)[:160])
                 data = _gen_openai(prompt, aspect, negative_prompt=negative_prompt)
-                provider, model, fallback_used = "openai", settings.image_primary_model, True
+                provider, model, fallback_used = "openai", "gpt-image-1", True
+            else:
+                raise
+        except Exception as exc:
+            if _openai_fallback_ok():
+                log.warning("gemini_fallback_openai", err=str(exc)[:160])
+                data = _gen_openai(prompt, aspect, negative_prompt=negative_prompt)
+                provider, model, fallback_used = "openai", "gpt-image-1", True
             else:
                 raise
     else:

@@ -7,7 +7,8 @@ pass until groundedness clears the configured threshold (default 100%).
 """
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+import hashlib
+import threading
 
 import structlog
 from pydantic import BaseModel
@@ -17,6 +18,7 @@ import re
 from bookforge import safety as safety_mod
 from bookforge.clients import llm
 from bookforge.config import settings
+from bookforge.pipeline.pools import ctx_pool
 from bookforge.schemas import (
     BlockType, BookBible, Chapter, Claim, QAResult, SafetyFinding, SourceDoc,
     profile_of,
@@ -55,6 +57,38 @@ class _Prose(BaseModel):
     notes: str = ""
 
 
+class GateCache:
+    """Memoizes per-chapter judge results across gate re-runs within one book
+    run. The gate runs up to 5x per book (initial + fix-loop revisions +
+    post-sanitize) but most chapters don't change between runs — re-scoring
+    them re-spends Opus tokens for identical verdicts. Keys are content hashes,
+    so any edited chapter self-invalidates."""
+
+    def __init__(self) -> None:
+        self.prose: dict[str, _Prose] = {}
+        self.judged: dict[str, list[Claim]] = {}
+        self.lock = threading.Lock()
+
+
+def _ch_key(chapter: Chapter) -> str:
+    return hashlib.sha256(chapter.model_dump_json().encode()).hexdigest()
+
+
+def _cached_prose(chapter: Chapter, banned: list[str],
+                  cache: GateCache | None) -> _Prose:
+    if cache is not None:
+        key = _ch_key(chapter)
+        with cache.lock:
+            hit = cache.prose.get(key)
+        if hit is not None:
+            return hit
+    ps = score_prose(chapter, banned)
+    if cache is not None:
+        with cache.lock:
+            cache.prose[key] = ps
+    return ps
+
+
 def score_prose(chapter: Chapter, bible_banned: list[str]) -> _Prose:
     # Include the authored CARD content (titles/intros/steps), not just prose
     # blocks — the cards are where vague filler hides.
@@ -91,22 +125,26 @@ def run_gate(chapters: list[Chapter], source: SourceDoc, banned: list[str]) -> Q
             return claim
 
     # Claims are independent — verify them concurrently instead of one-at-a-time.
-    # (Production runs this fan-out across Celery workers; here a thread pool.)
+    # (ctx_pool propagates the per-book budget + job context into workers.)
     all_claims: list[Claim] = []
     if claims_to_check:
-        with ThreadPoolExecutor(max_workers=8) as pool:
+        with ctx_pool(8, "verify") as pool:
             all_claims = list(pool.map(_safe_verify, claims_to_check))
 
     unsupported = [c for c in all_claims if c.verdict != "supported"]
     grounded = (len(all_claims) - len(unsupported)) / len(all_claims) if all_claims else 1.0
 
-    prose_scores = []
-    for ch in chapters:
+    def _safe_prose(ch: Chapter) -> float:
         try:
-            prose_scores.append(score_prose(ch, banned).score)
+            return score_prose(ch, banned).score
         except Exception as exc:
+            if llm.never_swallow(exc):
+                raise
             log.warning("prose_score_failed", chapter=ch.index, err=str(exc)[:160])
-            prose_scores.append(0.5)
+            return 0.5
+
+    with ctx_pool(settings.prose_score_concurrency, "prose") as pool:
+        prose_scores = list(pool.map(_safe_prose, chapters))
     prose = sum(prose_scores) / len(prose_scores) if prose_scores else 0.0
 
     passed = grounded >= settings.groundedness_threshold and prose >= 0.7
@@ -424,78 +462,103 @@ def sanitize_unsafe_steps(
 
 def _sampled_guide_judges(
     chapters: list[Chapter], source: SourceDoc, bible: BookBible,
+    cache: GateCache | None = None,
 ) -> tuple[float, list[Claim], float]:
     """Budget-aware LLM checks on a sample: scoped groundedness over prose
     blocks (essays + chapter intros — never authored steps/quantities) and
-    prose scoring."""
+    prose scoring. Sample chapters run concurrently; unchanged chapters hit
+    the gate cache on re-runs."""
     from bookforge.pipeline import content, grounding
 
     sample = chapters[:: max(1, len(chapters) // 4)][:4]
-    all_claims: list[Claim] = []
     passages_by_id = _passage_lookup(source)
-    for ch in sample:
+
+    def _safe_verify(claim: Claim) -> Claim:
+        try:
+            return verify_claim(claim, passages_by_id)
+        except Exception as exc:
+            if llm.never_swallow(exc):
+                raise
+            log.warning("verify_failed", claim=claim.id, err=str(exc)[:160])
+            claim.verdict, claim.verifier_notes = "unsupported", "verify error"
+            return claim
+
+    def _judge_chapter(ch: Chapter) -> list[Claim]:
+        key = _ch_key(ch)
+        if cache is not None:
+            with cache.lock:
+                hit = cache.judged.get(key)
+            if hit is not None:
+                return hit
         prose_blocks = [b for b in ch.blocks
                         if b.type in (BlockType.history, BlockType.section_intro)
                         and b.text]
         if not prose_blocks:
-            continue
-        pseudo = Chapter(index=ch.index, title=ch.title, blocks=prose_blocks)
-        passages = grounding.retrieve(ch.title, source.passages, k=8)
-        try:
-            content.attribute_claims(pseudo, passages)
-        except Exception as exc:
-            if llm.is_provider_unavailable(exc):
-                raise
-            log.warning("guide_claims_skipped", chapter=ch.index,
-                        err=str(exc)[:160])
-            continue
-        all_claims.extend(c for b in pseudo.blocks for c in b.claims)
-
-    all_claims = all_claims[:120]
-    unsupported: list[Claim] = []
-    if all_claims:
-        def _safe_verify(claim: Claim) -> Claim:
+            verified: list[Claim] = []
+        else:
+            pseudo = Chapter(index=ch.index, title=ch.title, blocks=prose_blocks)
+            passages = grounding.retrieve(ch.title, source.passages, k=8)
             try:
-                return verify_claim(claim, passages_by_id)
+                content.attribute_claims(pseudo, passages)
             except Exception as exc:
-                log.warning("verify_failed", claim=claim.id, err=str(exc)[:160])
-                claim.verdict, claim.verifier_notes = "unsupported", "verify error"
-                return claim
+                if llm.never_swallow(exc):
+                    raise
+                log.warning("guide_claims_skipped", chapter=ch.index,
+                            err=str(exc)[:160])
+                return []
+            claims = [c for b in pseudo.blocks for c in b.claims][:40]
+            with ctx_pool(8, "verify") as vpool:
+                verified = list(vpool.map(_safe_verify, claims))
+        if cache is not None:
+            with cache.lock:
+                cache.judged[key] = verified
+        return verified
 
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            verified = list(pool.map(_safe_verify, all_claims))
+    with ctx_pool(min(4, max(1, len(sample))), "judge") as pool:
+        judged_lists = list(pool.map(_judge_chapter, sample))
+    all_claims = [c for lst in judged_lists for c in lst][:120]
+
+    if all_claims:
         # Guides are AUTHORED content by policy (profile.authored_content):
         # essays/headnotes legitimately weave era color beyond the source, so
         # "unsupported" is reported for review but only a CONTRADICTED claim
         # (source says otherwise → invented/wrong history) gates the book.
-        unsupported = [c for c in verified if c.verdict != "supported"]
-        contradicted = [c for c in verified if c.verdict == "contradicted"]
-        grounded = (len(verified) - len(contradicted)) / len(verified)
+        unsupported = [c for c in all_claims if c.verdict != "supported"]
+        contradicted = [c for c in all_claims if c.verdict == "contradicted"]
+        grounded = (len(all_claims) - len(contradicted)) / len(all_claims)
     else:
+        unsupported = []
         grounded = 1.0
 
-    scores = []
-    for ch in sample:
+    def _safe_sample_prose(ch: Chapter) -> float | None:
         try:
-            scores.append(score_prose(ch, bible.voice.banned_patterns).score)
+            return _cached_prose(ch, bible.voice.banned_patterns, cache).score
         except Exception as exc:
-            if llm.is_provider_unavailable(exc):
+            if llm.never_swallow(exc):
                 raise
             log.warning("guide_prose_score_failed", chapter=ch.index,
                         err=str(exc)[:160])
+            return None
+
+    with ctx_pool(min(4, max(1, len(sample))), "prose") as pool:
+        maybe_scores = list(pool.map(_safe_sample_prose, sample))
+    scores = [s for s in maybe_scores if s is not None]
     prose = sum(scores) / len(scores) if scores else 0.8
     return grounded, unsupported, prose
 
 
 def run_guide_gate(
     chapters: list[Chapter], source: SourceDoc, bible: BookBible,
+    cache: GateCache | None = None,
 ) -> QAResult:
     """Content gate for practical guides (replaces the old hardcoded pass).
 
     1. Deterministic schema audit — free, blocking when >5% of cards violate
        or any generated danger pattern trips.
     2. Sampled LLM judges — scoped groundedness on prose + prose scoring.
-    """
+
+    Pass one `cache` across a run's gate invocations so re-runs after the
+    fix-loop only re-judge the chapters that actually changed."""
     from bookforge.pipeline import content_guardrails
 
     issues, findings = audit_guide_chapters(chapters, bible)
@@ -510,9 +573,9 @@ def run_guide_gate(
 
     try:
         grounded, unsupported, prose = _sampled_guide_judges(
-            chapters, source, bible)
+            chapters, source, bible, cache)
     except Exception as exc:
-        if llm.is_provider_unavailable(exc):
+        if llm.never_swallow(exc):
             raise
         log.warning("guide_judges_skipped", err=str(exc)[:200])
         grounded, unsupported, prose = 1.0, [], 0.8
@@ -522,13 +585,22 @@ def run_guide_gate(
     # notes as feedback), instead of a soft warning that ships as-is.
     if settings.strict_quality:
         floor = settings.prose_floor
-        scores: list[float] = []
-        for ch in chapters:
+
+        def _strict_one(ch: Chapter) -> _Prose | None:
             try:
-                ps = score_prose(ch, bible.voice.banned_patterns)
+                return _cached_prose(ch, bible.voice.banned_patterns, cache)
             except Exception as exc:
-                if llm.is_provider_unavailable(exc):
+                if llm.never_swallow(exc):
                     raise
+                log.warning("strict_prose_score_failed", chapter=ch.index,
+                            err=str(exc)[:160])
+                return None
+
+        with ctx_pool(settings.prose_score_concurrency, "prose") as pool:
+            strict_scores = list(pool.map(_strict_one, chapters))
+        scores: list[float] = []
+        for ch, ps in zip(chapters, strict_scores):
+            if ps is None:
                 continue
             scores.append(ps.score)
             if ps.score < floor:

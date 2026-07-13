@@ -261,6 +261,19 @@ b, strong { font-weight: 700; }
 /* last resort, applied by the fitter only when a single word is wider than the
    panel column even at the floor size */
 .gdivider .t.force-break { overflow-wrap: break-word; }
+/* the fitter may extend force-break to any fixed display region (cover band,
+   safety band) as rung 1 of the terminal rescue ladder */
+.force-break { overflow-wrap: break-word; }
+/* terminal rescue (rung 3): clamp the region with an ellipsis rather than let
+   it clip at the page edge — applied by the fitter only after force-break AND
+   a dropped floor both failed; ships with a "layout rescue" warning */
+.rescue-clip {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .gdivider .rule { width: 1.5in; height: 3px; background: var(--gold); margin: .34in 0; }
 .gdivider .k { font-family: var(--body); font-size: 15pt; line-height: 1.5;
   color: rgba(255,255,255,.95); }

@@ -6,10 +6,20 @@ printing we run a TEXT-FIT pass: each `.gfit` region is scaled to the largest
 font that still fits its page box (down to a high-legibility floor), and
 growable regions then expand to fill any slack — so pages are big-text,
 fully-covered, and never clipped.
+
+Fixed display regions (cover band, divider panels, safety bands) get a terminal
+rescue ladder instead of a dead end: shrink -> force-break -> drop the floor ->
+clamp with an ellipsis. A clamped region is reported under `rescued` (ships as
+a warning), never under `stuck` (which used to kill the job).
+
+`render_pdf` / `render_pngs` RETURN the fit/audit report — callers must gate on
+the returned report, never on shared state, so two concurrent books can never
+read each other's audit. (`last_fit_report` remains for legacy dev scripts.)
 """
 from __future__ import annotations
 
 import os
+import threading
 from pathlib import Path
 
 import structlog
@@ -27,6 +37,16 @@ RENDER_URL = os.environ.get("RENDER_URL", "")
 # viewport and the page.pdf() sheet size to the same trim+bleed dimensions so the
 # geometry is deterministic and independent of viewport defaults / @page quirks.
 _CSS_PX_PER_IN = 96
+
+# Renders are Chromium-heavy (RAM + CPU); serialize them process-wide so two
+# concurrent books (or a book + a rerender) can't stack Chromium instances —
+# that's what OOM'd the whole API. Also keeps the legacy report global coherent.
+_render_lock = threading.Lock()
+
+# Timeouts mirror render/server.js, which was already sized for large image-rich
+# books ("Puppeteer's default 30s is too short"): 300s to lay out, 180s to print.
+_SET_CONTENT_TIMEOUT_MS = 300_000
+_PDF_TIMEOUT_MS = 180_000
 
 
 def _page_inches() -> tuple[float, float]:
@@ -54,14 +74,17 @@ _FIT_FLOOR = float(os.environ.get("FIT_FLOOR_PT", "13"))
 # Runs in the page: set every .gfit to the canonical BASE size; only if its
 # content overflows do we binary-search DOWN to the largest size that fits (never
 # below the floor). Growable regions then absorb slack with whitespace.
-# Also fits section-divider titles and safety-band headings so text never bleeds.
+# Also fits section-divider titles, safety-band headings, and the cover band.
+# Fixed display regions that still overflow after force-break get a TERMINAL
+# RESCUE: floor dropped 25%, then a line-clamp ellipsis — reported as `rescued`
+# (ships with a warning) instead of `stuck` (job-fatal).
 # Finishes with a defect AUDIT over every text clip-container and returns
-# {stuck, overflows, pages}; assemble() hard-fails the book on any entry, so a
-# clipped or mid-word-broken layout can never ship.
+# {stuck, rescued, overflows, pages}.
 _LAYOUT_FIT_JS = """
 () => {
   const FLOOR = %f, BASE = %f;
   const stuck = [];
+  const rescued = [];
 
   // Fit BOTH axes: vertical overflow of the container AND horizontal overflow of
   // the element itself (a single word wider than the column). Both shrink
@@ -86,6 +109,23 @@ _LAYOUT_FIT_JS = """
     return fits(best);  // applies the final size as a side effect
   };
 
+  // Terminal ladder for FIXED display regions (cover band, divider panel,
+  // safety band): force-break -> floor dropped 25%% -> line-clamp ellipsis.
+  // Always resolves; the page ships with a rescue warning instead of dying.
+  const rescueFit = (el, label, minPt, maxPt, container) => {
+    if (shrinkToFit(el, 'fontSize', minPt, maxPt, container)) return;
+    el.classList.add('force-break');
+    if (shrinkToFit(el, 'fontSize', minPt, maxPt, container)) return;
+    const dropped = minPt * 0.75;
+    if (shrinkToFit(el, 'fontSize', dropped, maxPt, container)) {
+      rescued.push(label + ' (floor dropped)');
+      return;
+    }
+    el.classList.add('rescue-clip');
+    shrinkToFit(el, 'fontSize', dropped, maxPt, container);
+    rescued.push(label + ' (clamped)');
+  };
+
   document.querySelectorAll('.gfit').forEach((el, i) => {
     const MIN = parseFloat(el.dataset.fitmin) || FLOOR;
     el.classList.add('measuring');
@@ -107,21 +147,13 @@ _LAYOUT_FIT_JS = """
   document.querySelectorAll('.gdivider .dpanel').forEach((panel) => {
     const title = panel.querySelector('.t');
     if (!title) return;
-    let ok = shrinkToFit(title, 'fontSize', 22, 34, panel);
-    if (!ok) {
-      // a single word is wider than the panel column even at the floor size:
-      // allow a mid-word break as the last resort, then refit.
-      title.classList.add('force-break');
-      ok = shrinkToFit(title, 'fontSize', 22, 34, panel);
-    }
-    if (!ok)
-      stuck.push('divider:' + (title.textContent || '').trim().slice(0, 40));
+    rescueFit(title, 'divider:' + (title.textContent || '').trim().slice(0, 40),
+              22, 34, panel);
   });
 
   document.querySelectorAll('.gsafety .band h2').forEach((h2) => {
     const band = h2.closest('.band');
-    if (band && !shrinkToFit(h2, 'fontSize', 28, 40, band))
-      stuck.push('safety-band');
+    if (band) rescueFit(h2, 'safety-band', 28, 40, band);
   });
 
   // Cover title/subtitle: long topics ("365 Forgotten American Recipes...")
@@ -131,10 +163,8 @@ _LAYOUT_FIT_JS = """
   document.querySelectorAll('.gcover .cband').forEach((band) => {
     const title = band.querySelector('.ctitle');
     const sub = band.querySelector('.csub');
-    let ok = true;
-    if (title) ok = shrinkToFit(title, 'fontSize', 24, 46, band) && ok;
-    if (sub) ok = shrinkToFit(sub, 'fontSize', 11, 17, band) && ok;
-    if (!ok) stuck.push('cover-band');
+    if (title) rescueFit(title, 'cover-title', 24, 46, band);
+    if (sub) rescueFit(sub, 'cover-sub', 11, 17, band);
   });
 
   // ---- defect audit -------------------------------------------------------
@@ -142,10 +172,13 @@ _LAYOUT_FIT_JS = """
   // crop frames (.dphoto, entry frames) are deliberately excluded: their inner
   // img overflows by design (cover-crop), and an intermediate overflow:hidden
   // stops that overflow from propagating to these containers anyway.
+  // Regions clamped by the terminal rescue are excluded too — their ellipsis
+  // clip is deliberate and already reported under `rescued`.
   const pages = Array.from(document.querySelectorAll('.page'));
   const overflows = [];
   const AUDIT = '.gdivider .dpanel, .gfit, .gsafety .band, .gbody-box, .gcover .cband';
   document.querySelectorAll(AUDIT).forEach((el) => {
+    if (el.querySelector('.rescue-clip') || el.classList.contains('rescue-clip')) return;
     const over_h = el.scrollHeight - el.clientHeight;
     const over_w = el.scrollWidth - el.clientWidth;
     if (over_h <= 2 && over_w <= 2) return;
@@ -163,13 +196,14 @@ _LAYOUT_FIT_JS = """
     });
   });
 
-  return { count: document.querySelectorAll('.gfit').length, stuck,
+  return { count: document.querySelectorAll('.gfit').length, stuck, rescued,
            overflows, pages: pages.map((p) => p.className) };
 }
 """ % (_FIT_FLOOR, _FIT_BASE)
 
-# Report of the most recent fit/audit pass (Playwright path only). None when the
-# last render went through the remote render service, which runs no fit JS.
+# Report of the most recent fit/audit pass — legacy convenience for dev scripts
+# ONLY. Production code paths use the report RETURNED by render_pdf/render_pngs;
+# reading this global under concurrency gates one book on another book's audit.
 last_fit_report: dict | None = None
 
 
@@ -179,11 +213,15 @@ def _setup_page(page) -> None:
 
 def _prepare(page, html: str) -> dict:
     global last_fit_report
-    page.set_content(html, wait_until="networkidle")
+    # "load" (not "networkidle"): all assets are inline/base64 data URIs, and
+    # network-idle can stall on large inline payloads (per render/server.js).
+    page.set_content(html, wait_until="load", timeout=_SET_CONTENT_TIMEOUT_MS)
     page.evaluate("() => document.fonts.ready")
     report = page.evaluate(_LAYOUT_FIT_JS)
     if report.get("stuck"):
         log.warning("fit_overflow_at_floor", regions=report["stuck"])
+    if report.get("rescued"):
+        log.warning("fit_rescued_regions", regions=report["rescued"])
     if report.get("overflows"):
         log.warning("layout_audit_overflow", regions=report["overflows"][:8])
     last_fit_report = report
@@ -191,7 +229,9 @@ def _prepare(page, html: str) -> dict:
 
 
 def layout_defects(report: dict | None) -> list[str]:
-    """Human-readable defect strings from a fit/audit report (empty = clean)."""
+    """Human-readable defect strings from a fit/audit report (empty = clean).
+    Rescued regions are NOT defects — they shipped with a deliberate clamp and
+    surface via layout_warnings() instead."""
     if not report:
         return []
     issues = [f"text stuck at floor size, still overflowing: {r}"
@@ -202,6 +242,13 @@ def layout_defects(report: dict | None) -> list[str]:
         for o in report.get("overflows", [])
     ]
     return issues
+
+
+def layout_warnings(report: dict | None) -> list[str]:
+    """Non-fatal degradations (terminal rescues) worth surfacing to ops."""
+    if not report:
+        return []
+    return [f"layout rescue applied: {r}" for r in report.get("rescued", [])]
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=20), reraise=True)
@@ -234,20 +281,23 @@ def _render_service_pdf(html: str) -> tuple[bytes, dict | None]:
     return body, None
 
 
-def html_to_pdf(html: str) -> bytes:
-    """Render HTML → PDF. Prefer the render service (retried on transient errors),
-    then fall back to local Playwright if the service is unreachable, so a render
-    outage on one path doesn't fail the book."""
+def render_pdf(html: str) -> tuple[bytes, dict | None]:
+    """Render HTML → (PDF, fit/audit report). Prefer the render service (retried
+    on transient errors), then fall back to local Playwright if the service is
+    unreachable, so a render outage on one path doesn't fail the book.
+
+    The report belongs to THIS render — gate on it, never on `last_fit_report`.
+    """
+    global last_fit_report
     if RENDER_URL:
         try:
-            global last_fit_report
             pdf, report = _render_service_pdf(html)
             last_fit_report = report
             if report and report.get("stuck"):
                 log.warning("fit_overflow_at_floor", regions=report["stuck"])
             if report and report.get("overflows"):
                 log.warning("layout_audit_overflow", regions=report["overflows"][:8])
-            return pdf
+            return pdf, report
         except Exception as exc:
             log.warning("render_service_failed_falling_back_to_playwright",
                         err=str(exc)[:200])
@@ -258,7 +308,13 @@ def html_to_pdf(html: str) -> bytes:
     return _playwright_pdf(html)
 
 
-def _playwright_pdf(html: str) -> bytes:
+def html_to_pdf(html: str) -> bytes:
+    """Legacy wrapper (dev scripts): PDF only, report via `last_fit_report`."""
+    pdf, _report = render_pdf(html)
+    return pdf
+
+
+def _playwright_pdf(html: str) -> tuple[bytes, dict | None]:
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as exc:  # pragma: no cover
@@ -268,42 +324,52 @@ def _playwright_pdf(html: str) -> bytes:
         ) from exc
 
     w_in, h_in = _page_inches()
-    with sync_playwright() as p:
-        browser = p.chromium.launch()
-        try:
-            page = browser.new_page(viewport=_page_viewport(), device_scale_factor=1)
-            _setup_page(page)
-            _prepare(page, html)
-            # Pin the sheet to trim+bleed and scale=1 so the sized-in-CSS content
-            # maps 1:1 onto the page (no viewport-driven downscale).
-            pdf = page.pdf(
-                width=f"{w_in}in", height=f"{h_in}in", scale=1,
-                print_background=True, prefer_css_page_size=False,
-                margin={"top": "0", "bottom": "0", "left": "0", "right": "0"},
-            )
-        finally:
-            browser.close()
-        return pdf
+    with _render_lock:
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            try:
+                page = browser.new_page(viewport=_page_viewport(),
+                                        device_scale_factor=1)
+                _setup_page(page)
+                report = _prepare(page, html)
+                # Pin the sheet to trim+bleed and scale=1 so the sized-in-CSS
+                # content maps 1:1 onto the page (no viewport-driven downscale).
+                pdf = page.pdf(
+                    width=f"{w_in}in", height=f"{h_in}in", scale=1,
+                    print_background=True, prefer_css_page_size=False,
+                    margin={"top": "0", "bottom": "0", "left": "0", "right": "0"},
+                )
+            finally:
+                browser.close()
+            return pdf, report
 
 
-def html_to_pngs(html: str, out_dir, scale: float = 2.0) -> list[Path]:
-    """Render each .page to a PNG (for visual QA). Returns the PNG paths."""
+def render_pngs(html: str, out_dir, scale: float = 2.0) -> tuple[list[Path], dict | None]:
+    """Render each .page to a PNG (for visual QA). Returns (paths, fit report)."""
     from playwright.sync_api import sync_playwright
 
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     paths: list[Path] = []
-    with sync_playwright() as p:
-        browser = p.chromium.launch()
-        try:
-            page = browser.new_page(viewport=_page_viewport(), device_scale_factor=scale)
-            _setup_page(page)
-            _prepare(page, html)
-            for i, el in enumerate(page.query_selector_all(".page"), 1):
-                pth = out / f"page-{i:02d}.png"
-                el.screenshot(path=str(pth))
-                paths.append(pth)
-        finally:
-            browser.close()
+    with _render_lock:
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            try:
+                page = browser.new_page(viewport=_page_viewport(),
+                                        device_scale_factor=scale)
+                _setup_page(page)
+                report = _prepare(page, html)
+                for i, el in enumerate(page.query_selector_all(".page"), 1):
+                    pth = out / f"page-{i:02d}.png"
+                    el.screenshot(path=str(pth))
+                    paths.append(pth)
+            finally:
+                browser.close()
     log.info("pngs_rendered", count=len(paths), out=str(out))
+    return paths, report
+
+
+def html_to_pngs(html: str, out_dir, scale: float = 2.0) -> list[Path]:
+    """Legacy wrapper (dev scripts): paths only, report via `last_fit_report`."""
+    paths, _report = render_pngs(html, out_dir, scale=scale)
     return paths

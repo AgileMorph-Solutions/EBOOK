@@ -84,34 +84,76 @@ def _fetch_youtube(url: str) -> str:
         return _asr_youtube(video_id)
 
 
+_BOT_BLOCK_MARKERS = (
+    "sign in to confirm",
+    "confirm you're not a bot",
+    "confirm you’re not a bot",
+    "http error 429",
+    "http error 403",
+)
+
+
+def _is_bot_block(err_text: str) -> bool:
+    lower = err_text.lower()
+    return any(m in lower for m in _BOT_BLOCK_MARKERS)
+
+
 def _asr_youtube(video_id: str) -> str:
     """Download audio with yt-dlp and transcribe with faster-whisper. Wrapped so
     a blocked/geo-restricted video or a missing dependency surfaces as a clear
-    IngestError (retryable/parkable) instead of an unhandled traceback."""
+    IngestError instead of an unhandled traceback. YouTube bot-blocks are tagged
+    reason="youtube_blocked" so the user gets an actionable message ("paste the
+    text instead") rather than a generic failure."""
     import tempfile
 
     try:
         import yt_dlp
         from faster_whisper import WhisperModel
+    except Exception as exc:
+        raise IngestError(
+            f"Audio transcription is unavailable on this server: {str(exc)[:200]}"
+        ) from exc
 
-        with tempfile.TemporaryDirectory() as tmp:
-            out = f"{tmp}/audio.%(ext)s"
-            opts = {"format": "bestaudio", "outtmpl": out, "quiet": True,
-                    "postprocessors": [{"key": "FFmpegExtractAudio",
-                                        "preferredcodec": "mp3"}]}
-            cookies_path = _cookies_file()
+    cookies_path = _cookies_file()
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    # YouTube's bot checks differ per player client — datacenter IPs that the
+    # default web client blocks often pass via the android/ios clients.
+    client_variants: list[list[str] | None] = [None, ["android"], ["ios", "web_safari"]]
+    with tempfile.TemporaryDirectory() as tmp:
+        out = f"{tmp}/audio.%(ext)s"
+        last_exc: Exception | None = None
+        for clients in client_variants:
+            opts: dict = {"format": "bestaudio", "outtmpl": out, "quiet": True,
+                          "postprocessors": [{"key": "FFmpegExtractAudio",
+                                              "preferredcodec": "mp3"}]}
             if cookies_path:
                 opts["cookiefile"] = cookies_path
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                ydl.download([f"https://www.youtube.com/watch?v={video_id}"])
+            if clients:
+                opts["extractor_args"] = {"youtube": {"player_client": clients}}
+            try:
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    ydl.download([url])
+                last_exc = None
+                break
+            except Exception as exc:  # noqa: BLE001 — try the next client
+                last_exc = exc
+                log.warning("yt_dlp_client_failed",
+                            clients=clients or "default", err=str(exc)[:160])
+        if last_exc is not None:
+            msg = str(last_exc)[:300]
+            raise IngestError(
+                f"Could not download this video's audio: {msg}",
+                reason="youtube_blocked" if _is_bot_block(msg) else "",
+            ) from last_exc
+        try:
             model = WhisperModel("base", device="cpu", compute_type="int8")
             segments, _ = model.transcribe(f"{tmp}/audio.mp3")
             return " ".join(s.text for s in segments)
-    except Exception as exc:
-        raise IngestError(
-            f"Could not get a transcript for this video (no captions and audio "
-            f"transcription failed): {str(exc)[:200]}"
-        ) from exc
+        except Exception as exc:
+            raise IngestError(
+                f"Could not get a transcript for this video (no captions and "
+                f"audio transcription failed): {str(exc)[:200]}"
+            ) from exc
 
 
 def ingest(topic: str, *, text: str | None = None, youtube_url: str | None = None) -> SourceDoc:

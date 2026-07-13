@@ -260,22 +260,25 @@ def test_essay_page_tagged_and_squeeze_paginates_more():
 # --------------------------------------------------------------------------- #
 
 class _FakeRender:
-    """Substitute for layout.render inside assemble: each html_to_pdf call pops
-    the next scripted audit report."""
+    """Substitute for layout.render inside assemble: each render_pdf call pops
+    the next scripted audit report and returns it alongside the fake PDF."""
 
     def __init__(self, reports):
         self.reports = list(reports)
         self.last_fit_report = None
 
-    def html_to_pdf(self, html):
+    def render_pdf(self, html):
         self.last_fit_report = self.reports.pop(0)
-        return b"%PDF-fake"
+        return b"%PDF-fake", self.last_fit_report
 
     def layout_defects(self, report):
         return render.layout_defects(report)
 
+    def layout_warnings(self, report):
+        return render.layout_warnings(report)
 
-def _run_render_practical(monkeypatch, reports):
+
+def _run_render_practical(monkeypatch, reports, degraded=False):
     fake = _FakeRender(reports)
     seen_repairs = []
 
@@ -286,14 +289,15 @@ def _run_render_practical(monkeypatch, reports):
     monkeypatch.setattr(assemble, "render", fake)
     monkeypatch.setattr(assemble.guide, "build_practical_html", fake_build)
     result = assemble._render_practical(
-        _bible(), [], [], cover_key=None, how_to=None, safety_data=None, pro=None)
+        _bible(), [], [], cover_key=None, how_to=None, safety_data=None,
+        pro=None, degraded=degraded)
     return result, seen_repairs
 
 
 def test_render_practical_clean_first_pass(monkeypatch):
-    (html, pdf), repairs = _run_render_practical(
+    (html, pdf, report, warns), repairs = _run_render_practical(
         monkeypatch, [{"stuck": [], "overflows": [], "pages": []}])
-    assert pdf.startswith(b"%PDF") and repairs == [None]
+    assert pdf.startswith(b"%PDF") and repairs == [None] and warns == []
 
 
 def _over(key, content_h, box_h, page=9):
@@ -306,7 +310,8 @@ def test_render_practical_one_shot_measured_repair(monkeypatch):
     # ratio 1.5 -> flow (level 2) planned DIRECTLY from the measurement
     overflowing = {"stuck": [], "pages": [], "overflows": [_over("1.4", 1500, 1000)]}
     clean = {"stuck": [], "overflows": [], "pages": []}
-    (html, pdf), repairs = _run_render_practical(monkeypatch, [overflowing, clean])
+    (html, pdf, _r, _w), repairs = _run_render_practical(
+        monkeypatch, [overflowing, clean])
     assert repairs == [None, {"1.4": 2}]  # one repair pass, no escalation loop
 
 
@@ -314,8 +319,29 @@ def test_render_practical_corrective_round_makes_progress(monkeypatch):
     over = {"stuck": [], "pages": [], "overflows": [_over("1.4", 1100, 1000)]}
     clean = {"stuck": [], "overflows": [], "pages": []}
     # ratio 1.1 -> spread; still overflowing after rebuild -> bumped past it
-    (html, pdf), repairs = _run_render_practical(monkeypatch, [over, over, clean])
+    (html, pdf, _r, _w), repairs = _run_render_practical(
+        monkeypatch, [over, over, clean])
     assert repairs == [None, {"1.4": 1}, {"1.4": 2}]
+
+
+def test_render_practical_reports_rescued_regions_as_warnings(monkeypatch):
+    # A cover/divider clamp from the in-render terminal rescue is a WARNING on
+    # a clean audit, never a defect that fails the render.
+    clean_with_rescue = {"stuck": [], "overflows": [], "pages": [],
+                         "rescued": ["cover-title (clamped)"]}
+    (html, pdf, _r, warns), _ = _run_render_practical(
+        monkeypatch, [clean_with_rescue])
+    assert warns == ["layout rescue applied: cover-title (clamped)"]
+
+
+def test_render_practical_degraded_ships_instead_of_raising(monkeypatch):
+    # Terminal always-ship mode: the unrepairable report still returns a PDF
+    # with the defects converted to warnings.
+    bad = {"stuck": ["divider:Unfixable"], "overflows": [], "pages": []}
+    (html, pdf, _r, warns), _ = _run_render_practical(
+        monkeypatch, [bad] * 7, degraded=True)
+    assert pdf.startswith(b"%PDF")
+    assert any("layout defect shipped" in w for w in warns)
 
 
 def test_plan_repairs_computes_exact_chart_split_and_rescue():

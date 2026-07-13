@@ -119,6 +119,57 @@ class Settings(BaseSettings):
     # Zero API cost, runs on every book, hard-fails a page-size/scale/clip defect.
     pdf_geometry_check: bool = Field(True, alias="PDF_GEOMETRY_CHECK")
 
+    # --- Hang protection / client timeouts ---
+    # Per-request read timeout for Anthropic calls. Tenacity owns retries; the
+    # SDK's internal retry is disabled so a hung call is bounded by this alone.
+    llm_timeout_s: float = Field(180.0, alias="LLM_TIMEOUT_S")
+    image_timeout_s: float = Field(120.0, alias="IMAGE_TIMEOUT_S")
+    # Process-wide cap on concurrent in-flight LLM requests, so per-stage worker
+    # pools compose with MAX_CONCURRENT_BOOKS without stampeding the API.
+    llm_max_inflight: int = Field(12, alias="LLM_MAX_INFLIGHT")
+    # Cooperative per-attempt wall-clock deadline. On breach the job PARKS with
+    # checkpoints intact (resume continues where it left off), it does not fail.
+    job_timeout_minutes: int = Field(120, alias="JOB_TIMEOUT_MINUTES")
+    # Watchdog: a "running" job whose heartbeat is older than this is re-parked
+    # if its worker thread is gone (e.g. wedged then process partially recovered).
+    heartbeat_stale_minutes: int = Field(30, alias="HEARTBEAT_STALE_MINUTES")
+    # How many concurrency slots parked/resumed jobs may occupy at once — the
+    # remainder is reserved for fresh submissions so resume storms can't starve
+    # new work. Must be < MAX_CONCURRENT_BOOKS to guarantee a fresh-work slot.
+    resume_max_concurrent: int = Field(1, alias="RESUME_MAX_CONCURRENT")
+
+    # --- Always-ship policy ---
+    # When every layout repair rung is exhausted, ship the best rendered PDF with
+    # layout_warnings + an operator alert instead of failing the job. Set false
+    # to restore the old hard-fail behavior.
+    ship_on_layout_defects: bool = Field(True, alias="SHIP_ON_LAYOUT_DEFECTS")
+    # Ship a book that still exceeds its page ceiling after all trim passes
+    # (with a warning) instead of raising PageLimitError.
+    ship_on_page_overshoot: bool = Field(True, alias="SHIP_ON_PAGE_OVERSHOOT")
+    # How many times a DAILY image-quota exhaustion may park the book until the
+    # quota horizon before we ship it with the images we have.
+    image_quota_max_parks: int = Field(1, alias="IMAGE_QUOTA_MAX_PARKS")
+    # Timezone whose midnight defines the daily image-quota reset (Google quotas
+    # reset at midnight Pacific).
+    quota_reset_tz: str = Field("America/Los_Angeles", alias="QUOTA_RESET_TZ")
+
+    # --- Throughput (bounded worker pools; 1 = serial, matches old behavior) ---
+    section_concurrency: int = Field(4, alias="SECTION_CONCURRENCY")
+    image_concurrency: int = Field(4, alias="IMAGE_CONCURRENCY")
+    # Generate 1 image candidate and only add more when vision QA rejects it,
+    # instead of always generating IMAGE_CANDIDATES_PER_PAGE upfront.
+    image_adaptive_candidates: bool = Field(True, alias="IMAGE_ADAPTIVE_CANDIDATES")
+    prose_score_concurrency: int = Field(8, alias="PROSE_SCORE_CONCURRENCY")
+    vision_qa_concurrency: int = Field(4, alias="VISION_QA_CONCURRENCY")
+    # Anthropic prompt caching (cache_control on the stable system prefix).
+    prompt_cache_enabled: bool = Field(True, alias="PROMPT_CACHE_ENABLED")
+    # Run vision layout QA only on the final accepted artifact instead of on
+    # every intermediate assemble pass (intermediates are discarded anyway).
+    layout_qa_final_only: bool = Field(True, alias="LAYOUT_QA_FINAL_ONLY")
+    # Preflight render probe validates the RENDERER, not the book — cache its
+    # verdict per-process for this long.
+    preflight_ttl_s: int = Field(3600, alias="PREFLIGHT_TTL_S")
+
     # --- Print specs ---
     trim_width_in: float = Field(8.5, alias="TRIM_WIDTH_IN")
     trim_height_in: float = Field(11.0, alias="TRIM_HEIGHT_IN")

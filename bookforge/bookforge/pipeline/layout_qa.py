@@ -121,13 +121,81 @@ def check_page(png: Path, page_num: int, bible: BookBible) -> LayoutVerdict:
     raise last_exc  # type: ignore[misc]
 
 
+def _check_pages(page_pngs: dict[int, Path], bible: BookBible) -> list[str]:
+    """Vision-check the given pages concurrently. Fail CLOSED per page: an
+    uninspected page is reported as "(skipped)", never silently passed."""
+    from bookforge.pipeline.pools import ctx_pool
+
+    issues: list[str] = []
+    skipped = 0
+
+    def _one(page_num: int, path: Path) -> tuple[int, LayoutVerdict | None, str]:
+        try:
+            return page_num, check_page(path, page_num, bible), ""
+        except Exception as exc:  # noqa: BLE001 — recorded as skipped
+            if llm.never_swallow(exc):
+                raise
+            return page_num, None, str(exc)[:120]
+
+    ordered = sorted(page_pngs.items())
+    with ctx_pool(settings.vision_qa_concurrency, "visionqa") as pool:
+        results = list(pool.map(lambda item: _one(*item), ordered))
+    for page_num, verdict, err in results:
+        if verdict is None:
+            skipped += 1
+            issues.append(f"page {page_num} (skipped): vision QA "
+                          f"unavailable: {err}")
+        elif not verdict.passed:
+            issues.extend(f"page {page_num}: {i}" for i in verdict.issues)
+        elif verdict.issues:
+            issues.extend(f"page {page_num} (info): {i}" for i in verdict.issues)
+
+    log.info("layout_qa_done", pages_checked=len(ordered),
+             issues=len(issues), skipped=skipped)
+    return issues
+
+
+def run_layout_qa_pdf(
+    pdf: bytes,
+    bible: BookBible,
+    *,
+    page_classes: list[str] | None = None,
+    section_count: int = 0,
+) -> list[str]:
+    """Vision-check the SHIPPED PDF: rasterize the sampled pages via pypdfium2
+    (no second Chromium render — and it inspects the exact bytes that ship).
+    `page_classes` (from the render's fit report) pins every cover/divider/
+    safety page into the sample."""
+    if not settings.layout_qa_enabled:
+        return []
+    if not settings.anthropic_api_key:
+        log.info("layout_qa_skipped", reason="no_api_key")
+        return []
+    from bookforge.pipeline import pdf_geometry
+
+    total = pdf_geometry.pdf_page_count(pdf)
+    if total <= 0:
+        return ["layout QA (skipped): could not open the PDF for inspection"]
+    must = _must_check_pages(page_classes or [])
+    if section_count and section_count <= 3:
+        to_check = list(range(1, total + 1))
+    else:
+        to_check = _pick_pages(total, section_count,
+                               settings.layout_qa_sample_pages, must)
+    with tempfile.TemporaryDirectory(prefix="layout_qa_") as tmp:
+        pngs = pdf_geometry.rasterize_pages(pdf, to_check, dpi=108, out_dir=tmp)
+        if not pngs:
+            return ["layout QA (skipped): PDF rasterization unavailable"]
+        return _check_pages(pngs, bible)
+
+
 def run_layout_qa(
     html: str,
     bible: BookBible,
     *,
     section_count: int = 0,
 ) -> list[str]:
-    """Render page PNGs and vision-check a sample. Returns issue strings."""
+    """Legacy HTML path: render page PNGs and vision-check a sample."""
     if not settings.layout_qa_enabled:
         return []
     if not settings.anthropic_api_key:
@@ -135,39 +203,16 @@ def run_layout_qa(
         return []
 
     with tempfile.TemporaryDirectory(prefix="layout_qa_") as tmp:
-        paths = render.html_to_pngs(html, tmp, scale=1.5)
+        paths, report = render.render_pngs(html, tmp, scale=1.5)
         if not paths:
             return []
-        # html_to_pngs ran the fit pass, so the report carries the page map —
+        # render_pngs ran the fit pass, so the report carries the page map —
         # every cover/divider/safety page is inspected, never sampled away.
-        report = render.last_fit_report or {}
-        must = _must_check_pages(report.get("pages", []))
+        must = _must_check_pages((report or {}).get("pages", []))
         sample_n = settings.layout_qa_sample_pages
         if section_count and section_count <= 3:
             to_check = list(range(1, len(paths) + 1))
         else:
             to_check = _pick_pages(len(paths), section_count, sample_n, must)
-
-        issues: list[str] = []
-        skipped = 0
-        for page_num in to_check:
-            if page_num > len(paths):
-                continue
-            try:
-                v = check_page(paths[page_num - 1], page_num, bible)
-            except Exception as exc:
-                # fail CLOSED: an uninspected page is reported, not passed
-                skipped += 1
-                issues.append(f"page {page_num} (skipped): vision QA "
-                              f"unavailable: {str(exc)[:120]}")
-                continue
-            if not v.passed:
-                for issue in v.issues:
-                    issues.append(f"page {page_num}: {issue}")
-            elif v.issues:
-                for issue in v.issues:
-                    issues.append(f"page {page_num} (info): {issue}")
-
-        log.info("layout_qa_done", pages_checked=len(to_check),
-                 issues=len(issues), skipped=skipped)
-        return issues
+        pngs = {p: paths[p - 1] for p in to_check if p <= len(paths)}
+        return _check_pages(pngs, bible)

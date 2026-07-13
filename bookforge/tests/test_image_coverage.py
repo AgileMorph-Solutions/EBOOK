@@ -161,3 +161,26 @@ def test_sync_card_image_briefs_respects_quota_when_not_every_entry():
     assert added == 1
     briefs = sum(1 for b in ch.blocks if b.image_brief)
     assert briefs == 1
+
+
+def test_stop_or_raise_cli_ships_partial_without_parking():
+    from bookforge.clients import images as img_client
+
+    exc = img_client.ImageQuotaError("429 RESOURCE_EXHAUSTED")
+    warning = guide_images._stop_or_raise("cli-book", exc)
+    assert "shipped with" in warning
+    assert guide_images._load_quota_parks("cli-book") == 0
+
+
+def test_stop_or_raise_api_job_parks_on_first_quota_hit(monkeypatch):
+    from bookforge.clients import images as img_client
+    from bookforge.pipeline import runctx
+
+    monkeypatch.setattr(guide_images.settings, "image_quota_max_parks", 1)
+    guide_images._clear_quota_parks("api-book")
+    exc = img_client.ImageQuotaError("429 RESOURCE_EXHAUSTED")
+    run = runctx.JobRun("api-book")
+    with runctx.bind(run):
+        with pytest.raises(img_client.ImageQuotaError):
+            guide_images._stop_or_raise("api-book", exc)
+    assert guide_images._load_quota_parks("api-book") == 1

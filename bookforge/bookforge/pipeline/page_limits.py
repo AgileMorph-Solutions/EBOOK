@@ -1,11 +1,12 @@
 """Page-count limits and content scaling for book generation.
 
-target_pages is a hard maximum (never exceed min(target, 300)). Post-layout
-overshoot triggers deterministic scaling; jobs fail if still over the ceiling.
+Finished PDFs must fall in [target_pages, min(ceil(1.5 * target_pages), 300)].
+Post-layout scaling expands or trims content; jobs fail if still out of band.
 """
 from __future__ import annotations
 
 import copy
+import math
 
 import structlog
 
@@ -15,25 +16,25 @@ from bookforge.schemas import BlockType, BookBible, Chapter, GeneratedImage
 log = structlog.get_logger(__name__)
 
 MAX_BOOK_PAGES = 300
-MAX_PAGES_OVERSHOOT = 0
-TARGET_PAGES_TOLERANCE = 0
+MAX_PAGES_OVERSHOOT_RATIO = 1.5
 ABSOLUTE_PAGE_CEILING = MAX_BOOK_PAGES
 
 
 def hard_page_ceiling(target_pages: int) -> int:
-    """Hard maximum pages for this book — never exceed target or 300."""
-    return min(max(1, target_pages), ABSOLUTE_PAGE_CEILING)
+    """Hard maximum pages for the finished PDF — 1.5× target, capped at 300."""
+    target = max(1, target_pages)
+    return min(math.ceil(target * MAX_PAGES_OVERSHOOT_RATIO), ABSOLUTE_PAGE_CEILING)
 
 
 def allowed_page_range(target_pages: int) -> tuple[int, int]:
-    """Return (lo, hi) inclusive bounds. lo is the expand goal; hi is the hard max."""
+    """Return (lo, hi) inclusive bounds for an acceptable finished PDF."""
     lo = max(1, target_pages)
     hi = hard_page_ceiling(target_pages)
     return lo, hi
 
 
 def meets_page_floor(pages: int, target_pages: int) -> bool:
-    """True when the PDF meets the soft minimum page goal."""
+    """True when the PDF meets the minimum page goal."""
     return pages >= max(1, target_pages)
 
 
@@ -43,16 +44,24 @@ def is_within_page_range(pages: int, target_pages: int) -> bool:
 
 
 def is_acceptable_page_count(pages: int, target_pages: int) -> bool:
-    """True when PDF is within the hard page ceiling (undershoot is OK)."""
-    return pages >= 1 and pages <= hard_page_ceiling(target_pages)
+    """True when PDF page count is within [target, 1.5× target]."""
+    lo, hi = allowed_page_range(target_pages)
+    return lo <= pages <= hi
 
 
 def check_page_count(pages: int, target_pages: int) -> None:
-    """Raise PageLimitError if `pages` exceeds the hard ceiling."""
-    hi = hard_page_ceiling(target_pages)
-    if pages <= hi:
+    """Raise PageLimitError if `pages` is outside the allowed band."""
+    lo, hi = allowed_page_range(target_pages)
+    if lo <= pages <= hi:
         return
-    lo, _ = allowed_page_range(target_pages)
+    if pages < lo:
+        raise PageLimitError(
+            f"page count {pages} below minimum {lo} (target {target_pages})",
+            pages=pages,
+            target=target_pages,
+            lo=lo,
+            hi=hi,
+        )
     raise PageLimitError(
         f"page count {pages} exceeds hard maximum {hi} (target {target_pages})",
         pages=pages,
@@ -119,23 +128,22 @@ def max_sections_for_target(
     *,
     pamphlet: bool = False,
 ) -> int:
-    """Maximum chapter count that can fit under the hard page ceiling."""
+    """Maximum chapter count that can fit under the planning target."""
     overhead = _guide_fixed_overhead(pamphlet) + _guide_specials_overhead(pamphlet)
-    hi = hard_page_ceiling(target_pages)
     shell = _section_shell_pages(profile)
-    return max(1, int((hi - overhead) / shell))
+    return max(1, int((max(1, target_pages) - overhead) / shell))
 
 
 def page_range_prompt_suffix(target_pages: int) -> str:
-    """Prompt clause stating the hard page maximum."""
-    hi = hard_page_ceiling(target_pages)
+    """Prompt clause stating the required finished page band."""
+    lo, hi = allowed_page_range(target_pages)
     return (
-        f"FINAL LENGTH LIMIT: the finished book must NOT exceed {hi} pages "
-        f"(hard maximum — target_pages {target_pages} is a ceiling, not a floor). "
-        f"Plan fewer chapters and entries rather than overflow. If the title "
-        f"names a count larger than fits in {hi} pages, plan the entries that "
-        f"fit and state the fitted count consistently — never plan content that "
-        f"requires more than {hi} pages."
+        f"FINAL LENGTH LIMIT: the finished book must be at least {lo} pages and "
+        f"must NOT exceed {hi} pages (target {target_pages}, hard maximum "
+        f"{hi} = 1.5× target). Plan chapters and entries to land in that band. "
+        f"If the title names a count larger than fits in {lo} pages, plan the "
+        f"entries that fit and state the fitted count consistently — never plan "
+        f"content that requires more than {hi} pages."
     )
 
 
@@ -199,9 +207,8 @@ def scale_chapters_to_pages(
     """Trim or expand generated content so the next render meets page targets."""
     from bookforge.pipeline import layout_budget
 
-    hi = hard_page_ceiling(target_pages)
-    lo, _ = allowed_page_range(target_pages)
-    if current_pages <= hi and current_pages >= lo:
+    lo, hi = allowed_page_range(target_pages)
+    if lo <= current_pages <= hi:
         return chapters, 0
 
     out: list[Chapter] = copy.deepcopy(chapters)
@@ -235,10 +242,11 @@ def expand_chapters_for_pages(
     target_pages: int,
 ) -> tuple[list[Chapter], int]:
     """Bump section budgets when PDF is under the page floor (for regen hints)."""
-    if current_pages >= target_pages:
+    lo, _ = allowed_page_range(target_pages)
+    if current_pages >= lo:
         return chapters, 0
     out = copy.deepcopy(chapters)
-    deficit = target_pages - current_pages
+    deficit = lo - current_pages
     n = max(len(bible.sections), 1)
     bump = max(1, deficit // n)
     for s in bible.sections:

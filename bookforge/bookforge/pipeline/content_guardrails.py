@@ -182,7 +182,7 @@ def rewrite_promised_number(
 
 def reconcile_promise_book(bible: BookBible) -> BookBible:
     """Expand section quotas toward the promised count, then cap to page ceiling."""
-    from bookforge.pipeline.page_limits import hard_page_ceiling, max_planned_entries
+    from bookforge.pipeline.page_limits import max_planned_entries
 
     promised = parse_promised_count(bible.title, bible.subtitle)
     planned = planned_use_count(bible.sections)
@@ -198,9 +198,8 @@ def reconcile_promise_book(bible: BookBible) -> BookBible:
     if bible.profile and bible.book_kind == "practical_guide":
         target = bible.target_pages or 100
         pamphlet = target <= 15
-        hi = hard_page_ceiling(target)
         cap = max_planned_entries(
-            hi, bible.profile, len(sections) or 1, pamphlet=pamphlet,
+            target, bible.profile, len(sections) or 1, pamphlet=pamphlet,
         )
         if planned > cap:
             sections = shrink_sections_to_count(sections, cap)
@@ -210,7 +209,7 @@ def reconcile_promise_book(bible: BookBible) -> BookBible:
                 "reconcile_promise_capped",
                 promised=promised,
                 fitted=planned,
-                ceiling=hi,
+                ceiling=target,
             )
             return bible.model_copy(update={
                 "sections": sections,

@@ -18,7 +18,7 @@ log = structlog.get_logger(__name__)
 # the book shipped 1,176 entries under a "200" subtitle.
 _COUNT_NOUNS = (
     r"ways?|tips?|uses?|tricks?|methods?|ideas?|hacks?|recipes?|dishes?|meals?|suppers?|"
-    r"fixes?|projects?|patterns?|exercises?|lessons?|entries|habits?|steps?|rules?|"
+    r"dinners?|fixes?|projects?|patterns?|exercises?|lessons?|entries|habits?|steps?|rules?|"
     r"principles?|moves?|shifts?|strategies|strategy|secrets?|mistakes?|"
     r"reasons?|laws?|keys?|changes?|foods?|drinks?|workouts?|stretches|poses?|"
     r"questions?|skills?|routines?|swaps?|rituals?|practices?"
@@ -181,7 +181,14 @@ def rewrite_promised_number(
 
 
 def reconcile_promise_book(bible: BookBible) -> BookBible:
-    """Expand section quotas toward the promised count, then cap to page ceiling."""
+    """Expand section quotas toward the promised count; densify rather than shrink.
+
+    Never silently rewrites the marketing count downward. If the plan cannot
+    honor the promise at the current profile density, raise PlanInfeasibleError
+    so readiness / the user can choose raise-pages or accept a lower count.
+    """
+    from bookforge.errors import PlanInfeasibleError
+    from bookforge.pipeline.feasibility import apply_compact_profile
     from bookforge.pipeline.page_limits import max_planned_entries
 
     promised = parse_promised_count(bible.title, bible.subtitle)
@@ -198,25 +205,38 @@ def reconcile_promise_book(bible: BookBible) -> BookBible:
     if bible.profile and bible.book_kind == "practical_guide":
         target = bible.target_pages or 100
         pamphlet = target <= 15
+        profile = bible.profile
         cap = max_planned_entries(
-            target, bible.profile, len(sections) or 1, pamphlet=pamphlet,
+            target, profile, len(sections) or 1, pamphlet=pamphlet,
         )
-        if planned > cap:
-            sections = shrink_sections_to_count(sections, cap)
-            planned = planned_use_count(sections)
-            title, subtitle = rewrite_promised_number(title, subtitle, planned)
-            log.info(
-                "reconcile_promise_capped",
-                promised=promised,
-                fitted=planned,
-                ceiling=target,
+        if planned > cap and not pamphlet:
+            # Prefer compact density over shrinking the count.
+            compact = apply_compact_profile(profile)
+            cap_c = max_planned_entries(
+                target, compact, len(sections) or 1, pamphlet=pamphlet,
             )
-            return bible.model_copy(update={
-                "sections": sections,
-                "title": title,
-                "subtitle": subtitle,
-                "promised_uses": planned,
-            })
+            if planned <= cap_c:
+                log.info(
+                    "reconcile_promise_compact",
+                    promised=promised,
+                    planned=planned,
+                    ceiling=target,
+                )
+                return bible.model_copy(update={
+                    "sections": sections,
+                    "profile": compact,
+                    "promised_uses": promised,
+                })
+            raise PlanInfeasibleError(
+                f"promised {promised} items exceed page budget at {target} pages "
+                f"(max ~{cap_c} even when shortened) — raise pages or accept a "
+                f"lower count at readiness"
+            )
+        if planned > cap and pamphlet:
+            # Pamphlets may still shrink to the explicit promise ceiling.
+            if planned > promised:
+                sections = shrink_sections_to_count(sections, promised)
+                planned = promised
 
     return bible.model_copy(update={
         "sections": sections,

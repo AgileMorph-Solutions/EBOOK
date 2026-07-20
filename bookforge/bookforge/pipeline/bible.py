@@ -782,36 +782,89 @@ def _cap_sections_to_page_ceiling(
     pamphlet: bool,
     min_entries: int = 0,
 ) -> list[SectionPlan]:
-    """Trim per-section budgets and section count to fit the planning target."""
+    """Trim per-section budgets to fit the planning target without mega-merges.
+
+    Never silently shrinks below `min_entries` (the promised / user-accepted
+    count). Never merges all quotas into one section — that caused EmptyBookError
+    and tiny PDFs. Drop excess *sections* from the end only when shell overhead
+    still exceeds the page budget after per-section budget trim.
+    """
+    from bookforge.pipeline.feasibility import MAX_CARDS_PER_SECTION
+
     plan_cap = max(1, target_pages)
-    max_entries = max_planned_entries(
-        plan_cap, profile, len(sections) or 1, pamphlet=pamphlet,
-    )
     planned = planned_use_count(sections)
-    cap = max(max_entries, min_entries)
-    if planned > cap and min_entries <= 0:
-        sections = shrink_sections_to_count(sections, cap)
+    # Only shrink entry count when the caller did NOT lock a minimum (legacy /
+    # pamphlet paths). With min_entries set, keep the promise.
+    if min_entries <= 0:
+        max_entries = max_planned_entries(
+            plan_cap, profile, len(sections) or 1, pamphlet=pamphlet,
+        )
+        if planned > max_entries:
+            sections = shrink_sections_to_count(sections, max_entries)
+            log.info(
+                "sections_capped_to_page_ceiling",
+                max_entries=max_entries,
+                planned=planned_use_count(sections),
+            )
+    elif planned < min_entries:
+        sections = expand_sections_to_count(sections, min_entries)
         log.info(
-            "sections_capped_to_page_ceiling",
-            max_entries=cap,
+            "sections_expanded_to_min_entries",
+            min_entries=min_entries,
             planned=planned_use_count(sections),
         )
 
-    out = [s.model_copy() for s in sections]
+    out = [s.model_copy(deep=True) for s in sections]
     for s in out:
+        if s.full_card_quota > MAX_CARDS_PER_SECTION:
+            # Redistribute overflow into new sibling sections rather than one blob.
+            overflow = s.full_card_quota - MAX_CARDS_PER_SECTION
+            s.full_card_quota = MAX_CARDS_PER_SECTION
+            if s.planned_entries and len(s.planned_entries) > MAX_CARDS_PER_SECTION:
+                keep = s.planned_entries[:MAX_CARDS_PER_SECTION]
+                rest = s.planned_entries[MAX_CARDS_PER_SECTION:]
+                s.planned_entries = keep
+            else:
+                rest = []
+            s.image_quota = min(s.image_quota, s.full_card_quota)
+            while overflow > 0:
+                chunk = min(MAX_CARDS_PER_SECTION, overflow)
+                overflow -= chunk
+                chunk_entries = rest[:chunk]
+                rest = rest[chunk:]
+                out.append(SectionPlan(
+                    index=len(out) + 1,
+                    title=f"{s.title} (continued)",
+                    summary=s.summary,
+                    full_card_quota=chunk,
+                    list_quota=0,
+                    image_quota=chunk if s.image_quota else 0,
+                    page_budget=max(1, s.page_budget),
+                    planned_entries=chunk_entries,
+                    part_index=s.part_index,
+                    part_title=s.part_title,
+                ))
         if s.image_quota > s.full_card_quota:
             s.image_quota = s.full_card_quota
 
+    # Re-index after possible splits.
+    for i, s in enumerate(out, start=1):
+        s.index = i
+
+    # Trim page_budget only — never merge section quotas into one chapter.
     while len(out) > 1 and estimate_guide_pages(out, pamphlet=pamphlet) > plan_cap:
-        last = out.pop()
-        prev = out[-1]
-        prev.full_card_quota += last.full_card_quota
-        prev.list_quota += last.list_quota
-        prev.page_budget += last.page_budget
-        prev.image_quota = min(prev.image_quota + last.image_quota,
-                               prev.full_card_quota)
-        if last.planned_entries:
-            prev.planned_entries = (prev.planned_entries or []) + last.planned_entries
+        # Drop the last *section* only if we still meet min_entries after drop.
+        last = out[-1]
+        remaining = planned_use_count(out[:-1])
+        if min_entries > 0 and remaining < min_entries:
+            break
+        out.pop()
+        log.info(
+            "section_dropped_for_page_ceiling",
+            dropped=last.title,
+            remaining_sections=len(out),
+            remaining_entries=remaining,
+        )
 
     while estimate_guide_pages(out, pamphlet=pamphlet) > plan_cap:
         reduced = False
@@ -822,6 +875,9 @@ def _cap_sections_to_page_ceiling(
                 break
         if not reduced:
             break
+
+    for i, s in enumerate(out, start=1):
+        s.index = i
     return out
 
 
@@ -1153,6 +1209,8 @@ def build_bible(
     description: str | None = None,
     toc: list[str] | None = None,
     profile_overrides: dict | None = None,
+    density_mode: str | None = None,
+    accepted_promised_count: int | None = None,
 ) -> BookBible:
     excerpt = source.text[:20000]
     desc_block = _description_block(description)
@@ -1201,7 +1259,45 @@ def build_bible(
     pamphlet = target_pages <= 15
     if pamphlet:
         profile = profile.model_copy(update={"tiers": 1})
-    promised_hint = parse_promised_count(source.topic, "")
+
+    # Effective promise: user-accepted lower count wins over topic marketing.
+    topic_promised = (
+        parse_promised_count(source.topic, description or "")
+        or parse_promised_count(source.topic, "")
+    )
+    if accepted_promised_count and accepted_promised_count > 0:
+        effective_promised = accepted_promised_count
+    else:
+        effective_promised = topic_promised
+
+    # Auto-compact when density_mode says so, or when promise only fits compact.
+    from bookforge.pipeline.feasibility import (
+        COMPACT_PAGES_PER_ENTRY,
+        apply_compact_profile,
+        assess_request,
+    )
+    from bookforge.errors import PlanInfeasibleError
+
+    if density_mode == "compact" or (
+        effective_promised
+        and assess_request(
+            topic=source.topic,
+            description=description,
+            target_pages=target_pages,
+            toc=toc,
+            accepted_promised_count=accepted_promised_count,
+        ).status == "compact"
+    ):
+        profile = apply_compact_profile(profile)
+        density_mode = "compact"
+        log.info(
+            "bible_compact_density",
+            promised=effective_promised,
+            pages_per_entry=profile.pages_per_entry,
+            target_pages=target_pages,
+        )
+
+    promised_hint = effective_promised
     design = derive_design(source, profile)
     spec = templates.spec_for(profile.structure_template)
     density = _cap_density(
@@ -1284,8 +1380,10 @@ def build_bible(
         base_sections = _enforce_toc_sections(base_sections, toc)
         log.info("guide_toc_reenforced", count=len(base_sections))
     sections = _expand_sections(base_sections, density, profile)
+    # Soft budget trim only — do not shrink below the effective promise yet.
     sections = _cap_sections_to_page_ceiling(
         sections, target_pages, profile, pamphlet=pamphlet,
+        min_entries=effective_promised or 0,
     )
     if draft.specials:
         raw_specials = [s.to_plan() for s in draft.specials]
@@ -1297,10 +1395,27 @@ def build_bible(
 
     title = draft.title
     subtitle = draft.subtitle
-    promised = (
+    promised = effective_promised or (
         parse_promised_count(title, subtitle)
         or parse_promised_count(source.topic, "")
     )
+    # If the user accepted a lower count, rewrite marketing copy to match.
+    if (
+        accepted_promised_count
+        and accepted_promised_count > 0
+        and topic_promised
+        and accepted_promised_count < topic_promised
+    ):
+        title, subtitle = rewrite_promised_number(
+            title, subtitle, accepted_promised_count,
+        )
+        promised = accepted_promised_count
+        log.info(
+            "promise_accepted_by_user",
+            topic_promised=topic_promised,
+            accepted=accepted_promised_count,
+        )
+
     planned = planned_use_count(sections)
     if promised and promised > planned:
         sections = expand_sections_to_count(sections, promised)
@@ -1308,21 +1423,26 @@ def build_bible(
         log.info("sections_expanded_to_promise",
                  promised=promised, planned=planned,
                  target_pages=target_pages)
+
+    # Keep the promised count: never silently shrink. Cap with min_entries locked.
     sections = _cap_sections_to_page_ceiling(
         sections, target_pages, profile, pamphlet=pamphlet,
-        min_entries=0,
+        min_entries=promised or 0,
     )
     planned = planned_use_count(sections)
+
     if pamphlet and promised and planned > promised:
         sections = shrink_sections_to_count(sections, promised)
         planned = promised
         log.info("pamphlet_shrunk_to_promise", promised=promised,
                  sections=len(sections))
-    elif promised and promised > planned:
-        title, subtitle = rewrite_promised_number(title, subtitle, planned)
-        log.info("promise_rewritten_to_fitted",
-                 promised=promised, planned=planned,
-                 title=title, subtitle=subtitle)
+    elif promised and planned < promised:
+        # Could not honor the promise without user-accepted reduction.
+        raise PlanInfeasibleError(
+            f"plan could only fit {planned} items but promise is {promised} "
+            f"at {target_pages} pages — raise pages or accept a lower count "
+            f"at readiness"
+        )
     elif not pamphlet and promised and promised < planned:
         title, subtitle, promise_fixed = reconcile_promise(
             title, subtitle, planned)
@@ -1330,6 +1450,17 @@ def build_bible(
             log.warning("subtitle_promise_reconciled",
                         old_subtitle=draft.subtitle, new_subtitle=subtitle,
                         planned=planned)
+
+    # Guard: mega-section collapse
+    if (
+        len(sections) == 1
+        and target_pages > 15
+        and sections[0].full_card_quota > 10
+    ):
+        raise PlanInfeasibleError(
+            f"plan collapsed to 1 section with {sections[0].full_card_quota} "
+            f"cards at {target_pages} pages — reduce TOC pressure or raise pages"
+        )
 
     bible = BookBible(
         title=title,
@@ -1352,13 +1483,14 @@ def build_bible(
         pro_topic=draft.pro_topic or source.topic,
         specials=specials,
     )
+    # Always the honored count — never keep a higher marketing number after fit.
     bible.promised_uses = promised or planned
-    # Make ALL planner-authored copy (title, kicker, how-to, part titles, …)
-    # state the one promised count — the body is reconciled by the QA fix-loop.
+    # Make ALL planner-authored copy state the one promised count.
     propagate_promised_count(bible)
     log.info("bible_built", kind="practical_guide", title=bible.title,
              template=profile.structure_template, sections=len(bible.sections),
              promised_uses=bible.promised_uses, planned_uses=planned,
              theme=bible.theme_name, user_toc=bool(toc),
+             density_mode=density_mode,
              profile=profile.model_dump())
     return bible

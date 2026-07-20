@@ -13,8 +13,13 @@ import {
   getBook,
   getReadiness,
   type CreateBookRequest,
+  type FeasibilityOption,
   type ReadinessResult,
 } from "@/lib/api";
+
+function rewriteTopicCount(topic: string, newCount: number): string {
+  return topic.replace(/\b\d{1,4}\b/, String(newCount));
+}
 
 export function CreateBookForm() {
   const router = useRouter();
@@ -25,6 +30,12 @@ export function CreateBookForm() {
   const [text, setText] = useState("");
   const [targetPages, setTargetPages] = useState(100);
   const [sectionLimit, setSectionLimit] = useState("");
+  const [densityMode, setDensityMode] = useState<"standard" | "compact" | null>(
+    null
+  );
+  const [acceptedPromisedCount, setAcceptedPromisedCount] = useState<
+    number | null
+  >(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [serviceReadiness, setServiceReadiness] =
@@ -54,13 +65,33 @@ export function CreateBookForm() {
         description: description.trim() || undefined,
         toc: tocLines.length > 0 ? tocLines : undefined,
         text: text.trim() || undefined,
+        density_mode: densityMode,
+        accepted_promised_count: acceptedPromisedCount,
       };
       void checkReadinessForRequest(body)
-        .then(setRequestReadiness)
+        .then((res) => {
+          setRequestReadiness(res);
+          if (res.feasibility?.status === "compact") {
+            setDensityMode("compact");
+          } else if (res.feasibility?.status === "ok" && densityMode === "compact") {
+            // Keep compact if user already accepted; otherwise clear.
+          } else if (res.feasibility?.status === "ok") {
+            setDensityMode(null);
+          }
+        })
         .catch(() => setRequestReadiness(null));
     }, 500);
     return () => clearTimeout(timer);
-  }, [topic, description, toc, targetPages, sectionLimit, text]);
+  }, [
+    topic,
+    description,
+    toc,
+    targetPages,
+    sectionLimit,
+    text,
+    densityMode,
+    acceptedPromisedCount,
+  ]);
 
   useEffect(() => {
     const duplicateId = searchParams.get("duplicate");
@@ -91,8 +122,28 @@ export function CreateBookForm() {
       ? serviceReadiness
       : null;
 
+  const compactInfo =
+    requestReadiness?.can_generate !== false &&
+    requestReadiness?.feasibility?.status === "compact"
+      ? requestReadiness
+      : null;
+
   const canSubmit =
     topic.trim().length > 0 && hasSource && !submitting && !readinessBlocked;
+
+  function handleFeasibilityOption(opt: FeasibilityOption) {
+    if (opt.id === "raise_pages" && opt.target_pages) {
+      setAcceptedPromisedCount(null);
+      setTargetPages(Math.min(300, opt.target_pages));
+      setDensityMode(null);
+      return;
+    }
+    if (opt.id === "lower_count" && opt.promised_count) {
+      setAcceptedPromisedCount(opt.promised_count);
+      setTopic((prev) => rewriteTopicCount(prev, opt.promised_count!));
+      setDensityMode("compact");
+    }
+  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -115,6 +166,12 @@ export function CreateBookForm() {
         description: description.trim() || undefined,
         toc: tocLines.length > 0 ? tocLines : undefined,
         text: text.trim(),
+        density_mode:
+          densityMode ??
+          (requestReadiness?.feasibility?.status === "compact"
+            ? "compact"
+            : null),
+        accepted_promised_count: acceptedPromisedCount,
       };
 
       const res = await createBook(body);
@@ -137,7 +194,10 @@ export function CreateBookForm() {
           type="text"
           required
           value={topic}
-          onChange={(e) => setTopic(e.target.value)}
+          onChange={(e) => {
+            setTopic(e.target.value);
+            setAcceptedPromisedCount(null);
+          }}
           placeholder="e.g. Forgotten British Meals Our Grandparents Lived On"
         />
         <p className="font-body text-body-sm italic text-secondary">
@@ -199,13 +259,14 @@ export function CreateBookForm() {
             min={1}
             max={300}
             value={targetPages}
-            onChange={(e) =>
-              setTargetPages(Math.min(300, parseInt(e.target.value, 10) || 100))
-            }
+            onChange={(e) => {
+              setTargetPages(Math.min(300, parseInt(e.target.value, 10) || 100));
+              setAcceptedPromisedCount(null);
+            }}
           />
           <p className="font-body text-body-sm italic text-secondary">
-            Content and images scale to fit at most your target (max 300).
-            Never exceeds target.
+            Finished books aim for your target up to 1.5× (max 300). Item counts
+            in the title are kept unless you choose to reduce them.
           </p>
         </div>
         <div className="flex flex-col gap-2">
@@ -224,9 +285,16 @@ export function CreateBookForm() {
         </div>
       </div>
 
+      {compactInfo && (
+        <RequestReadinessAlert readiness={compactInfo} />
+      )}
+
       {blockReadiness &&
         (blockReadiness.reason_code === "request" ? (
-          <RequestReadinessAlert readiness={blockReadiness} />
+          <RequestReadinessAlert
+            readiness={blockReadiness}
+            onChooseOption={handleFeasibilityOption}
+          />
         ) : (
           <Alert variant="error">
             <p className="font-label text-label-md font-semibold">

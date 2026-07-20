@@ -44,6 +44,39 @@ def classify(exc: BaseException) -> ClassifiedError:
     top_name = type(exc).__name__
     top_msg = str(exc)
     top_detail = (top_msg[:500] + "…") if len(top_msg) > 500 else top_msg
+    if top_name == "PageLimitError":
+        pages = getattr(exc, "pages", "?")
+        lo = getattr(exc, "lo", "?")
+        hi = getattr(exc, "hi", "?")
+        target = getattr(exc, "target", "?")
+        return ClassifiedError(
+            kind="page_limit",
+            message=(
+                f"This book came out to {pages} pages but needed {lo}–{hi} "
+                f"(target {target}). Planning or content did not produce "
+                f"enough material for the page goal."
+            ),
+            detail=top_detail,
+        )
+    if top_name == "EmptyBookError":
+        return ClassifiedError(
+            kind="empty_book",
+            message=(
+                "No chapters were generated, so there is nothing to ship. "
+                "This is often caused by an oversized single section or a "
+                "temporary writing-service outage."
+            ),
+            detail=top_detail,
+        )
+    if top_name == "PlanInfeasibleError":
+        return ClassifiedError(
+            kind="request",
+            message=top_msg or (
+                "This book plan can't honor the promised item count at the "
+                "selected page target. Raise pages or accept a lower count."
+            ),
+            detail=top_detail,
+        )
     if top_name == "BudgetExceeded":
         return ClassifiedError(
             kind="budget",

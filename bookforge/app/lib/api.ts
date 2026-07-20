@@ -38,7 +38,12 @@ export type ErrorKind =
   | "unknown"
   | "layout"
   | "capacity"
-  | "request";
+  | "request"
+  | "page_limit"
+  | "empty_book"
+  | "budget"
+  | "timeout"
+  | "source_unavailable";
 
 export type CreateBookRequest = {
   topic: string;
@@ -50,6 +55,8 @@ export type CreateBookRequest = {
   book_kind?: BookKind;
   description?: string;
   toc?: string[];
+  density_mode?: "standard" | "compact" | null;
+  accepted_promised_count?: number | null;
 };
 
 export type QAResult = {
@@ -90,6 +97,8 @@ export type BookStatus = {
   artifact?: BookArtifact;
   error?: string;
   error_kind?: ErrorKind;
+  error_type?: string;
+  error_detail?: string;
   next_retry_at?: string;
   attempts?: number;
   wait_reason?: string;
@@ -169,12 +178,31 @@ export type CheckResult = {
   detail?: string;
 };
 
+export type FeasibilityOption = {
+  id: "raise_pages" | "lower_count";
+  label: string;
+  target_pages?: number | null;
+  promised_count?: number | null;
+};
+
+export type FeasibilityResult = {
+  status: "ok" | "compact" | "infeasible";
+  promised?: number | null;
+  target_pages: number;
+  pages_per_entry: number;
+  min_pages_required: number;
+  max_entries_at_target: number;
+  message: string;
+  options: FeasibilityOption[];
+};
+
 export type ReadinessResult = {
   can_generate: boolean;
   title: string;
   message: string;
   reason_code?: ErrorKind | null;
   checks: Record<string, CheckResult>;
+  feasibility?: FeasibilityResult | null;
 };
 
 export async function getHealth(): Promise<HealthInfo> {

@@ -1,4 +1,6 @@
 """Tests for practical-guide promised tip count reconciliation."""
+import pytest
+
 from bookforge.pipeline.content_guardrails import (
     adjust_list_quotas,
     parse_promised_count,
@@ -56,6 +58,9 @@ def test_reconcile_promise_matches_promised_count_within_page_cap():
 
 
 def test_reconcile_promise_book_expands_when_promised_high():
+    """Huge promise that cannot fit even compact raises — no silent rewrite."""
+    from bookforge.errors import PlanInfeasibleError
+
     sections = [
         SectionPlan(index=1, title="Kitchen", full_card_quota=3, list_quota=5),
     ]
@@ -63,19 +68,18 @@ def test_reconcile_promise_book_expands_when_promised_high():
         title="900 Amazing Kitchen Hacks",
         subtitle="",
         sections=sections,
-        target_pages=12,
+        target_pages=100,
         profile=EditorialProfile(
             genre="Home handbook",
             audience="seniors",
             angle="cheap DIY",
             entry_schema=EntrySchema(entry_noun="hack"),
             structure_template="tips_cards",
+            pages_per_entry=2.0,
         ),
     )
-    out = reconcile_promise_book(bible)
-    assert out.promised_uses < 900
-    assert planned_use_count(out.sections) == out.promised_uses
-    assert "900" not in out.title
+    with pytest.raises(PlanInfeasibleError):
+        reconcile_promise_book(bible)
 
 
 def test_rewrite_promised_number():

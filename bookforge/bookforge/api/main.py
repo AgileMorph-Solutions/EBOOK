@@ -40,7 +40,7 @@ from bookforge.cost import BudgetExceeded
 from bookforge.errors import (
     ContentQAError, EmptyBookError, GeometryError, ImageCoverageError,
     IngestError, JobDeadlineError, PageLimitError, PipelineCancelledError,
-    ReadinessError,
+    PlanInfeasibleError, ReadinessError,
 )
 from bookforge.pipeline import runctx
 from bookforge.pipeline.readiness import (
@@ -397,6 +397,10 @@ class CreateBook(BaseModel):
     # Optional EditorialProfile field overrides (e.g. {"genre": "cookbook",
     # "audience": "..."}) applied after the planning model derives the profile.
     profile_overrides: dict | None = None
+    # Feasibility: "compact" keeps the promised count with shorter entries.
+    density_mode: Literal["standard", "compact"] | None = None
+    # Only set when the user explicitly accepts a lower marketing count.
+    accepted_promised_count: int | None = None
 
     @model_validator(mode="after")
     def require_source(self) -> "CreateBook":
@@ -500,7 +504,18 @@ def create_book(req: CreateBook, background_tasks: BackgroundTasks):
 
     Poll GET /books/{book_id} for progress, then GET /books/{book_id}/download.
     """
-    _assert_can_generate(req)
+    readiness = check_readiness(
+        include_request=_to_readiness_request(req),
+        active_jobs=_count_active_jobs(),
+    )
+    if not readiness.can_generate:
+        raise HTTPException(status_code=503, detail=readiness.model_dump())
+    if (
+        readiness.feasibility
+        and readiness.feasibility.status == "compact"
+        and not req.density_mode
+    ):
+        req = req.model_copy(update={"density_mode": "compact"})
     return _enqueue_book(req, background_tasks)
 
 
@@ -747,6 +762,20 @@ def _friendly_error(exc: Exception) -> str:
     Never leak raw exception text (paths, memory addresses, provider internals,
     or opaque tenacity RetryError reprs) to the UI — that goes to logs only.
     """
+    if isinstance(exc, PageLimitError):
+        return (
+            f"This book came out to {exc.pages} pages but needed "
+            f"{exc.lo}–{exc.hi} (target {exc.target}). Planning or content "
+            f"did not produce enough material for the page goal."
+        )
+    if isinstance(exc, EmptyBookError):
+        return (
+            "No chapters were generated, so there is nothing to ship. "
+            "This is often caused by an oversized single section or a "
+            "temporary writing-service outage."
+        )
+    if isinstance(exc, PlanInfeasibleError):
+        return str(exc)
     if isinstance(exc, BudgetExceeded):
         return ("This book reached its generation cost limit before finishing. "
                 "Try a shorter book or contact support to raise the limit.")
@@ -797,7 +826,8 @@ def _failure_class(exc: Exception) -> str:
     - "transient"            → auto-retry a few times, then park: render/storage/
                                ingest hiccups and anything unclassified.
     """
-    if isinstance(exc, (GeometryError, ContentQAError, PipelineCancelledError)):
+    if isinstance(exc, (GeometryError, ContentQAError, PipelineCancelledError,
+                        PlanInfeasibleError)):
         return "permanent"
     if isinstance(exc, BudgetExceeded):
         # The cap is per-book and persisted across resumes — retrying re-fails
@@ -960,7 +990,10 @@ def _fail(book_id: str, exc: Exception, cls: str) -> None:
     classified = _classify_error(exc)
     # Use the classifier's friendly message for quota/auth kinds; fall back to
     # the legacy _friendly_error for domain-specific messages (geometry, etc.).
-    if classified.kind in ("quota_llm", "quota_images", "rate_limit", "auth"):
+    if classified.kind in (
+        "quota_llm", "quota_images", "rate_limit", "auth",
+        "page_limit", "empty_book", "request", "budget",
+    ):
         friendly = classified.message
     else:
         friendly = _friendly_error(exc)
@@ -1073,6 +1106,8 @@ def _execute_pipeline(book_id: str, req: CreateBook) -> None:
                         description=req.description,
                         toc=req.toc,
                         profile_overrides=req.profile_overrides,
+                        density_mode=req.density_mode,
+                        accepted_promised_count=req.accepted_promised_count,
                         on_stage=on_stage,
                     )
                 if _is_cancelled(book_id):

@@ -337,6 +337,9 @@ def test_scale_images_for_chapters_drops_orphan_refs():
 
 
 def test_reconcile_promise_capped_to_page_ceiling():
+    """Over-promise at full size raises PlanInfeasibleError (no silent shrink)."""
+    from bookforge.errors import PlanInfeasibleError
+
     sections = [
         SectionPlan(index=1, title="Kitchen", full_card_quota=7, list_quota=0),
     ]
@@ -347,10 +350,8 @@ def test_reconcile_promise_capped_to_page_ceiling():
         target_pages=100,
         profile=_pest_profile().model_copy(update={"pages_per_entry": 2.0}),
     )
-    out = reconcile_promise_book(bible)
-    assert planned_use_count(out.sections) < 365
-    assert out.promised_uses == planned_use_count(out.sections)
-    assert "365" not in out.title
+    with pytest.raises(PlanInfeasibleError):
+        reconcile_promise_book(bible)
 
 
 def test_parse_toc_lines_groups_recipes_under_sections():

@@ -107,6 +107,14 @@ class PageLimitError(RuntimeError):
         super().__init__(message)
 
 
+class PlanInfeasibleError(RuntimeError):
+    """Bible plan cannot honor the promised count / page target — fail before content.
+
+    Raised when planning would silently shrink the marketing count, collapse into
+    a mega-section, or otherwise produce a doomed plan. User must adjust pages
+    or explicitly accept a lower count at readiness."""
+
+
 class PipelineCancelledError(RuntimeError):
     """User or operator cancelled the job — stop between stages, do not retry."""
 

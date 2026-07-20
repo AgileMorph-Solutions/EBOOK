@@ -14,6 +14,11 @@ const FAILURE_TITLES: Record<ErrorKind, string> = {
   layout: "Layout system error",
   capacity: "Pipeline at capacity",
   request: "Invalid book request",
+  page_limit: "Page count outside allowed range",
+  empty_book: "No chapters generated",
+  budget: "Generation cost limit reached",
+  timeout: "Generation timed out",
+  source_unavailable: "Source material unavailable",
   unknown: "Generation failed",
 };
 

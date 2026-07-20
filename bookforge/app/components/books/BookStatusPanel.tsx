@@ -11,11 +11,41 @@ import { QualityAnalysisCard } from "@/components/books/QACard";
 import { Alert } from "@/components/ui/Alert";
 import { Breadcrumb } from "@/components/ui/Breadcrumb";
 import { Button } from "@/components/ui/Button";
+import { DetailsCollapsible } from "@/components/ui/DetailsCollapsible";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { Skeleton } from "@/components/ui/Spinner";
 import { Icon } from "@/components/ui/Icon";
-import { deleteBook, regenerateBook, type BookStatus } from "@/lib/api";
+import { deleteBook, regenerateBook, type BookStatus, type ErrorKind } from "@/lib/api";
 import { formatBookDate, shortBookId } from "@/lib/config";
+
+function failureTitle(kind?: ErrorKind, unfunded?: boolean): string {
+  switch (kind) {
+    case "quota_llm":
+      return "Writing credits exhausted";
+    case "quota_images":
+      return "Image allowance exhausted";
+    case "rate_limit":
+      return "Service temporarily busy";
+    case "auth":
+      return "Service configuration error";
+    case "page_limit":
+      return "Page count outside allowed range";
+    case "empty_book":
+      return "No chapters generated";
+    case "request":
+      return "Book settings need adjustment";
+    case "layout":
+      return "Layout failed";
+    case "budget":
+      return "Generation cost limit reached";
+    case "timeout":
+      return "Generation timed out";
+    case "source_unavailable":
+      return "Source material unavailable";
+    default:
+      return unfunded ? "AI credit balance is low" : "Generation failed";
+  }
+}
 
 function formatElapsed(startIso?: string, elapsedSeconds?: number) {
   const sec =
@@ -191,17 +221,7 @@ export function BookStatusPanel({
         <div className="md:col-span-12">
           <Alert variant="error">
             <p className="font-medium">
-              {book.error_kind === "quota_llm"
-                ? "Writing credits exhausted"
-                : book.error_kind === "quota_images"
-                  ? "Image allowance exhausted"
-                  : book.error_kind === "rate_limit"
-                    ? "Service temporarily busy"
-                    : book.error_kind === "auth"
-                      ? "Service configuration error"
-                      : book.unfunded
-                        ? "AI credit balance is low"
-                        : "Generation failed"}
+              {failureTitle(book.error_kind, book.unfunded)}
             </p>
             <p className="mt-2 whitespace-pre-wrap font-body text-body-sm">
               {book.error}
@@ -225,6 +245,52 @@ export function BookStatusPanel({
               <p className="mt-2 font-label text-label-sm text-secondary">
                 Wait a minute, then try submitting again.
               </p>
+            )}
+            {(book.error_type || book.error_detail || book.stage) && (
+              <div className="mt-4">
+                <DetailsCollapsible summary="Technical details — Show more">
+                  <dl className="space-y-3 font-body text-body-sm">
+                    {book.stage && (
+                      <div>
+                        <dt className="font-label text-label-sm text-secondary">
+                          Stage
+                        </dt>
+                        <dd className="mt-1 font-mono text-[13px]">{book.stage}</dd>
+                      </div>
+                    )}
+                    {book.error_type && (
+                      <div>
+                        <dt className="font-label text-label-sm text-secondary">
+                          Error type
+                        </dt>
+                        <dd className="mt-1 font-mono text-[13px]">
+                          {book.error_type}
+                        </dd>
+                      </div>
+                    )}
+                    {book.error_kind && (
+                      <div>
+                        <dt className="font-label text-label-sm text-secondary">
+                          Error kind
+                        </dt>
+                        <dd className="mt-1 font-mono text-[13px]">
+                          {book.error_kind}
+                        </dd>
+                      </div>
+                    )}
+                    {book.error_detail && (
+                      <div>
+                        <dt className="font-label text-label-sm text-secondary">
+                          Detail
+                        </dt>
+                        <dd className="mt-1 whitespace-pre-wrap break-words font-mono text-[12px] leading-relaxed">
+                          {book.error_detail}
+                        </dd>
+                      </div>
+                    )}
+                  </dl>
+                </DetailsCollapsible>
+              </div>
             )}
           </Alert>
           <div className="mt-6 flex flex-wrap items-center gap-3">

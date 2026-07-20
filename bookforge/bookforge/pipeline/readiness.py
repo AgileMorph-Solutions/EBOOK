@@ -12,6 +12,7 @@ from bookforge.clients import images as img_client
 from bookforge.clients import llm
 from bookforge.config import get_settings
 from bookforge.pipeline import pdf_geometry
+from bookforge.pipeline.feasibility import FeasibilityResult, assess_request
 
 log = structlog.get_logger(__name__)
 
@@ -78,6 +79,8 @@ class ReadinessRequest(BaseModel):
     description: str | None = None
     toc: list[str] | None = None
     section_limit: int | None = None
+    density_mode: Literal["standard", "compact"] | None = None
+    accepted_promised_count: int | None = None
 
 
 class ReadinessResult(BaseModel):
@@ -86,6 +89,7 @@ class ReadinessResult(BaseModel):
     message: str
     reason_code: ReasonCode | None = None
     checks: dict[str, CheckResult] = Field(default_factory=dict)
+    feasibility: FeasibilityResult | None = None
 
 
 _service_cache: dict[str, Any] = {
@@ -179,12 +183,8 @@ def _check_capacity(active_jobs: int) -> CheckResult:
     return CheckResult(ok=True, reason_code="ok", detail="ok")
 
 
-def _check_request(req: ReadinessRequest) -> CheckResult:
-    """Light request sanity — provider checks are the real gate.
-
-    Title marketing counts (e.g. "365 recipes") are NOT validated here; the
-    bible stage sizes the book and reconcile_promise() rewrites mismatched counts.
-    """
+def _check_request(req: ReadinessRequest) -> tuple[CheckResult, FeasibilityResult | None]:
+    """Request sanity + marketing-count feasibility."""
     text_len = len((req.text or "").strip())
 
     if req.youtube_url:
@@ -193,17 +193,55 @@ def _check_request(req: ReadinessRequest) -> CheckResult:
         return CheckResult(
             ok=False, reason_code="request",
             detail=f"source text too short ({text_len} chars)",
+        ), None
+
+    feas = assess_request(
+        topic=req.topic,
+        description=req.description,
+        target_pages=req.target_pages,
+        toc=req.toc,
+        accepted_promised_count=req.accepted_promised_count,
+    )
+    # Smoke / pamphlet runs keep the old contract: do not block on marketing
+    # counts (bible pamphlet path sizes the book). Full books require a fit.
+    if feas.status == "infeasible" and req.target_pages > 15:
+        detail = (
+            f"promised={feas.promised} target={feas.target_pages} "
+            f"required={feas.min_pages_required} max={feas.max_entries_at_target}"
         )
+        return CheckResult(
+            ok=False, reason_code="request", detail=detail,
+        ), feas
 
-    return CheckResult(ok=True, reason_code="ok", detail="ok")
+    if feas.status == "infeasible" and req.target_pages <= 15:
+        feas = feas.model_copy(update={
+            "status": "ok",
+            "message": (
+                f"Smoke/pamphlet run ({req.target_pages} pages) — marketing "
+                f"count {feas.promised} will be sized by planning."
+            ),
+            "options": [],
+        })
+
+    detail = (
+        f"feasibility={feas.status} promised={feas.promised} "
+        f"ppe={feas.pages_per_entry} max={feas.max_entries_at_target}"
+    )
+    return CheckResult(ok=True, reason_code="ok", detail=detail), feas
 
 
-def _request_block_message(_req: ReadinessRequest, check: CheckResult) -> str:
+def _request_block_message(
+    _req: ReadinessRequest,
+    check: CheckResult,
+    feas: FeasibilityResult | None = None,
+) -> str:
     if check.detail.startswith("source text"):
         return (
             "Your source text is too short to generate a grounded book. "
             "Paste more content into the source notes field."
         )
+    if feas and feas.status == "infeasible":
+        return feas.message
     return _USER_COPY["request"][1]
 
 
@@ -220,12 +258,15 @@ def _first_hard_failure(
     checks: dict[str, CheckResult],
     *,
     include_request: ReadinessRequest | None = None,
+    feasibility: FeasibilityResult | None = None,
 ) -> tuple[ReasonCode | None, str | None]:
     for name in ("writing", "images", "layout", "request"):
         c = checks.get(name)
         if c and not c.ok and c.reason_code in _HARD_BLOCK_CODES:
             if name == "request" and include_request is not None:
-                return c.reason_code, _request_block_message(include_request, c)
+                return c.reason_code, _request_block_message(
+                    include_request, c, feasibility,
+                )
             return c.reason_code, None
     return None, None
 
@@ -277,16 +318,24 @@ def check_readiness(
             _service_cache["deadline"] = now + max(5, s.health_ping_ttl_s)
             _service_cache["checks"] = dict(checks)
 
+    feasibility: FeasibilityResult | None = None
     if include_request is not None:
-        checks["request"] = _check_request(include_request)
+        req_check, feasibility = _check_request(include_request)
+        checks["request"] = req_check
 
     hard_code, custom_msg = _first_hard_failure(
-        checks, include_request=include_request,
+        checks,
+        include_request=include_request,
+        feasibility=feasibility,
     )
     can_generate = hard_code is None
 
     if can_generate:
-        title, message = _USER_COPY["ok"]
+        if feasibility and feasibility.status == "compact":
+            title = "Ready — shorter recipes to keep your count"
+            message = feasibility.message
+        else:
+            title, message = _USER_COPY["ok"]
         reason_code: ReasonCode | None = "ok"
     else:
         assert hard_code is not None
@@ -300,11 +349,13 @@ def check_readiness(
         message=message,
         reason_code=reason_code if can_generate else hard_code,
         checks=checks,
+        feasibility=feasibility,
     )
     log.info(
         "readiness_check",
         can_generate=can_generate,
         reason_code=result.reason_code,
+        feasibility=feasibility.status if feasibility else None,
         checks={k: v.ok for k, v in checks.items()},
     )
     return result

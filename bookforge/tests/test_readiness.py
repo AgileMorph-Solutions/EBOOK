@@ -24,10 +24,13 @@ client = TestClient(app)
 @pytest.fixture(autouse=True)
 def _clear_readiness_cache():
     from bookforge.pipeline import readiness as readiness_mod
+    from bookforge.config import get_settings
 
     readiness_mod._service_cache["deadline"] = 0.0
     readiness_mod._service_cache["checks"] = None
-    yield
+    # Tests patch llm.ping — ensure the auth short-circuit does not fire first.
+    with patch.object(get_settings(), "anthropic_api_key", "test-key"):
+        yield
     readiness_mod._service_cache["deadline"] = 0.0
     readiness_mod._service_cache["checks"] = None
 

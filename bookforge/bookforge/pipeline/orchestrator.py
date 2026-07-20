@@ -419,6 +419,8 @@ def run_book(
     description: str | None = None,
     toc: list[str] | None = None,
     profile_overrides: dict | None = None,
+    density_mode: str | None = None,
+    accepted_promised_count: int | None = None,
     on_stage: Callable[[str], None] | None = None,
 ) -> BookArtifact:
     """Thin wrapper: bind this book's budget (carrying spend across resumes)
@@ -431,7 +433,10 @@ def run_book(
                 target_pages=target_pages, chapter_limit=chapter_limit,
                 section_limit=section_limit, book_kind=book_kind,
                 description=description, toc=toc,
-                profile_overrides=profile_overrides, on_stage=on_stage,
+                profile_overrides=profile_overrides,
+                density_mode=density_mode,
+                accepted_promised_count=accepted_promised_count,
+                on_stage=on_stage,
             )
         finally:
             checkpoints.save_spend(book_id, book_budget.spent)
@@ -450,6 +455,8 @@ def _run_book_impl(
     description: str | None,
     toc: list[str] | None,
     profile_overrides: dict | None,
+    density_mode: str | None,
+    accepted_promised_count: int | None,
     on_stage: Callable[[str], None] | None,
 ) -> BookArtifact:
     limit = section_limit if section_limit is not None else chapter_limit
@@ -508,6 +515,8 @@ def _run_book_impl(
                 source, target_pages=target_pages, book_kind=book_kind,
                 description=description, toc=toc,
                 profile_overrides=profile_overrides,
+                density_mode=density_mode,
+                accepted_promised_count=accepted_promised_count,
             )
             checkpoints.save_bible(book_id, book_bible)
             stage("content")
@@ -558,6 +567,8 @@ def _run_book_impl(
             source, target_pages=target_pages, book_kind=book_kind,
             description=description, toc=toc,
             profile_overrides=profile_overrides,
+            density_mode=density_mode,
+            accepted_promised_count=accepted_promised_count,
         )
         checkpoints.save_bible(book_id, book_bible)
 

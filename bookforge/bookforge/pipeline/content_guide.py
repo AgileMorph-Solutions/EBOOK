@@ -154,11 +154,17 @@ COUNTS FOR THIS CHAPTER: EXACTLY {cards} cards and EXACTLY {quick} quick_uses
 def _card_spec(profile: EditorialProfile) -> str:
     es = profile.entry_schema
     noun = es.entry_noun
+    compact = (getattr(profile, "pages_per_entry", 1.0) or 1.0) < 1.5
     lines = [
         f"    * title: the {noun}'s name, 2-6 words, specific and concrete.",
         f"    * intro (the headnote): {es.headnote_lo}-{es.headnote_hi} words — "
-        "why this one matters, with one vivid, concrete detail. Every card's "
-        "intro must open differently.",
+        + (
+            "COMPACT MODE: one short concrete sentence only; no nostalgia essay, "
+            "no padding. Every card's intro must open differently."
+            if compact else
+            "why this one matters, with one vivid, concrete detail. Every card's "
+            "intro must open differently."
+        ),
     ]
     if not es.requires_materials:
         lines.append(
@@ -183,13 +189,18 @@ def _card_spec(profile: EditorialProfile) -> str:
             "patience, mindset, consistency, willingness, motivation, awareness, "
             "discipline, a plan, a goal, good lighting, time, commitment. If the "
             f"{noun} needs nothing physical, leave what_you_need EMPTY ([]).")
+    step_hi = min(es.max_steps, 5) if compact else es.max_steps
     lines.append(
-        f"    * steps ({es.steps_label}): {es.min_steps}-{es.max_steps} numbered "
-        "steps, each ONE action in the imperative, 6-25 words, with exact "
+        f"    * steps ({es.steps_label}): {es.min_steps}-{step_hi} numbered "
+        "steps, each ONE action in the imperative, "
+        + ("6-18 words" if compact else "6-25 words")
+        + ", with exact "
         "temperatures, times, settings, or sensory done-ness cues wherever "
         "they matter (a cue plus a time range beats a bare time). Steps must "
         "instruct only the SAFE method; put any 'never do X' warning in the "
-        "caution field, not inside a step.")
+        "caution field, not inside a step."
+        + (" COMPACT: no filler steps." if compact else "")
+    )
     if es.show_meta:
         lines.append(
             "    * serves: the yield, phrased the same way on every card.")
@@ -203,12 +214,18 @@ def _card_spec(profile: EditorialProfile) -> str:
             "dollar amount.")
     else:
         lines.append("    * savings: leave \"\".")
-    lines.append(
-        "    * variation: optional one-line riff on the card, 8-16 words, "
-        "or \"\".")
-    lines.append(
-        "    * note: optional make-ahead/storage/practical note, max 20 words, "
-        "or \"\".")
+    if compact:
+        lines.append(
+            "    * variation: leave \"\" unless essential (one line max 12 words).")
+        lines.append(
+            "    * note: one short practical note max 14 words, or \"\".")
+    else:
+        lines.append(
+            "    * variation: optional one-line riff on the card, 8-16 words, "
+            "or \"\".")
+        lines.append(
+            "    * note: optional make-ahead/storage/practical note, max 20 words, "
+            "or \"\".")
     lines.append(
         "    * source_line: when the card adapts something from the source "
         "material, credit it (\"Adapted from …\"); else \"\".")

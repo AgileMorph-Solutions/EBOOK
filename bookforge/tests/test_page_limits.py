@@ -96,15 +96,19 @@ def test_allowed_page_range_target_300():
 
 
 def test_allowed_page_range_target_200():
-    assert allowed_page_range(200) == (200, 300)
+    assert allowed_page_range(200) == (200, 220)
 
 
 def test_allowed_page_range_target_100():
-    assert allowed_page_range(100) == (100, 150)
+    assert allowed_page_range(100) == (100, 120)
+
+
+def test_allowed_page_range_target_170():
+    assert allowed_page_range(170) == (170, 190)
 
 
 def test_allowed_page_range_target_5():
-    assert allowed_page_range(5) == (5, 8)
+    assert allowed_page_range(5) == (5, 6)
 
 
 def test_meets_page_floor():
@@ -116,27 +120,27 @@ def test_meets_page_floor():
 def test_is_acceptable_page_count():
     assert is_acceptable_page_count(160, 160)
     assert not is_acceptable_page_count(120, 160)
-    assert is_acceptable_page_count(240, 160)
-    assert not is_acceptable_page_count(241, 160)
+    assert is_acceptable_page_count(180, 160)
+    assert not is_acceptable_page_count(181, 160)
     assert not is_acceptable_page_count(301, 300)
     assert is_acceptable_page_count(300, 300)
     assert is_acceptable_page_count(120, 100)
     assert not is_acceptable_page_count(99, 100)
-    assert is_acceptable_page_count(150, 100)
-    assert not is_acceptable_page_count(151, 100)
+    assert is_acceptable_page_count(119, 100)
+    assert not is_acceptable_page_count(121, 100)
 
 
 def test_hard_ceiling_never_exceeds_absolute_max():
     assert hard_page_ceiling(300) == ABSOLUTE_PAGE_CEILING
     assert hard_page_ceiling(290) == 300
-    assert hard_page_ceiling(200) == 300
-    assert hard_page_ceiling(100) == 150
+    assert hard_page_ceiling(200) == 220
+    assert hard_page_ceiling(100) == 120
     assert hard_page_ceiling(400) == ABSOLUTE_PAGE_CEILING
 
 
 def test_check_page_count_in_range():
     check_page_count(100, 100)
-    check_page_count(150, 100)
+    check_page_count(120, 100)
     check_page_count(300, 300)
 
 
@@ -144,7 +148,7 @@ def test_check_page_count_raises_over_ceiling():
     with pytest.raises(PageLimitError) as exc:
         check_page_count(301, 200)
     assert exc.value.pages == 301
-    assert exc.value.hi == 300
+    assert exc.value.hi == 220
 
     with pytest.raises(PageLimitError):
         check_page_count(301, 300)
@@ -220,9 +224,9 @@ def test_cap_sections_to_page_ceiling_shrinks_oversized_plan():
     capped = _cap_sections_to_page_ceiling(
         sections, 5, profile, pamphlet=True,
     )
-    from bookforge.pipeline.page_limits import estimate_guide_pages
+    from bookforge.pipeline.page_limits import estimate_rendered_pages
 
-    assert estimate_guide_pages(capped, pamphlet=True) <= 5
+    assert estimate_rendered_pages(capped, profile, pamphlet=True) <= 6
     assert planned_use_count(capped) < planned_use_count(sections)
 
 
@@ -238,10 +242,10 @@ def test_cap_sections_reduces_section_count():
     capped = _cap_sections_to_page_ceiling(
         sections, 75, profile, pamphlet=False,
     )
-    from bookforge.pipeline.page_limits import estimate_guide_pages
+    from bookforge.pipeline.page_limits import estimate_rendered_pages
 
     assert len(capped) < len(sections)
-    assert estimate_guide_pages(capped, pamphlet=False) <= 75
+    assert estimate_rendered_pages(capped, profile, pamphlet=False) <= 90
     assert all(s.image_quota <= s.full_card_quota for s in capped)
 
 
@@ -461,7 +465,7 @@ def test_orchestrator_raises_on_undershoot(monkeypatch):
 def test_page_range_prompt_mentions_band():
     text = page_range_prompt_suffix(75)
     assert "75" in text
-    assert "113" in text
+    assert "90" in text
     assert "at least" in text.lower()
     assert "must not exceed" in text.lower()
 
@@ -469,5 +473,5 @@ def test_page_range_prompt_mentions_band():
 def test_is_within_page_range():
     assert not is_within_page_range(99, 100)
     assert is_within_page_range(100, 100)
-    assert is_within_page_range(150, 100)
-    assert not is_within_page_range(151, 100)
+    assert is_within_page_range(120, 100)
+    assert not is_within_page_range(121, 100)

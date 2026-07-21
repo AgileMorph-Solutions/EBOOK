@@ -12,7 +12,12 @@ from bookforge.clients import images as img_client
 from bookforge.clients import llm
 from bookforge.config import get_settings
 from bookforge.pipeline import pdf_geometry
-from bookforge.pipeline.feasibility import FeasibilityResult, assess_request
+from bookforge.pipeline.feasibility import (
+    BookAssessment,
+    FeasibilityResult,
+    assess_request,
+    build_book_assessment,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -90,6 +95,7 @@ class ReadinessResult(BaseModel):
     reason_code: ReasonCode | None = None
     checks: dict[str, CheckResult] = Field(default_factory=dict)
     feasibility: FeasibilityResult | None = None
+    assessment: BookAssessment | None = None
 
 
 _service_cache: dict[str, Any] = {
@@ -183,8 +189,8 @@ def _check_capacity(active_jobs: int) -> CheckResult:
     return CheckResult(ok=True, reason_code="ok", detail="ok")
 
 
-def _check_request(req: ReadinessRequest) -> tuple[CheckResult, FeasibilityResult | None]:
-    """Request sanity + marketing-count feasibility."""
+def _check_request(req: ReadinessRequest) -> tuple[CheckResult, FeasibilityResult | None, BookAssessment | None]:
+    """Request sanity + marketing-count / scope feasibility."""
     text_len = len((req.text or "").strip())
 
     if req.youtube_url:
@@ -193,54 +199,76 @@ def _check_request(req: ReadinessRequest) -> tuple[CheckResult, FeasibilityResul
         return CheckResult(
             ok=False, reason_code="request",
             detail=f"source text too short ({text_len} chars)",
-        ), None
+        ), None, None
 
-    feas = assess_request(
+    assessment = build_book_assessment(
         topic=req.topic,
         description=req.description,
+        text=req.text,
         target_pages=req.target_pages,
         toc=req.toc,
         accepted_promised_count=req.accepted_promised_count,
+        density_mode=req.density_mode,
+    )
+    feas = assess_request(
+        topic=req.topic,
+        description=req.description,
+        text=req.text,
+        target_pages=req.target_pages,
+        toc=req.toc,
+        accepted_promised_count=req.accepted_promised_count,
+        density_mode=req.density_mode,
     )
     # Smoke / pamphlet runs keep the old contract: do not block on marketing
     # counts (bible pamphlet path sizes the book). Full books require a fit.
-    if feas.status == "infeasible" and req.target_pages > 15:
+    if not assessment.can_create and req.target_pages > 15:
         detail = (
-            f"promised={feas.promised} target={feas.target_pages} "
-            f"required={feas.min_pages_required} max={feas.max_entries_at_target}"
+            f"assessment={assessment.status} target={req.target_pages} "
+            f"band={assessment.page_range_lo}-{assessment.page_range_hi} "
+            f"estimated={assessment.estimated_pages}"
         )
         return CheckResult(
             ok=False, reason_code="request", detail=detail,
-        ), feas
+        ), feas, assessment
 
-    if feas.status == "infeasible" and req.target_pages <= 15:
-        feas = feas.model_copy(update={
+    if not assessment.can_create and req.target_pages <= 15:
+        assessment = assessment.model_copy(update={
+            "can_create": True,
             "status": "ok",
             "message": (
-                f"Smoke/pamphlet run ({req.target_pages} pages) — marketing "
-                f"count {feas.promised} will be sized by planning."
+                f"Smoke/pamphlet run ({req.target_pages} pages) — content "
+                f"will be sized by planning."
             ),
+        })
+        feas = feas.model_copy(update={
+            "status": "ok",
+            "message": assessment.message,
             "options": [],
         })
 
     detail = (
-        f"feasibility={feas.status} promised={feas.promised} "
-        f"ppe={feas.pages_per_entry} max={feas.max_entries_at_target}"
+        f"assessment={assessment.status} band={assessment.page_range_lo}-"
+        f"{assessment.page_range_hi} est={assessment.estimated_pages}"
     )
-    return CheckResult(ok=True, reason_code="ok", detail=detail), feas
+    return CheckResult(ok=True, reason_code="ok", detail=detail), feas, assessment
 
 
 def _request_block_message(
     _req: ReadinessRequest,
     check: CheckResult,
     feas: FeasibilityResult | None = None,
+    assessment: BookAssessment | None = None,
 ) -> str:
     if check.detail.startswith("source text"):
         return (
             "Your source text is too short to generate a grounded book. "
             "Paste more content into the source notes field."
         )
+    if assessment and assessment.message:
+        return assessment.message
     if feas and feas.status == "infeasible":
+        return feas.message
+    if feas and feas.message:
         return feas.message
     return _USER_COPY["request"][1]
 
@@ -259,13 +287,14 @@ def _first_hard_failure(
     *,
     include_request: ReadinessRequest | None = None,
     feasibility: FeasibilityResult | None = None,
+    assessment: BookAssessment | None = None,
 ) -> tuple[ReasonCode | None, str | None]:
     for name in ("writing", "images", "layout", "request"):
         c = checks.get(name)
         if c and not c.ok and c.reason_code in _HARD_BLOCK_CODES:
             if name == "request" and include_request is not None:
                 return c.reason_code, _request_block_message(
-                    include_request, c, feasibility,
+                    include_request, c, feasibility, assessment,
                 )
             return c.reason_code, None
     return None, None
@@ -319,19 +348,33 @@ def check_readiness(
             _service_cache["checks"] = dict(checks)
 
     feasibility: FeasibilityResult | None = None
+    assessment: BookAssessment | None = None
     if include_request is not None:
-        req_check, feasibility = _check_request(include_request)
+        req_check, feasibility, assessment = _check_request(include_request)
         checks["request"] = req_check
 
     hard_code, custom_msg = _first_hard_failure(
         checks,
         include_request=include_request,
         feasibility=feasibility,
+        assessment=assessment,
     )
     can_generate = hard_code is None
 
     if can_generate:
-        if feasibility and feasibility.status == "compact":
+        if assessment and assessment.assessment_mode == "expand":
+            title = "Ready — content will be expanded to your target"
+            message = assessment.message
+        elif assessment and assessment.status == "compact":
+            title = "Ready — shorter entries to fit your page band"
+            message = assessment.message
+        elif assessment and assessment.estimated_pages:
+            title = "Ready to generate"
+            message = (
+                f"{assessment.message} "
+                f"(band {assessment.page_range_lo}–{assessment.page_range_hi} pages)"
+            )
+        elif feasibility and feasibility.status == "compact":
             title = "Ready — shorter recipes to keep your count"
             message = feasibility.message
         else:
@@ -340,7 +383,7 @@ def check_readiness(
     else:
         assert hard_code is not None
         title, default_msg = _user_message(hard_code)
-        message = custom_msg or default_msg
+        message = custom_msg or (assessment.message if assessment else default_msg)
         reason_code = hard_code
 
     result = ReadinessResult(
@@ -350,12 +393,14 @@ def check_readiness(
         reason_code=reason_code if can_generate else hard_code,
         checks=checks,
         feasibility=feasibility,
+        assessment=assessment,
     )
     log.info(
         "readiness_check",
         can_generate=can_generate,
         reason_code=result.reason_code,
         feasibility=feasibility.status if feasibility else None,
+        assessment=assessment.status if assessment else None,
         checks={k: v.ok for k, v in checks.items()},
     )
     return result

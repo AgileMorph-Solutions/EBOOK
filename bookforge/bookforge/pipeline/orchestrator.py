@@ -30,13 +30,71 @@ from bookforge.pipeline.content_guardrails import finalize_marketing_counts
 from bookforge.pipeline.page_limits import (
     allowed_page_range,
     expand_chapters_for_pages,
+    estimate_rendered_pages,
     is_acceptable_page_count,
     scale_chapters_to_pages,
     scale_images_for_chapters,
+    _upsize_sections_to_estimate,
 )
 from bookforge.schemas import BlockType, BookArtifact, BookBible, Chapter, QAResult
 
 log = structlog.get_logger(__name__)
+
+
+def _structural_expand_plan(
+    book_bible: BookBible,
+    chapters: list[Chapter],
+    *,
+    target_pages: int,
+) -> tuple[BookBible, dict[int, list[str]]]:
+    """Upsize section quotas when the plan estimate sits below the page floor."""
+    from bookforge.pipeline.content_guardrails import planned_use_count
+
+    profile = book_bible.profile
+    if not profile or book_bible.book_kind != "practical_guide":
+        return book_bible, {}
+
+    lo, _ = allowed_page_range(target_pages)
+    pamphlet = target_pages <= 15
+    est = estimate_rendered_pages(
+        book_bible.sections, profile, pamphlet=pamphlet,
+    )
+    if est >= lo:
+        return book_bible, {}
+
+    new_sections = _upsize_sections_to_estimate(
+        book_bible.sections,
+        profile,
+        target_estimate=lo,
+        min_entries=planned_use_count(book_bible.sections),
+        pamphlet=pamphlet,
+    )
+    if planned_use_count(new_sections) <= planned_use_count(book_bible.sections):
+        return book_bible, {}
+
+    new_bible = book_bible.model_copy(update={"sections": new_sections})
+    noun = profile.entry_schema.entry_noun
+    sections_by_idx = {s.index: s for s in new_sections}
+    faults: dict[int, list[str]] = {}
+    for ch in chapters:
+        section = sections_by_idx.get(ch.index)
+        if not section:
+            continue
+        n_cards = sum(1 for b in ch.blocks if b.type == BlockType.use_card)
+        if n_cards < section.full_card_quota:
+            faults[ch.index] = [
+                f"add {section.full_card_quota - n_cards} full {noun} cards "
+                f"(book must reach at least {lo} pages)"
+            ]
+    log.info(
+        "page_structural_expand",
+        estimated_before=est,
+        floor=lo,
+        entries_before=planned_use_count(book_bible.sections),
+        entries_after=planned_use_count(new_sections),
+        sections_with_new_cards=len(faults),
+    )
+    return new_bible, faults
 
 
 def _layout_faults(defects: list[dict], chapters: list[Chapter]) -> dict[int, list[str]]:
@@ -264,7 +322,7 @@ def _assemble_with_page_scale(
     stage: Callable[[str], None],
 ) -> BookArtifact:
     """Assemble with layout repair; scale content to meet the page band.
-    Books outside [target, 1.5× target] after all scale passes raise
+    Books outside [target, page ceiling] after all scale passes raise
     PageLimitError unless SHIP_ON_PAGE_OVERSHOOT=true (overshoot only)."""
     target = book_bible.target_pages or 100
     chapters_cur = chapters
@@ -303,14 +361,23 @@ def _assemble_with_page_scale(
 
         if pages < target:
             stage(f"page-expand ({scale_attempt + 1})")
-            expand_faults = {
-                s.index: [
+            lo, hi = allowed_page_range(target)
+            book_bible, structural_faults = _structural_expand_plan(
+                book_bible, chapters_cur, target_pages=target,
+            )
+            noun = (
+                book_bible.profile.entry_schema.entry_noun
+                if book_bible.profile else "entry"
+            )
+            expand_faults: dict[int, list[str]] = dict(structural_faults)
+            for s in book_bible.sections:
+                if s.index in expand_faults:
+                    continue
+                expand_faults[s.index] = [
                     f"expand this section — the book must reach at least "
-                    f"{target} pages; add depth to headnotes and steps without "
-                    f"removing any {book_bible.profile.entry_schema.entry_noun if book_bible.profile else 'entry'}s",
+                    f"{lo} pages; add depth to headnotes and steps without "
+                    f"removing any {noun}s",
                 ]
-                for s in book_bible.sections
-            }
             try:
                 chapters_cur = content.regenerate_guide_sections(
                     chapters_cur, book_bible, source, expand_faults,

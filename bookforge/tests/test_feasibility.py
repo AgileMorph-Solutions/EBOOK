@@ -2,6 +2,7 @@
 from bookforge.pipeline.feasibility import (
     COMPACT_PAGES_PER_ENTRY,
     assess_request,
+    build_book_assessment,
     max_entries_for_pages,
     min_pages_for_entries,
     resolve_density,
@@ -106,3 +107,32 @@ def test_min_pages_and_max_entries_inverse():
     pages = min_pages_for_entries(56, 0.8, n)
     max_e = max_entries_for_pages(pages, 0.8, n)
     assert max_e >= 50
+
+
+def test_outline_overshoot_tries_compact_before_infeasible():
+    """Large outline at low target should offer compact before hard block."""
+    toc = [f"Chapter {i}" for i in range(1, 12)]
+    text = "\n".join(f"- item {i}" for i in range(200))
+    result = assess_request(
+        topic="Big Outline Guide",
+        text=text,
+        target_pages=100,
+        toc=toc,
+    )
+    assert result.status in ("compact", "infeasible")
+    if result.status == "infeasible":
+        assert len(result.options) >= 1
+
+
+def test_thin_outline_expandable_not_blocked():
+    toc = [f"Chapter {i}" for i in range(1, 8)]
+    text = "\n".join(f"- item {i}" for i in range(40))
+    assessment = build_book_assessment(
+        topic="Light Guide",
+        text=text,
+        target_pages=150,
+        toc=toc,
+    )
+    assert assessment.can_create is True
+    assert assessment.assessment_mode == "expand"
+

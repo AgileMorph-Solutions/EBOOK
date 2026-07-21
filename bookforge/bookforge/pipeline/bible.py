@@ -33,10 +33,13 @@ from bookforge.pipeline.content_guardrails import (
 )
 from bookforge.pipeline.page_limits import (
     estimate_guide_pages,
+    estimate_rendered_pages,
     max_planned_entries,
     max_sections_for_target,
     page_range_prompt_suffix,
+    reconcile_plan_to_page_band,
 )
+from bookforge.pipeline.plan_scope import PlanScope, build_plan_scope
 from bookforge.schemas import (
     ArtStyle, BookBible, DesignKit, EditorialProfile, EntrySchema, HowToPage,
     SafetyCard, SectionPlan, SourceDoc, SpecialPlan, VoiceStyle,
@@ -656,6 +659,7 @@ def _guide_density(
     profile: EditorialProfile,
     *,
     promised: int | None = None,
+    min_sections: int = 0,
 ) -> _Density:
     """Template-driven density: fewer, deeper entries for entry-rich genres.
 
@@ -698,15 +702,26 @@ def _guide_density(
         return _Density(base_sections=n, cards_per_section=fc,
                         list_quota=lq, image_quota=iq, page_budget=pb)
 
+    from bookforge.pipeline.feasibility import MAX_CARDS_PER_SECTION
+
     fixed_overhead = 9  # cover, title, how-to, safety, TOC, specials, back matter
     avail = max(12, target_pages - fixed_overhead)
-    cards = 6 if profile.pages_per_entry >= 1.5 else 8
-    list_pages = max(0.0, profile.quick_list_weight) * 1.2
+    ppe = max(0.5, profile.pages_per_entry)
+    factor = 0.9 if profile.image_density == "every_entry" else 0.75
     per_section_overhead = 1.0 + (1.6 if spec.has_opener_essay else 0.4)
-    pages_per_section = (per_section_overhead
-                         + cards * max(0.5, profile.pages_per_entry)
-                         + list_pages)
-    n = max(4, round(avail / pages_per_section))
+    list_pages = max(0.0, profile.quick_list_weight) * 1.2
+    if min_sections > 0:
+        n = min_sections
+        content_avail = max(1, avail - n * per_section_overhead)
+        cards = max(3, min(
+            MAX_CARDS_PER_SECTION,
+            math.ceil(content_avail / max(0.5, n * ppe * factor)),
+        ))
+    else:
+        cards = 6 if profile.pages_per_entry >= 1.5 else 8
+        pages_per_section = per_section_overhead + cards * ppe + list_pages
+        n = max(4, round(avail / pages_per_section))
+    pages_per_section = per_section_overhead + cards * ppe + list_pages
     ceiling = settings.max_base_sections
     if ceiling and ceiling > 0:
         n = min(n, ceiling)
@@ -781,6 +796,8 @@ def _cap_sections_to_page_ceiling(
     *,
     pamphlet: bool,
     min_entries: int = 0,
+    min_sections: int = 0,
+    specials: list | None = None,
 ) -> list[SectionPlan]:
     """Trim per-section budgets to fit the planning target without mega-merges.
 
@@ -790,8 +807,10 @@ def _cap_sections_to_page_ceiling(
     still exceeds the page budget after per-section budget trim.
     """
     from bookforge.pipeline.feasibility import MAX_CARDS_PER_SECTION
+    from bookforge.pipeline.page_limits import allowed_page_range
 
-    plan_cap = max(1, target_pages)
+    _, hi = allowed_page_range(target_pages)
+    plan_cap = hi
     planned = planned_use_count(sections)
     # Only shrink entry count when the caller did NOT lock a minimum (legacy /
     # pamphlet paths). With min_entries set, keep the promise.
@@ -851,9 +870,14 @@ def _cap_sections_to_page_ceiling(
     for i, s in enumerate(out, start=1):
         s.index = i
 
-    # Trim page_budget only — never merge section quotas into one chapter.
-    while len(out) > 1 and estimate_guide_pages(out, pamphlet=pamphlet) > plan_cap:
-        # Drop the last *section* only if we still meet min_entries after drop.
+    # Trim to page ceiling — never drop below min_sections when TOC is locked.
+    floor_sections = max(1, min_sections) if min_sections > 0 else 1
+    while (
+        len(out) > floor_sections
+        and estimate_rendered_pages(
+            out, profile, specials=specials, pamphlet=pamphlet,
+        ) > plan_cap
+    ):
         last = out[-1]
         remaining = planned_use_count(out[:-1])
         if min_entries > 0 and remaining < min_entries:
@@ -866,8 +890,26 @@ def _cap_sections_to_page_ceiling(
             remaining_entries=remaining,
         )
 
-    while estimate_guide_pages(out, pamphlet=pamphlet) > plan_cap:
+    while estimate_rendered_pages(
+        out, profile, specials=specials, pamphlet=pamphlet,
+    ) > plan_cap:
         reduced = False
+        for s in sorted(out, key=lambda x: x.list_quota, reverse=True):
+            if s.list_quota > 0:
+                s.list_quota -= 1
+                reduced = True
+                break
+        if reduced:
+            continue
+        for s in sorted(out, key=lambda x: x.full_card_quota, reverse=True):
+            if min_entries > 0 and planned_use_count(out) <= min_entries:
+                break
+            if s.full_card_quota > 2:
+                s.full_card_quota -= 1
+                reduced = True
+                break
+        if reduced:
+            continue
         for s in sorted(out, key=lambda x: x.page_budget, reverse=True):
             if s.page_budget > 1:
                 s.page_budget -= 1
@@ -1251,6 +1293,13 @@ def build_bible(
         return bible
 
     profile = derive_profile(source, overrides=profile_overrides)
+    plan_scope = build_plan_scope(
+        topic=source.topic,
+        description=description,
+        text=source.text,
+        toc=toc,
+        accepted_promised_count=accepted_promised_count,
+    )
     profile = _apply_cookbook_profile_bias(
         profile,
         cookbookish=_is_cookbookish(source, description=description, toc=toc),
@@ -1264,6 +1313,7 @@ def build_bible(
     topic_promised = (
         parse_promised_count(source.topic, description or "")
         or parse_promised_count(source.topic, "")
+        or parse_promised_count("", source.text or "")
     )
     if accepted_promised_count and accepted_promised_count > 0:
         effective_promised = accepted_promised_count
@@ -1283,6 +1333,7 @@ def build_bible(
         and assess_request(
             topic=source.topic,
             description=description,
+            text=source.text,
             target_pages=target_pages,
             toc=toc,
             accepted_promised_count=accepted_promised_count,
@@ -1301,7 +1352,10 @@ def build_bible(
     design = derive_design(source, profile)
     spec = templates.spec_for(profile.structure_template)
     density = _cap_density(
-        _guide_density(target_pages, profile, promised=promised_hint),
+        _guide_density(
+            target_pages, profile, promised=promised_hint,
+            min_sections=plan_scope.min_sections,
+        ),
         target_pages,
         profile,
         pamphlet=pamphlet,
@@ -1384,6 +1438,7 @@ def build_bible(
     sections = _cap_sections_to_page_ceiling(
         sections, target_pages, profile, pamphlet=pamphlet,
         min_entries=effective_promised or 0,
+        min_sections=plan_scope.min_sections,
     )
     if draft.specials:
         raw_specials = [s.to_plan() for s in draft.specials]
@@ -1428,6 +1483,8 @@ def build_bible(
     sections = _cap_sections_to_page_ceiling(
         sections, target_pages, profile, pamphlet=pamphlet,
         min_entries=promised or 0,
+        min_sections=plan_scope.min_sections,
+        specials=specials,
     )
     planned = planned_use_count(sections)
 
@@ -1461,6 +1518,18 @@ def build_bible(
             f"plan collapsed to 1 section with {sections[0].full_card_quota} "
             f"cards at {target_pages} pages — reduce TOC pressure or raise pages"
         )
+
+    min_ent = promised or plan_scope.min_entries or 0
+    sections = reconcile_plan_to_page_band(
+        sections,
+        profile,
+        target_pages=target_pages,
+        specials=specials,
+        pamphlet=pamphlet,
+        min_entries=min_ent,
+        min_sections=plan_scope.min_sections,
+    )
+    planned = planned_use_count(sections)
 
     bible = BookBible(
         title=title,

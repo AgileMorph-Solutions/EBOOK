@@ -21,6 +21,35 @@ function rewriteTopicCount(topic: string, newCount: number): string {
   return topic.replace(/\b\d{1,4}\b/, String(newCount));
 }
 
+function buildRequestBody(params: {
+  topic: string;
+  description: string;
+  toc: string;
+  text: string;
+  targetPages: number;
+  sectionLimit: string;
+  densityMode: "standard" | "compact" | null;
+  acceptedPromisedCount: number | null;
+}): CreateBookRequest {
+  const tocLines = params.toc
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  return {
+    topic: params.topic.trim(),
+    target_pages: params.targetPages,
+    book_kind: "practical_guide",
+    section_limit: params.sectionLimit
+      ? parseInt(params.sectionLimit, 10)
+      : null,
+    description: params.description.trim() || undefined,
+    toc: tocLines.length > 0 ? tocLines : undefined,
+    text: params.text.trim(),
+    density_mode: params.densityMode,
+    accepted_promised_count: params.acceptedPromisedCount,
+  };
+}
+
 export function CreateBookForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -37,6 +66,7 @@ export function CreateBookForm() {
     number | null
   >(null);
   const [submitting, setSubmitting] = useState(false);
+  const [readinessLoading, setReadinessLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [serviceReadiness, setServiceReadiness] =
     useState<ReadinessResult | null>(null);
@@ -50,36 +80,40 @@ export function CreateBookForm() {
   useEffect(() => {
     if (!topic.trim()) {
       setRequestReadiness(null);
+      setReadinessLoading(false);
       return;
     }
+    setReadinessLoading(true);
     const timer = setTimeout(() => {
-      const tocLines = toc
-        .split("\n")
-        .map((l) => l.trim())
-        .filter(Boolean);
-      const body: CreateBookRequest = {
-        topic: topic.trim(),
-        target_pages: targetPages,
-        book_kind: "practical_guide",
-        section_limit: sectionLimit ? parseInt(sectionLimit, 10) : null,
-        description: description.trim() || undefined,
-        toc: tocLines.length > 0 ? tocLines : undefined,
-        text: text.trim() || undefined,
-        density_mode: densityMode,
-        accepted_promised_count: acceptedPromisedCount,
-      };
+      const body = buildRequestBody({
+        topic,
+        description,
+        toc,
+        text,
+        targetPages,
+        sectionLimit,
+        densityMode,
+        acceptedPromisedCount,
+      });
       void checkReadinessForRequest(body)
         .then((res) => {
           setRequestReadiness(res);
-          if (res.feasibility?.status === "compact") {
+          if (res.assessment?.assessment_mode === "compact") {
             setDensityMode("compact");
-          } else if (res.feasibility?.status === "ok" && densityMode === "compact") {
-            // Keep compact if user already accepted; otherwise clear.
-          } else if (res.feasibility?.status === "ok") {
+          } else if (
+            res.feasibility?.status === "compact" &&
+            res.assessment?.can_create
+          ) {
+            setDensityMode("compact");
+          } else if (
+            res.feasibility?.status === "ok" &&
+            res.assessment?.assessment_mode === "standard"
+          ) {
             setDensityMode(null);
           }
         })
-        .catch(() => setRequestReadiness(null));
+        .catch(() => setRequestReadiness(null))
+        .finally(() => setReadinessLoading(false));
     }, 500);
     return () => clearTimeout(timer);
   }, [
@@ -113,28 +147,40 @@ export function CreateBookForm() {
 
   const hasSource = text.trim().length > 0;
 
+  const readinessConfirmed =
+    requestReadiness?.can_generate === true &&
+    requestReadiness?.assessment?.can_create !== false;
+
   const readinessBlocked =
     serviceReadiness?.can_generate === false ||
     requestReadiness?.can_generate === false;
+
   const blockReadiness = requestReadiness?.can_generate === false
     ? requestReadiness
     : serviceReadiness?.can_generate === false
       ? serviceReadiness
       : null;
 
-  const compactInfo =
-    requestReadiness?.can_generate !== false &&
-    requestReadiness?.feasibility?.status === "compact"
-      ? requestReadiness
-      : null;
+  const readyInfo =
+    readinessConfirmed && requestReadiness ? requestReadiness : null;
 
   const canSubmit =
-    topic.trim().length > 0 && hasSource && !submitting && !readinessBlocked;
+    topic.trim().length > 0 &&
+    hasSource &&
+    !submitting &&
+    !readinessLoading &&
+    readinessConfirmed;
 
   function handleFeasibilityOption(opt: FeasibilityOption) {
     if (opt.id === "raise_pages" && opt.target_pages) {
       setAcceptedPromisedCount(null);
       setTargetPages(Math.min(300, opt.target_pages));
+      setDensityMode(null);
+      return;
+    }
+    if (opt.id === "lower_pages" && opt.target_pages) {
+      setTargetPages(Math.min(300, opt.target_pages));
+      setAcceptedPromisedCount(null);
       setDensityMode(null);
       return;
     }
@@ -147,31 +193,40 @@ export function CreateBookForm() {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!canSubmit) return;
+    if (!topic.trim() || !hasSource || submitting) return;
 
     setError(null);
     setSubmitting(true);
 
     try {
-      const tocLines = toc
-        .split("\n")
-        .map((l) => l.trim())
-        .filter(Boolean);
+      let body = buildRequestBody({
+        topic,
+        description,
+        toc,
+        text,
+        targetPages,
+        sectionLimit,
+        densityMode,
+        acceptedPromisedCount,
+      });
 
-      const body: CreateBookRequest = {
-        topic: topic.trim(),
-        target_pages: targetPages,
-        book_kind: "practical_guide",
-        section_limit: sectionLimit ? parseInt(sectionLimit, 10) : null,
-        description: description.trim() || undefined,
-        toc: tocLines.length > 0 ? tocLines : undefined,
-        text: text.trim(),
-        density_mode:
-          densityMode ??
-          (requestReadiness?.feasibility?.status === "compact"
-            ? "compact"
-            : null),
-        accepted_promised_count: acceptedPromisedCount,
+      const fresh = await checkReadinessForRequest(body);
+      setRequestReadiness(fresh);
+
+      if (!fresh.can_generate || fresh.assessment?.can_create === false) {
+        setSubmitting(false);
+        return;
+      }
+
+      const resolvedDensity =
+        fresh.assessment?.assessment_mode === "compact"
+          ? "compact"
+          : densityMode ??
+            (fresh.feasibility?.status === "compact" ? "compact" : null);
+
+      body = {
+        ...body,
+        density_mode: resolvedDensity,
       };
 
       const res = await createBook(body);
@@ -265,8 +320,9 @@ export function CreateBookForm() {
             }}
           />
           <p className="font-body text-body-sm italic text-secondary">
-            Finished books aim for your target up to 1.5× (max 300). Item counts
-            in the title are kept unless you choose to reduce them.
+            Finished books stay within your target and up to ~20 extra pages
+            (e.g. 100 → 100–120). Item counts in the title are kept unless you
+            choose to reduce them.
           </p>
         </div>
         <div className="flex flex-col gap-2">
@@ -285,8 +341,8 @@ export function CreateBookForm() {
         </div>
       </div>
 
-      {compactInfo && (
-        <RequestReadinessAlert readiness={compactInfo} />
+      {readyInfo && (
+        <RequestReadinessAlert readiness={readyInfo} />
       )}
 
       {blockReadiness &&
@@ -306,6 +362,12 @@ export function CreateBookForm() {
           </Alert>
         ))}
 
+      {readinessLoading && topic.trim() && hasSource && (
+        <Alert variant="info">
+          <p className="font-body text-body-sm">Checking if this book can be generated…</p>
+        </Alert>
+      )}
+
       {error && <Alert variant="error">{error}</Alert>}
 
       <div className="pt-2">
@@ -314,8 +376,12 @@ export function CreateBookForm() {
           disabled={!canSubmit}
           className="w-full px-10 py-4 font-display text-headline-sm sm:w-auto"
         >
-          {submitting ? "Starting pipeline…" : "Generate ebook"}
-          {!submitting && <Icon name="auto_awesome" />}
+          {submitting
+            ? "Checking and starting…"
+            : readinessLoading
+              ? "Checking…"
+              : "Generate ebook"}
+          {!submitting && !readinessLoading && <Icon name="auto_awesome" />}
         </Button>
       </div>
     </form>

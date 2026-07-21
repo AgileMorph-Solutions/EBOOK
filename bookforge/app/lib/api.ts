@@ -179,7 +179,7 @@ export type CheckResult = {
 };
 
 export type FeasibilityOption = {
-  id: "raise_pages" | "lower_count";
+  id: "raise_pages" | "lower_count" | "lower_pages";
   label: string;
   target_pages?: number | null;
   promised_count?: number | null;
@@ -189,11 +189,34 @@ export type FeasibilityResult = {
   status: "ok" | "compact" | "infeasible";
   promised?: number | null;
   target_pages: number;
+  page_range_lo?: number;
+  page_range_hi?: number;
   pages_per_entry: number;
   min_pages_required: number;
   max_entries_at_target: number;
+  estimated_pages?: number | null;
   message: string;
   options: FeasibilityOption[];
+};
+
+export type PlanScopeSummary = {
+  sections: number;
+  entries?: number | null;
+  locked_toc: boolean;
+};
+
+export type BookAssessment = {
+  can_create: boolean;
+  target_pages: number;
+  page_range_lo: number;
+  page_range_hi: number;
+  estimated_pages?: number | null;
+  scope: PlanScopeSummary;
+  status: "ok" | "compact" | "infeasible" | "needs_input";
+  message: string;
+  options: FeasibilityOption[];
+  warnings: string[];
+  assessment_mode?: "standard" | "compact" | "expand";
 };
 
 export type ReadinessResult = {
@@ -203,6 +226,7 @@ export type ReadinessResult = {
   reason_code?: ErrorKind | null;
   checks: Record<string, CheckResult>;
   feasibility?: FeasibilityResult | null;
+  assessment?: BookAssessment | null;
 };
 
 export async function getHealth(): Promise<HealthInfo> {

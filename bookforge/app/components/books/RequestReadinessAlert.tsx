@@ -37,12 +37,70 @@ export function RequestReadinessAlert({
   onChooseOption?: (option: FeasibilityOption) => void;
 }) {
   const feas = readiness.feasibility;
+  const assessment = readiness.assessment;
   const exceedsMax =
     feas != null &&
     feas.promised != null &&
     feas.min_pages_required > feas.target_pages;
 
-  if (feas?.status === "compact") {
+  if (readiness.can_generate && assessment) {
+    return (
+      <Alert variant="info" className="px-5 py-4">
+        <p className="font-label text-label-md font-semibold">{readiness.title}</p>
+        <p className="mt-2 font-body text-body-sm leading-relaxed">
+          {assessment.message || readiness.message}
+        </p>
+        {assessment.warnings.length > 0 && (
+          <ul className="mt-3 list-disc space-y-1 pl-5 font-body text-body-sm text-secondary">
+            {assessment.warnings.map((w) => (
+              <li key={w}>{w}</li>
+            ))}
+          </ul>
+        )}
+        <div className="mt-4 rounded-md border border-outline/15 bg-surface/40 px-4 py-1">
+          <StatRow
+            label="Page band"
+            value={`${assessment.page_range_lo}–${assessment.page_range_hi}`}
+            highlight="ok"
+          />
+          {assessment.estimated_pages != null && (
+            <StatRow
+              label="Estimated pages"
+              value={String(assessment.estimated_pages)}
+            />
+          )}
+          {assessment.scope.sections > 0 && (
+            <StatRow
+              label="Chapters"
+              value={String(assessment.scope.sections)}
+            />
+          )}
+          {assessment.scope.entries != null && (
+            <StatRow
+              label="Items detected"
+              value={String(assessment.scope.entries)}
+            />
+          )}
+          {assessment.assessment_mode === "expand" && (
+            <StatRow
+              label="Plan"
+              value="Expand content to reach target"
+              highlight="ok"
+            />
+          )}
+          {assessment.assessment_mode === "compact" && (
+            <StatRow
+              label="Layout"
+              value="Shorter entries (compact)"
+              highlight="ok"
+            />
+          )}
+        </div>
+      </Alert>
+    );
+  }
+
+  if (readiness.can_generate && feas?.status === "compact") {
     return (
       <Alert variant="info" className="px-5 py-4">
         <p className="font-label text-label-md font-semibold">{readiness.title}</p>
@@ -68,15 +126,29 @@ export function RequestReadinessAlert({
     <Alert variant="warning" className="px-5 py-4">
       <p className="font-label text-label-md font-semibold">{readiness.title}</p>
       <p className="mt-2 font-body text-body-sm leading-relaxed">
-        {feas?.message || readiness.message}
+        {assessment?.message || feas?.message || readiness.message}
       </p>
 
-      {feas && feas.promised != null && (
+      {feas && (
         <div className="mt-4 rounded-md border border-outline/15 bg-surface/40 px-4 py-1">
-          <StatRow
-            label="Items promised in topic"
-            value={String(feas.promised)}
-          />
+          {assessment && (
+            <StatRow
+              label="Page band"
+              value={`${assessment.page_range_lo}–${assessment.page_range_hi}`}
+            />
+          )}
+          {feas.promised != null && (
+            <StatRow
+              label="Items promised in topic"
+              value={String(feas.promised)}
+            />
+          )}
+          {assessment?.scope.sections ? (
+            <StatRow
+              label="Chapters in outline"
+              value={String(assessment.scope.sections)}
+            />
+          ) : null}
           <StatRow
             label="Your target pages"
             value={String(feas.target_pages)}
@@ -94,15 +166,16 @@ export function RequestReadinessAlert({
         </div>
       )}
 
-      {feas?.status === "infeasible" && feas.options.length > 0 && (
+      {(feas?.status === "infeasible" || assessment?.status === "infeasible") &&
+        (feas?.options.length ?? assessment?.options.length ?? 0) > 0 && (
         <div className="mt-4 space-y-2">
           <p className="font-label text-label-sm font-semibold text-on-primary-fixed-variant">
             Choose how to continue
           </p>
           <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
-            {feas.options.map((opt) => (
+            {(feas?.options ?? assessment?.options ?? []).map((opt) => (
               <Button
-                key={opt.id}
+                key={`${opt.id}-${opt.label}`}
                 type="button"
                 variant="outline"
                 className="justify-start text-left"

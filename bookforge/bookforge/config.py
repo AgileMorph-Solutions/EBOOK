@@ -146,6 +146,9 @@ class Settings(BaseSettings):
     # Ship a book that still exceeds its page ceiling after all trim passes
     # (with a warning) instead of raising PageLimitError.
     ship_on_page_overshoot: bool = Field(False, alias="SHIP_ON_PAGE_OVERSHOOT")
+    # Finished PDF page band: [target, min(ratio×target, target+absolute, 300)].
+    max_page_overshoot_ratio: float = Field(1.2, alias="MAX_PAGE_OVERSHOOT_RATIO")
+    max_page_overshoot_absolute: int = Field(20, alias="MAX_PAGE_OVERSHOOT_ABSOLUTE")
     # How many times a DAILY image-quota exhaustion may park the book until the
     # quota horizon before we ship it with the images we have.
     image_quota_max_parks: int = Field(1, alias="IMAGE_QUOTA_MAX_PARKS")

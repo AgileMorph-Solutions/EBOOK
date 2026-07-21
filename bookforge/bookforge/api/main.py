@@ -588,6 +588,10 @@ def get_book(book_id: str):
             state["description"] = req.description
         if req.toc:
             state["toc"] = req.toc
+        if req.text:
+            state["source_text"] = req.text
+        if req.youtube_url:
+            state["youtube_url"] = req.youtube_url
     return {"book_id": book_id, **_with_progress(state)}
 
 

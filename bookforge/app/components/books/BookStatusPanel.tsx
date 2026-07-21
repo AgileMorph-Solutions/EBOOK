@@ -151,7 +151,7 @@ export function BookStatusPanel({
             subtitle={subtitle}
           />
         </div>
-        {book?.source_filename && (
+        {book?.source_filename && book.status !== "done" && (
           <p className="mt-2 font-label text-label-sm text-secondary">
             Source: {book.source_filename}
           </p>
@@ -330,7 +330,16 @@ export function BookStatusPanel({
               topic={book.topic ?? "ebook"}
               artifact={book.artifact}
             />
-            <PreviewGrid pageCount={book.artifact.page_count} />
+            <PreviewGrid
+              topic={book.topic}
+              description={book.description}
+              toc={book.toc}
+              targetPages={book.target_pages}
+              sourceText={book.source_text}
+              youtubeUrl={book.youtube_url}
+              sourceFilename={book.source_filename}
+              sourceType={book.source_type}
+            />
           </div>
 
           <div className="flex flex-col gap-6 md:col-span-4">

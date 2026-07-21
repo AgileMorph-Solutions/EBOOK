@@ -105,6 +105,8 @@ export type BookStatus = {
   unfunded?: boolean;
   description?: string;
   toc?: string[];
+  source_text?: string;
+  youtube_url?: string;
 };
 
 export type BookSummary = {

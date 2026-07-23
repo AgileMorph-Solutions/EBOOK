@@ -476,5 +476,30 @@ class BookArtifact(BaseModel):
     degraded: bool = False
 
 
+# --------------------------------------------------------------------------- #
+# Audio scripts (SOP narration + ElevenLabs TTS)
+# --------------------------------------------------------------------------- #
+class AudioScriptItem(BaseModel):
+    """One narrated segment: heading + body paragraphs."""
+
+    number: int
+    title: str
+    body: str
+    word_count: int = 0
+
+
+class AudioScriptResult(BaseModel):
+    """Completed audio-script artifact: transcript + optional MP3 metadata."""
+
+    title: str
+    category: str = "psychology"
+    items: list[AudioScriptItem] = Field(default_factory=list)
+    transcript: str = ""
+    total_words: int = 0
+    audio_link: str = ""
+    audio_key: str = ""
+    audio_size_bytes: int = 0
+
+
 # resolve forward refs
 SourceDoc.model_rebuild()

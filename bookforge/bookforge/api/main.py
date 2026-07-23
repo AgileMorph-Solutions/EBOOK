@@ -8,9 +8,14 @@ POST /books/upload             → multipart file upload (alternative to JSON te
 GET  /health                   → liveness probe
 GET  /readiness                → pre-queue generation readiness
 POST /readiness                → readiness with request sanity checks
+GET  /audio-scripts            → list recent audio-script jobs
+POST /audio-scripts            → start script+TTS job, returns script_id + link
+GET  /audio-scripts/{script_id}→ poll status; transcript + audio_link when done
+GET  /audio-scripts/{script_id}/audio → stream narration.mp3
 
 Job state is persisted to {ARTIFACTS_ROOT}/books/{book_id}/status.json so it
-survives API restarts and container rebuilds.
+survives API restarts and container rebuilds. Audio scripts use
+{ARTIFACTS_ROOT}/audio-scripts/{script_id}/.
 """
 from __future__ import annotations
 
@@ -49,6 +54,11 @@ from bookforge.pipeline.readiness import (
     check_readiness,
     writing_provider_status,
 )
+from bookforge.pipeline.audio_script import generate_audio_script, resolve_item_count
+from bookforge.pipeline.audio_script_stages import AudioScriptStage, stages_payload
+from bookforge.pipeline.audio_tts import generate_narration_audio
+from bookforge.clients.elevenlabs import ElevenLabsError
+from bookforge.schemas import AudioScriptResult
 
 log = structlog.get_logger(__name__)
 
@@ -738,6 +748,332 @@ def delete_book(book_id: str):
 
 
 # --------------------------------------------------------------------------- #
+# Audio scripts — SOP narration + ElevenLabs TTS
+# --------------------------------------------------------------------------- #
+
+_AS_DIR = _ARTIFACTS / "audio-scripts"
+
+
+class ElevenLabsVoiceSettings(BaseModel):
+    """Optional overrides for ElevenLabs voice_settings (merged over defaults)."""
+
+    stability: float | None = Field(None, ge=0.0, le=1.0)
+    similarity_boost: float | None = Field(None, ge=0.0, le=1.0)
+    style: float | None = Field(None, ge=0.0, le=1.0)
+    use_speaker_boost: bool | None = None
+    speed: float | None = Field(None, ge=0.7, le=1.2)
+
+
+class CreateAudioScript(BaseModel):
+    title: str
+    category: Literal["psychology", "relationship", "philosophy", "general"] = (
+        "psychology"
+    )
+    item_limit: int | None = Field(
+        None, gt=0, le=100,
+        description="Cap items for testing; full runs omit or match title count.",
+    )
+    word_count: int | None = Field(
+        None, ge=100, le=500,
+        description="Target words per item. Default: SOP 265–270.",
+    )
+    voice_id: str | None = Field(
+        None, description="Override ELEVENLABS_VOICE_ID for this job.",
+    )
+    model_id: str | None = Field(
+        None,
+        description="Override ElevenLabs model (default: eleven_multilingual_v2).",
+    )
+    voice_settings: ElevenLabsVoiceSettings | None = Field(
+        None,
+        description=(
+            "Optional voice_settings overrides. Unset fields keep defaults: "
+            "stability=0.40, similarity_boost=0.78, style=0.20, "
+            "use_speaker_boost=true, speed=0.95."
+        ),
+    )
+    skip_audio: bool = Field(
+        False, description="If true, only generate transcript (no ElevenLabs).",
+    )
+
+
+def _as_state_path(script_id: str) -> Path:
+    return _AS_DIR / script_id / "status.json"
+
+
+def _as_request_path(script_id: str) -> Path:
+    return _AS_DIR / script_id / "request.json"
+
+
+def _as_result_path(script_id: str) -> Path:
+    return _AS_DIR / script_id / "result.json"
+
+
+def _as_audio_path(script_id: str) -> Path:
+    return _AS_DIR / script_id / "narration.mp3"
+
+
+def _write_as_state(script_id: str, state: dict[str, Any]) -> None:
+    path = _as_state_path(script_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(state))
+    os.replace(tmp, path)
+
+
+def _read_as_state(script_id: str) -> dict[str, Any] | None:
+    path = _as_state_path(script_id)
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except Exception:
+        return None
+
+
+def _set_as_state(script_id: str, **kwargs: Any) -> None:
+    with _lock:
+        state = _read_as_state(script_id) or {}
+        state.update(kwargs)
+        _write_as_state(script_id, state)
+
+
+def _write_as_request(script_id: str, req: CreateAudioScript) -> None:
+    path = _as_request_path(script_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(req.model_dump_json())
+
+
+def _write_as_result(script_id: str, result: AudioScriptResult) -> None:
+    path = _as_result_path(script_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(result.model_dump_json())
+
+
+def _read_as_result(script_id: str) -> AudioScriptResult | None:
+    path = _as_result_path(script_id)
+    if not path.exists():
+        return None
+    try:
+        return AudioScriptResult.model_validate_json(path.read_text())
+    except Exception:
+        return None
+
+
+def _make_script_id(title: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:50]
+    base = slug or "audio-script"
+    candidate = base
+    if _read_as_state(candidate) is not None:
+        candidate = f"{base}-{uuid.uuid4().hex[:6]}"
+    return candidate
+
+
+def _audio_script_link(script_id: str) -> str:
+    base = get_settings().api_public_base_url.rstrip("/")
+    return f"{base}/audio-scripts/{script_id}"
+
+
+def _audio_file_link(script_id: str) -> str:
+    return f"{_audio_script_link(script_id)}/audio"
+
+
+def _list_audio_scripts() -> list[dict[str, Any]]:
+    if not _AS_DIR.is_dir():
+        return []
+    jobs: list[dict[str, Any]] = []
+    for path in _AS_DIR.glob("*/status.json"):
+        try:
+            state = json.loads(path.read_text())
+        except Exception:
+            continue
+        script_id = path.parent.name
+        jobs.append({
+            "script_id": script_id,
+            "title": state.get("title", ""),
+            "status": state.get("status", "unknown"),
+            "created_at": state.get("created_at", ""),
+            "link": _audio_script_link(script_id),
+        })
+    jobs.sort(key=lambda j: j.get("created_at") or "", reverse=True)
+    return jobs
+
+
+def _audio_script_response(script_id: str) -> dict[str, Any]:
+    state = _read_as_state(script_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="script not found")
+    resp: dict[str, Any] = {
+        "script_id": script_id,
+        "link": _audio_script_link(script_id),
+        "stages": stages_payload(),
+        **state,
+    }
+    if state.get("status") in ("done", "failed"):
+        result = _read_as_result(script_id)
+        if result is not None:
+            data = result.model_dump()
+            if result.audio_key or _as_audio_path(script_id).is_file():
+                data["audio_link"] = _audio_file_link(script_id)
+            resp.update(data)
+    return resp
+
+
+def _run_audio_script(script_id: str, req: CreateAudioScript) -> None:
+    item_count = resolve_item_count(req.title, req.item_limit)
+    try:
+        _set_as_state(
+            script_id,
+            status="running",
+            stage=AudioScriptStage.BRAINSTORMING,
+            started_at=_now_iso(),
+            item_count=item_count,
+            progress={"done": 0, "total": item_count},
+        )
+
+        def on_progress(stage: str, done: int, total: int) -> None:
+            _set_as_state(script_id, stage=stage, progress={"done": done, "total": total})
+
+        result = generate_audio_script(
+            req.title,
+            category=req.category,
+            item_count=item_count,
+            word_count=req.word_count,
+            on_progress=on_progress,
+        )
+        _write_as_result(script_id, result)
+
+        if not req.skip_audio:
+            if not get_settings().elevenlabs_api_key.strip():
+                raise ElevenLabsError("ELEVENLABS_API_KEY is not set")
+            _set_as_state(
+                script_id,
+                stage=AudioScriptStage.GENERATING_AUDIO,
+                progress={"done": 0, "total": item_count},
+            )
+            audio_bytes = generate_narration_audio(
+                result,
+                voice_id=req.voice_id,
+                model_id=req.model_id,
+                voice_settings=(
+                    req.voice_settings.model_dump(exclude_none=True)
+                    if req.voice_settings
+                    else None
+                ),
+                on_progress=on_progress,
+                stage=AudioScriptStage.GENERATING_AUDIO,
+            )
+            audio_path = _as_audio_path(script_id)
+            audio_path.parent.mkdir(parents=True, exist_ok=True)
+            audio_path.write_bytes(audio_bytes)
+            audio_key = f"audio-scripts/{script_id}/narration.mp3"
+            storage.put(audio_key, audio_bytes, content_type="audio/mpeg")
+            result.audio_key = audio_key
+            result.audio_size_bytes = len(audio_bytes)
+            result.audio_link = _audio_file_link(script_id)
+            _write_as_result(script_id, result)
+
+        _set_as_state(
+            script_id,
+            status="done",
+            stage=AudioScriptStage.COMPLETE,
+            progress={"done": item_count, "total": item_count},
+        )
+        log.info("audio_script_job_done", script_id=script_id, items=len(result.items),
+                 skip_audio=req.skip_audio)
+    except Exception as exc:
+        log.exception("audio_script_job_failed", script_id=script_id)
+        _set_as_state(
+            script_id,
+            status="failed",
+            stage=AudioScriptStage.FAILED,
+            error=_friendly_error(exc),
+            error_detail=str(exc)[:500],
+        )
+
+
+@app.get("/audio-scripts")
+def list_audio_scripts():
+    """Recent audio-script jobs, newest first."""
+    return {"scripts": _list_audio_scripts()}
+
+
+@app.post("/audio-scripts", status_code=202)
+def create_audio_script(req: CreateAudioScript, background_tasks: BackgroundTasks):
+    """Start an audio narration job. Poll GET /audio-scripts/{script_id}."""
+    if not req.title.strip():
+        raise HTTPException(status_code=422, detail="title is required")
+    # Audio jobs need LLM writing only — not book image/layout readiness.
+    provider_ok, provider_detail, _unfunded = writing_provider_status()
+    if not provider_ok:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "can_generate": False,
+                "title": "Can't start audio script right now",
+                "message": provider_detail or "Writing service is unavailable.",
+                "reason_code": "quota_llm" if "credit" in (provider_detail or "").lower() else "network",
+            },
+        )
+    if not req.skip_audio and not get_settings().elevenlabs_api_key.strip():
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "can_generate": False,
+                "title": "ElevenLabs not configured",
+                "message": "Set ELEVENLABS_API_KEY, or pass skip_audio=true for transcript only.",
+                "reason_code": "auth",
+            },
+        )
+    script_id = _make_script_id(req.title.strip())
+    _set_as_state(
+        script_id,
+        status=AudioScriptStage.QUEUED,
+        title=req.title.strip(),
+        category=req.category,
+        item_limit=req.item_limit,
+        word_count=req.word_count,
+        skip_audio=req.skip_audio,
+        created_at=_now_iso(),
+        stage=AudioScriptStage.QUEUED,
+    )
+    _write_as_request(script_id, req)
+    background_tasks.add_task(_run_audio_script, script_id, req)
+    return {
+        "script_id": script_id,
+        "status": "queued",
+        "link": _audio_script_link(script_id),
+    }
+
+
+@app.get("/audio-scripts/{script_id}")
+def get_audio_script(script_id: str):
+    """Poll job status. When done, includes transcript, items, and audio_link."""
+    return _audio_script_response(script_id)
+
+
+@app.get("/audio-scripts/{script_id}/audio")
+def download_audio_script_audio(script_id: str):
+    """Stream the combined narration MP3."""
+    state = _read_as_state(script_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="script not found")
+    path = _as_audio_path(script_id)
+    if not path.is_file():
+        key = f"audio-scripts/{script_id}/narration.mp3"
+        if storage.exists(key):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(storage.get(key))
+        else:
+            raise HTTPException(status_code=404, detail="audio not ready")
+    return FileResponse(
+        path,
+        media_type="audio/mpeg",
+        filename=f"{script_id}.mp3",
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Background pipeline runner
 # --------------------------------------------------------------------------- #
 
@@ -750,6 +1086,9 @@ def _friendly_error(exc: Exception) -> str:
     if isinstance(exc, BudgetExceeded):
         return ("This book reached its generation cost limit before finishing. "
                 "Try a shorter book or contact support to raise the limit.")
+    if isinstance(exc, ElevenLabsError):
+        return ("We couldn't generate the narration audio. Check the ElevenLabs "
+                "API key and voice settings, then try again.")
     if isinstance(exc, IngestError):
         if getattr(exc, "reason", "") == "youtube_blocked":
             return ("We couldn't read this YouTube video — YouTube is blocking "

@@ -39,6 +39,22 @@ class Settings(BaseSettings):
     # Readiness probe for image provider: metadata (cheap), generate (real image), off (key only).
     readiness_image_probe: str = Field("generate", alias="READINESS_IMAGE_PROBE")
 
+    # --- Audio scripts / ElevenLabs TTS ---
+    elevenlabs_api_key: str = Field("", alias="ELEVENLABS_API_KEY")
+    elevenlabs_voice_id: str = Field(
+        "21m00Tcm4TlvDq8ikWAM", alias="ELEVENLABS_VOICE_ID",
+    )
+    elevenlabs_model_id: str = Field(
+        "eleven_multilingual_v2", alias="ELEVENLABS_MODEL_ID",
+    )
+    elevenlabs_tts_workers: int = Field(2, alias="ELEVENLABS_TTS_WORKERS")
+    # Docker Compose publishes API on host 8010 (8010→8000).
+    api_public_base_url: str = Field(
+        "http://localhost:8010", alias="API_PUBLIC_BASE_URL",
+    )
+    audio_script_max_items: int = Field(100, alias="AUDIO_SCRIPT_MAX_ITEMS")
+    audio_script_item_workers: int = Field(4, alias="AUDIO_SCRIPT_ITEM_WORKERS")
+
     # --- Transcription / search ---
     deepgram_api_key: str = Field("", alias="DEEPGRAM_API_KEY")
     search_api_key: str = Field("", alias="SEARCH_API_KEY")

@@ -3,9 +3,10 @@
 Turns a **title** into a retention-focused narration **transcript** and an
 ElevenLabs **MP3**. Audio only — no video generation.
 
-Content follows the client SOP (generalized for any title):
+Content follows a conversational narration flow (generalized for any title):
 brainstorm → refine for retention → write each item at a word band (default
-265–270) → TTS.
+265–270) in spoken voice with varied openings → TTS. Item headings use
+sentence case (first word capital only).
 
 **Flow walkthrough:** [AUDIO_SCRIPT_FLOW.md](./AUDIO_SCRIPT_FLOW.md)
 
@@ -25,7 +26,7 @@ docker compose up -d --build api
 
 ```
 ELEVENLABS_API_KEY=...
-ELEVENLABS_VOICE_ID=21m00Tcm4TlvDq8ikWAM
+ELEVENLABS_VOICE_ID=bP8FJDHmWVEgXJDitdQd
 API_PUBLIC_BASE_URL=http://localhost:8010
 ```
 

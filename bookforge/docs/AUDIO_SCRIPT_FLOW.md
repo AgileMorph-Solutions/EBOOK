@@ -25,14 +25,16 @@ flowchart TD
 | Field | What it does |
 |-------|----------------|
 | `title` | Theme for the narration. If it says “100 ways…”, the default is **100 items**. |
-| `item_limit` | Cap how many items to generate (e.g. `2` → only 2 ways, even if the title says 100). Title text is **not** rewritten. |
+| `item_limit` | Exact item count when set (capped by max). Omit → count from the title’s promised number (e.g. “100 ways…” → 100). Title text is **not** rewritten. |
 | `word_count` | Target words **per item**. Omit → SOP **265–270**. Set e.g. `200` → band **195–205** (±5). Allowed range: **100–500**. |
 | `skip_audio` | Transcript only (no ElevenLabs / no MP3). |
 | `voice_id` / `model_id` / `voice_settings` | Optional TTS overrides (defaults documented in the pipeline doc). |
 
 ### `item_limit` example
 
-Title: `100 Ways to Do Something` + `item_limit: 2` → **2 items** written and narrated. The stored title still says “100 Ways…”.
+Title: `100 Ways to Do Something` + `item_limit: 2` → **2 items** written and narrated.
+Title: `3 Hours of …` + `item_limit: 10` → **10 items** (explicit limit overrides the “3” in the title).
+The stored title text is unchanged.
 
 ### `word_count` example
 
@@ -44,9 +46,9 @@ Title: `100 Ways to Do Something` + `item_limit: 2` → **2 items** written and 
 | Stage | What happens |
 |-------|----------------|
 | `queued` | Job accepted |
-| `brainstorming` | LLM lists N concept titles |
+| `brainstorming` | LLM lists N concept titles (sentence case) |
 | `refining_list` | List sharpened for retention |
-| `writing_items` | Each item written to the word band (rewrite if out of band) |
+| `writing_items` | Each item written conversationally to the word band (rewrite if out of band) |
 | `generating_audio` | Per-item ElevenLabs TTS → ffmpeg concat → one MP3 |
 | `complete` | Done |
 

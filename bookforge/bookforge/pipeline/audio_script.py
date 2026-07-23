@@ -1,7 +1,7 @@
 """Audio narration script generation (brainstorm → refine → parallel write).
 
-Produces retention-focused scripts matching the client SOP: N items at a
-target word band each, formatted as a transcript for ElevenLabs narration.
+Produces retention-focused conversational scripts: N items at a target word
+band each, formatted as a transcript for ElevenLabs narration.
 """
 from __future__ import annotations
 
@@ -34,7 +34,10 @@ ProgressFn = Callable[[str, int, int], None]
 
 class _ConceptList(BaseModel):
     concepts: list[str] = Field(
-        description="Distinct concept titles, 2–6 words each, Title Case.",
+        description=(
+            "Distinct concept titles, 2–6 words each, sentence case "
+            "(first word capital only)."
+        ),
     )
 
     @field_validator("concepts", mode="before")
@@ -68,12 +71,15 @@ class _ItemDraft(BaseModel):
 
 
 def resolve_item_count(title: str, item_limit: int | None = None) -> int:
-    """Promised count from title, capped by settings and optional test limit."""
-    promised = parse_promised_count(title, "") or settings.audio_script_max_items
-    count = min(promised, settings.audio_script_max_items)
+    """Resolve how many items to write.
+
+    When ``item_limit`` is set, it is the exact count (capped by max).
+    Otherwise the count comes from the number promised in the title.
+    """
     if item_limit is not None and item_limit > 0:
-        count = min(count, item_limit)
-    return max(1, count)
+        return max(1, min(item_limit, settings.audio_script_max_items))
+    promised = parse_promised_count(title, "") or settings.audio_script_max_items
+    return max(1, min(promised, settings.audio_script_max_items))
 
 
 def resolve_word_band(word_count: int | None = None) -> tuple[int, int, int]:
@@ -92,6 +98,21 @@ def word_count(text: str) -> int:
     return len(text.split())
 
 
+def to_sentence_case(title: str) -> str:
+    """Sentence case: first alphabetic character upper, all others lower.
+
+    Example: 'Foot In The Door Escalation' → 'Foot in the door escalation'
+    """
+    text = (title or "").strip()
+    if not text:
+        return text
+    lower = text.lower()
+    for i, ch in enumerate(lower):
+        if ch.isalpha():
+            return lower[:i] + ch.upper() + lower[i + 1 :]
+    return lower
+
+
 def body_from_paragraphs(paragraphs: list[str]) -> str:
     return "\n\n".join(p.strip() for p in paragraphs if p.strip())
 
@@ -108,11 +129,12 @@ def _trim_concepts(concepts: list[str], count: int) -> list[str]:
     seen: set[str] = set()
     out: list[str] = []
     for c in concepts:
-        key = c.strip().lower()
+        normalized = to_sentence_case(c)
+        key = normalized.lower()
         if not key or key in seen:
             continue
         seen.add(key)
-        out.append(c.strip())
+        out.append(normalized)
         if len(out) >= count:
             break
     return out
@@ -145,9 +167,10 @@ def _refine(title: str, concepts: list[str], count: int, category: Category) -> 
         for c in concepts:
             if len(refined) >= count:
                 break
-            if c.strip().lower() not in {x.lower() for x in refined}:
-                refined.append(c.strip())
-    return refined[:count]
+            normalized = to_sentence_case(c)
+            if normalized.lower() not in {x.lower() for x in refined}:
+                refined.append(normalized)
+    return [to_sentence_case(c) for c in refined[:count]]
 
 
 def _write_item(
@@ -189,9 +212,10 @@ def _write_item(
         body = body_from_paragraphs(draft.paragraphs)
         wc = word_count(body)
 
+    item_title = to_sentence_case(draft.title.strip() or concept_title)
     return AudioScriptItem(
         number=number,
-        title=draft.title.strip() or concept_title,
+        title=item_title,
         body=body,
         word_count=wc,
     )

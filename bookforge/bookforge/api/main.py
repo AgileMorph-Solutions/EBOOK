@@ -771,7 +771,7 @@ class CreateAudioScript(BaseModel):
     )
     item_limit: int | None = Field(
         None, gt=0, le=100,
-        description="Cap items for testing; full runs omit or match title count.",
+        description="Exact item count when set; omit to use the number from the title.",
     )
     word_count: int | None = Field(
         None, ge=100, le=500,

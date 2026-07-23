@@ -42,7 +42,7 @@ class Settings(BaseSettings):
     # --- Audio scripts / ElevenLabs TTS ---
     elevenlabs_api_key: str = Field("", alias="ELEVENLABS_API_KEY")
     elevenlabs_voice_id: str = Field(
-        "21m00Tcm4TlvDq8ikWAM", alias="ELEVENLABS_VOICE_ID",
+        "bP8FJDHmWVEgXJDitdQd", alias="ELEVENLABS_VOICE_ID",
     )
     elevenlabs_model_id: str = Field(
         "eleven_multilingual_v2", alias="ELEVENLABS_MODEL_ID",

@@ -169,3 +169,96 @@ def test_post_requires_title():
 def test_old_video_routes_gone():
     res = client.post("/video-scripts", json={"title": "x", "item_limit": 1})
     assert res.status_code == 404
+
+
+def _create_done_script(*, title: str = "Regen Base Script", skip_audio: bool = True) -> str:
+    with patch("bookforge.api.main.generate_audio_script", return_value=_FAKE_RESULT):
+        with patch("bookforge.api.main.generate_narration_audio", return_value=_FAKE_MP3):
+            create = client.post(
+                "/audio-scripts",
+                json={"title": title, "item_limit": 2, "skip_audio": skip_audio},
+            )
+    assert create.status_code == 202
+    script_id = create.json()["script_id"]
+    status = client.get(f"/audio-scripts/{script_id}")
+    assert status.status_code == 200
+    assert status.json()["status"] == "done"
+    return script_id
+
+
+def test_regenerate_with_feedback_requeues_and_passes_feedback():
+    script_id = _create_done_script(title="Regen Happy Path")
+    with patch("bookforge.api.main.generate_audio_script", return_value=_FAKE_RESULT) as gen:
+        with patch("bookforge.api.main.generate_narration_audio", return_value=_FAKE_MP3):
+            res = client.post(
+                f"/audio-scripts/{script_id}/regenerate",
+                json={"feedback": "Make openings more scene-based."},
+            )
+    assert res.status_code == 202
+    body = res.json()
+    assert body["script_id"] == script_id
+    assert body["status"] == "queued"
+    assert body["mode"] == "full_rerun"
+    gen.assert_called_once()
+    assert gen.call_args.kwargs.get("feedback") == "Make openings more scene-based."
+
+    done = client.get(f"/audio-scripts/{script_id}")
+    assert done.status_code == 200
+    assert done.json()["status"] == "done"
+    assert done.json().get("feedback") == "Make openings more scene-based."
+
+
+def test_regenerate_failed_script():
+    script_id = _create_done_script(title="Regen Failed Path")
+    from bookforge.api.main import _set_as_state
+    _set_as_state(script_id, status="failed", error="boom", stage="failed")
+
+    with patch("bookforge.api.main.generate_audio_script", return_value=_FAKE_RESULT) as gen:
+        res = client.post(
+            f"/audio-scripts/{script_id}/regenerate",
+            json={"feedback": "Retry with calmer tone."},
+        )
+    assert res.status_code == 202
+    gen.assert_called_once()
+    assert gen.call_args.kwargs.get("feedback") == "Retry with calmer tone."
+    assert client.get(f"/audio-scripts/{script_id}").json()["status"] == "done"
+
+
+def test_regenerate_rejects_empty_feedback():
+    script_id = _create_done_script(title="Regen Empty Feedback")
+    res = client.post(
+        f"/audio-scripts/{script_id}/regenerate",
+        json={"feedback": "   "},
+    )
+    assert res.status_code == 422
+
+
+def test_regenerate_409_while_running():
+    script_id = _create_done_script(title="Regen Running Conflict")
+    from bookforge.api.main import _set_as_state
+    _set_as_state(script_id, status="running", stage="writing_items")
+    res = client.post(
+        f"/audio-scripts/{script_id}/regenerate",
+        json={"feedback": "Should not run."},
+    )
+    assert res.status_code == 409
+
+
+def test_regenerate_404_unknown():
+    res = client.post(
+        "/audio-scripts/does-not-exist-xyz/regenerate",
+        json={"feedback": "Nope."},
+    )
+    assert res.status_code == 404
+
+
+def test_regenerate_409_missing_request():
+    script_id = _create_done_script(title="Regen Missing Request")
+    from bookforge.api.main import _as_request_path
+    path = _as_request_path(script_id)
+    path.unlink(missing_ok=True)
+    res = client.post(
+        f"/audio-scripts/{script_id}/regenerate",
+        json={"feedback": "Cannot without request."},
+    )
+    assert res.status_code == 409

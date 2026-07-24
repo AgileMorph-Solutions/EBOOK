@@ -33,6 +33,19 @@ def category_voice(category: Category) -> str:
     return _CATEGORY_VOICE.get(category, _CATEGORY_VOICE["general"])
 
 
+def feedback_block(feedback: str | None) -> str:
+    """Append revision notes when regenerating. Empty when none so create prompts stay identical."""
+    text = (feedback or "").strip()
+    if not text:
+        return ""
+    return (
+        "\n\nREVISION FEEDBACK — a previous draft of this narration was reviewed. "
+        "Apply the notes below across the full script (concept list and every item). "
+        "Keep what already works; fix exactly what the feedback asks for:\n"
+        f"{text}"
+    )
+
+
 def brainstorm_system(category: Category) -> str:
     domain = category_voice(category)
     return (
@@ -43,7 +56,7 @@ def brainstorm_system(category: Category) -> str:
     )
 
 
-def brainstorm_user(title: str, count: int) -> str:
+def brainstorm_user(title: str, count: int, feedback: str | None = None) -> str:
     return (
         f'Write a detailed script plan for the title: "{title}".\n\n'
         f"List exactly {count} distinct concepts/secrets/items for this title. "
@@ -52,6 +65,7 @@ def brainstorm_user(title: str, count: int) -> str:
         "'Foot in the door escalation'). Never use Title Case like "
         "'Foot In The Door Escalation'. No trailing period on titles. "
         "No duplicates, no near-synonyms. Order for maximum retention across the full list."
+        f"{feedback_block(feedback)}"
     )
 
 
@@ -65,7 +79,12 @@ def refine_system(category: Category) -> str:
     )
 
 
-def refine_user(title: str, concepts: list[str], count: int) -> str:
+def refine_user(
+    title: str,
+    concepts: list[str],
+    count: int,
+    feedback: str | None = None,
+) -> str:
     listing = "\n".join(f"  {i + 1}. {c}" for i, c in enumerate(concepts))
     return (
         f'Read through this list and refine it maximally for the title "{title}". '
@@ -73,6 +92,7 @@ def refine_user(title: str, concepts: list[str], count: int) -> str:
         "(first word capital only; e.g. 'Identity protection', not "
         "'Identity Protection').\n\n"
         f"CURRENT LIST:\n{listing}"
+        f"{feedback_block(feedback)}"
     )
 
 
@@ -112,6 +132,7 @@ def item_user(
     total: int,
     word_min: int = 265,
     word_max: int = 270,
+    feedback: str | None = None,
 ) -> str:
     return (
         f'Narration title: "{title}"\n'
@@ -120,6 +141,7 @@ def item_user(
         "Vary your opening; do not use banned stock phrases. Word length MUST "
         f"be between {word_min} and {word_max} words. Use 4–5 paragraphs. "
         "Return the concept title in sentence case and the body as separate paragraphs."
+        f"{feedback_block(feedback)}"
     )
 
 
@@ -130,6 +152,7 @@ def item_rewrite_user(
     word_count: int,
     word_min: int = 265,
     word_max: int = 270,
+    feedback: str | None = None,
 ) -> str:
     body = "\n\n".join(paragraphs)
     return (
@@ -141,4 +164,5 @@ def item_rewrite_user(
         "\"The unsettling part is…\", \"Once you understand…\"). "
         "Vary the opening. Return 4–5 paragraphs.\n\n"
         f"CURRENT DRAFT:\n{body}"
+        f"{feedback_block(feedback)}"
     )

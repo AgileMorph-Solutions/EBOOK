@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
+import { RegenerateFeedbackDialog } from "@/components/audio/RegenerateFeedbackDialog";
 import { Alert } from "@/components/ui/Alert";
 import { Breadcrumb } from "@/components/ui/Breadcrumb";
 import { Button } from "@/components/ui/Button";
@@ -31,6 +32,7 @@ type ScriptDetailProps = {
   error: string | null;
   loading: boolean;
   isActive: boolean;
+  refetch?: () => void | Promise<void>;
 };
 
 function visibleStages(script: AudioScriptStatus | null) {
@@ -54,11 +56,13 @@ export function ScriptDetail({
   error,
   loading,
   isActive,
+  refetch,
 }: ScriptDetailProps) {
   const [copied, setCopied] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
   const [playUrl, setPlayUrl] = useState<string | null>(null);
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
   const stages = useMemo(() => visibleStages(script), [script]);
   const stageIndex = script?.stage
     ? stages.findIndex((s) => s.id === script.stage)
@@ -92,6 +96,21 @@ export function ScriptDetail({
     } catch {
       /* ignore */
     }
+  }
+
+  function handleDownloadTranscript() {
+    const text = script?.transcript?.trim();
+    if (!text) return;
+    const name = slugify(script?.title || scriptId);
+    const blob = new Blob([text + "\n"], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${name}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
   }
 
   async function handleDownload() {
@@ -202,13 +221,25 @@ export function ScriptDetail({
           <p className="mt-1 font-body text-body-sm">
             {script.error ?? "Something went wrong during script generation."}
           </p>
-          <div className="mt-4">
+          <div className="mt-4 flex flex-wrap items-center gap-3">
+            <Button
+              variant="surface"
+              type="button"
+              onClick={() => setFeedbackOpen(true)}
+            >
+              <Icon name="refresh" size={16} />
+              Regenerate
+            </Button>
             <Link href="/audio-scripts">
               <Button variant="outline" type="button">
                 Back to create
               </Button>
             </Link>
           </div>
+          <p className="mt-3 font-label text-label-sm text-secondary">
+            Regenerate rewrites the full transcript and audio using your
+            feedback, with the same title and settings.
+          </p>
         </Alert>
       )}
 
@@ -229,19 +260,28 @@ export function ScriptDetail({
                       : ""}
                   </p>
                 </div>
-                <Button
-                  type="button"
-                  variant="outline"
-                  className="ml-auto"
-                  onClick={handleDownload}
-                  disabled={downloading}
-                >
-                  <Icon
-                    name={downloading ? "hourglass_top" : "download"}
-                    size={16}
-                  />
-                  {downloading ? "Downloading…" : "Download MP3"}
-                </Button>
+                <div className="ml-auto flex flex-wrap items-center gap-2">
+                  <Button
+                    type="button"
+                    variant="surface"
+                    onClick={() => setFeedbackOpen(true)}
+                  >
+                    <Icon name="refresh" size={16} />
+                    Regenerate
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={handleDownload}
+                    disabled={downloading}
+                  >
+                    <Icon
+                      name={downloading ? "hourglass_top" : "download"}
+                      size={16}
+                    />
+                    {downloading ? "Downloading…" : "Download MP3"}
+                  </Button>
+                </div>
               </div>
 
               {downloadError && (
@@ -278,16 +318,36 @@ export function ScriptDetail({
               <span className="text-outline">
                 {hasAudio ? "Transcript + audio" : "Transcript only"}
               </span>
-              <Button
-                type="button"
-                variant="outline"
-                className="ml-auto"
-                onClick={handleCopy}
-                disabled={!script.transcript}
-              >
-                <Icon name={copied ? "check" : "content_copy"} size={16} />
-                {copied ? "Copied" : "Copy transcript"}
-              </Button>
+              <div className="ml-auto flex flex-wrap items-center gap-2">
+                {!hasAudio && (
+                  <Button
+                    type="button"
+                    variant="surface"
+                    onClick={() => setFeedbackOpen(true)}
+                  >
+                    <Icon name="refresh" size={16} />
+                    Regenerate
+                  </Button>
+                )}
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={handleDownloadTranscript}
+                  disabled={!script.transcript}
+                >
+                  <Icon name="download" size={16} />
+                  Download .txt
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={handleCopy}
+                  disabled={!script.transcript}
+                >
+                  <Icon name={copied ? "check" : "content_copy"} size={16} />
+                  {copied ? "Copied" : "Copy transcript"}
+                </Button>
+              </div>
             </div>
 
             {script.transcript && (
@@ -324,6 +384,15 @@ export function ScriptDetail({
           )}
         </div>
       )}
+
+      <RegenerateFeedbackDialog
+        scriptId={scriptId}
+        open={feedbackOpen}
+        onClose={() => setFeedbackOpen(false)}
+        onSuccess={() => {
+          void refetch?.();
+        }}
+      />
     </div>
   );
 }

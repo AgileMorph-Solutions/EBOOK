@@ -10,9 +10,12 @@ from bookforge.pipeline.audio_script import (
     word_count,
 )
 from bookforge.pipeline.audio_script_prompts import (
+    brainstorm_user,
+    feedback_block,
     item_rewrite_user,
     item_system,
     item_user,
+    refine_user,
 )
 from bookforge.pipeline.audio_script_stages import (
     AudioScriptStage,
@@ -110,3 +113,37 @@ def test_stages_payload_order():
 def test_speakable_text():
     item = AudioScriptItem(number=1, title="Identity Protection", body="Body here.", word_count=2)
     assert speakable_text(item) == "Identity Protection. Body here."
+
+
+def test_feedback_block_empty_when_none():
+    assert feedback_block(None) == ""
+    assert feedback_block("") == ""
+    assert feedback_block("   ") == ""
+
+
+def test_feedback_block_includes_notes():
+    block = feedback_block("Make openings more scene-based.")
+    assert "REVISION FEEDBACK" in block
+    assert "Make openings more scene-based." in block
+
+
+def test_prompts_append_feedback_when_set():
+    note = "Drop abstract definitions."
+    brainstorm = brainstorm_user("My Title", 3, feedback=note)
+    refine = refine_user("My Title", ["One", "Two", "Three"], 3, feedback=note)
+    item = item_user("My Title", "Concept", 1, 3, feedback=note)
+    rewrite = item_rewrite_user(
+        "My Title", "Concept", ["Draft."], 1, feedback=note,
+    )
+    for prompt in (brainstorm, refine, item, rewrite):
+        assert "REVISION FEEDBACK" in prompt
+        assert note in prompt
+
+
+def test_prompts_omit_feedback_when_empty():
+    brainstorm = brainstorm_user("My Title", 3)
+    refine = refine_user("My Title", ["One"], 1)
+    item = item_user("My Title", "Concept", 1, 1)
+    assert "REVISION FEEDBACK" not in brainstorm
+    assert "REVISION FEEDBACK" not in refine
+    assert "REVISION FEEDBACK" not in item

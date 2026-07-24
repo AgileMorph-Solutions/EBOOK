@@ -11,6 +11,7 @@ POST /readiness                → readiness with request sanity checks
 GET  /audio-scripts            → list recent audio-script jobs
 POST /audio-scripts            → start script+TTS job, returns script_id + link
 GET  /audio-scripts/{script_id}→ poll status; transcript + audio_link when done
+POST /audio-scripts/{script_id}/regenerate → full rerun with revision feedback
 GET  /audio-scripts/{script_id}/audio → stream narration.mp3
 
 Job state is persisted to {ARTIFACTS_ROOT}/books/{book_id}/status.json so it
@@ -37,7 +38,7 @@ import structlog
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from bookforge.clients import llm, storage
 from bookforge.config import get_settings
@@ -797,6 +798,23 @@ class CreateAudioScript(BaseModel):
     )
 
 
+class RegenerateAudioScript(BaseModel):
+    feedback: str = Field(
+        ...,
+        min_length=1,
+        max_length=2000,
+        description="Revision notes applied across brainstorm, refine, and item writing.",
+    )
+
+    @field_validator("feedback")
+    @classmethod
+    def _strip_feedback(cls, v: str) -> str:
+        text = (v or "").strip()
+        if not text:
+            raise ValueError("feedback is required")
+        return text
+
+
 def _as_state_path(script_id: str) -> Path:
     return _AS_DIR / script_id / "status.json"
 
@@ -842,6 +860,16 @@ def _write_as_request(script_id: str, req: CreateAudioScript) -> None:
     path = _as_request_path(script_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(req.model_dump_json())
+
+
+def _read_as_request(script_id: str) -> CreateAudioScript | None:
+    path = _as_request_path(script_id)
+    if not path.exists():
+        return None
+    try:
+        return CreateAudioScript.model_validate_json(path.read_text())
+    except Exception:
+        return None
 
 
 def _write_as_result(script_id: str, result: AudioScriptResult) -> None:
@@ -924,7 +952,12 @@ def _audio_script_response(script_id: str) -> dict[str, Any]:
     return resp
 
 
-def _run_audio_script(script_id: str, req: CreateAudioScript) -> None:
+def _run_audio_script(
+    script_id: str,
+    req: CreateAudioScript,
+    *,
+    feedback: str | None = None,
+) -> None:
     item_count = resolve_item_count(req.title, req.item_limit)
     try:
         _set_as_state(
@@ -934,6 +967,8 @@ def _run_audio_script(script_id: str, req: CreateAudioScript) -> None:
             started_at=_now_iso(),
             item_count=item_count,
             progress={"done": 0, "total": item_count},
+            error=None,
+            error_detail=None,
         )
 
         def on_progress(stage: str, done: int, total: int) -> None:
@@ -944,6 +979,7 @@ def _run_audio_script(script_id: str, req: CreateAudioScript) -> None:
             category=req.category,
             item_count=item_count,
             word_count=req.word_count,
+            feedback=feedback,
             on_progress=on_progress,
         )
         _write_as_result(script_id, result)
@@ -1055,6 +1091,82 @@ def create_audio_script(req: CreateAudioScript, background_tasks: BackgroundTask
 def get_audio_script(script_id: str):
     """Poll job status. When done, includes transcript, items, and audio_link."""
     return _audio_script_response(script_id)
+
+
+@app.post("/audio-scripts/{script_id}/regenerate", status_code=202)
+def regenerate_audio_script(
+    script_id: str,
+    body: RegenerateAudioScript,
+    background_tasks: BackgroundTasks,
+):
+    """Re-run transcript + audio for a done/failed script using revision feedback."""
+    state = _read_as_state(script_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="script not found")
+    if state.get("status") not in ("done", "failed"):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"script is {state.get('status')} — regenerate applies to "
+                "done or failed scripts only"
+            ),
+        )
+    req = _read_as_request(script_id)
+    if req is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "no original request stored for this script — "
+                "it cannot be regenerated; create a new script instead"
+            ),
+        )
+
+    provider_ok, provider_detail, _unfunded = writing_provider_status()
+    if not provider_ok:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "can_generate": False,
+                "title": "Can't regenerate audio script right now",
+                "message": provider_detail or "Writing service is unavailable.",
+                "reason_code": "quota_llm" if "credit" in (provider_detail or "").lower() else "network",
+            },
+        )
+    if not req.skip_audio and not get_settings().elevenlabs_api_key.strip():
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "can_generate": False,
+                "title": "ElevenLabs not configured",
+                "message": "Set ELEVENLABS_API_KEY, or recreate with skip_audio=true.",
+                "reason_code": "auth",
+            },
+        )
+
+    feedback = body.feedback
+    _set_as_state(
+        script_id,
+        status=AudioScriptStage.QUEUED,
+        stage=AudioScriptStage.QUEUED,
+        feedback=feedback,
+        error=None,
+        error_detail=None,
+        progress={"done": 0, "total": state.get("item_count") or 0},
+    )
+    background_tasks.add_task(
+        _run_audio_script, script_id, req, feedback=feedback,
+    )
+    log.info(
+        "audio_script_regenerate_queued",
+        script_id=script_id,
+        feedback_chars=len(feedback),
+    )
+    return {
+        "script_id": script_id,
+        "status": "queued",
+        "mode": "full_rerun",
+        "link": _audio_script_link(script_id),
+    }
 
 
 @app.get("/audio-scripts/{script_id}/audio")

@@ -140,9 +140,14 @@ def _trim_concepts(concepts: list[str], count: int) -> list[str]:
     return out
 
 
-def _brainstorm(title: str, count: int, category: Category) -> list[str]:
+def _brainstorm(
+    title: str,
+    count: int,
+    category: Category,
+    feedback: str | None = None,
+) -> list[str]:
     result = llm.structured(
-        prompts.brainstorm_user(title, count),
+        prompts.brainstorm_user(title, count, feedback=feedback),
         _ConceptList,
         system=prompts.brainstorm_system(category),
         model=settings.content_model,
@@ -154,9 +159,15 @@ def _brainstorm(title: str, count: int, category: Category) -> list[str]:
     return concepts
 
 
-def _refine(title: str, concepts: list[str], count: int, category: Category) -> list[str]:
+def _refine(
+    title: str,
+    concepts: list[str],
+    count: int,
+    category: Category,
+    feedback: str | None = None,
+) -> list[str]:
     result = llm.structured(
-        prompts.refine_user(title, concepts, count),
+        prompts.refine_user(title, concepts, count, feedback=feedback),
         _ConceptList,
         system=prompts.refine_system(category),
         model=settings.content_model,
@@ -182,11 +193,13 @@ def _write_item(
     *,
     word_min: int,
     word_max: int,
+    feedback: str | None = None,
 ) -> AudioScriptItem:
     draft = llm.structured(
         prompts.item_user(
             title, concept_title, number, total,
             word_min=word_min, word_max=word_max,
+            feedback=feedback,
         ),
         _ItemDraft,
         system=prompts.item_system(category, word_min=word_min, word_max=word_max),
@@ -203,6 +216,7 @@ def _write_item(
             prompts.item_rewrite_user(
                 title, concept_title, draft.paragraphs, wc,
                 word_min=word_min, word_max=word_max,
+                feedback=feedback,
             ),
             _ItemDraft,
             system=prompts.item_system(category, word_min=word_min, word_max=word_max),
@@ -227,11 +241,13 @@ def generate_audio_script(
     category: Category = "psychology",
     item_count: int | None = None,
     word_count: int | None = None,
+    feedback: str | None = None,
     on_progress: ProgressFn | None = None,
 ) -> AudioScriptResult:
     """Run brainstorm → refine → write and return a transcript result."""
     count = item_count if item_count is not None else resolve_item_count(title)
     word_min, word_max, word_target = resolve_word_band(word_count)
+    revision = (feedback or "").strip() or None
     log.info(
         "audio_script_start",
         title=title,
@@ -240,6 +256,7 @@ def generate_audio_script(
         word_min=word_min,
         word_max=word_max,
         word_target=word_target,
+        has_feedback=bool(revision),
     )
 
     def _progress(stage: str, done: int, total: int) -> None:
@@ -247,14 +264,14 @@ def generate_audio_script(
             on_progress(stage, done, total)
 
     _progress(AudioScriptStage.BRAINSTORMING, 0, count)
-    concepts = _brainstorm(title, count, category)
+    concepts = _brainstorm(title, count, category, feedback=revision)
     if len(concepts) < count:
         raise ValueError(
             f"Brainstorm returned only {len(concepts)} concepts; need {count}"
         )
 
     _progress(AudioScriptStage.REFINING_LIST, 0, count)
-    concepts = _refine(title, concepts, count, category)
+    concepts = _refine(title, concepts, count, category, feedback=revision)
 
     _progress(AudioScriptStage.WRITING_ITEMS, 0, count)
     items: list[AudioScriptItem | None] = [None] * count
@@ -266,6 +283,7 @@ def generate_audio_script(
         item = _write_item(
             title, concept, idx + 1, count, category,
             word_min=word_min, word_max=word_max,
+            feedback=revision,
         )
         items[idx] = item
         with done_lock:

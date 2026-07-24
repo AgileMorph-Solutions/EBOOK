@@ -370,6 +370,7 @@ export type AudioScriptStatus = {
   audio_key?: string;
   audio_size_bytes?: number;
   error?: string;
+  feedback?: string;
   link?: string;
 };
 
@@ -377,6 +378,23 @@ export async function createAudioScript(
   body: CreateAudioScriptRequest
 ): Promise<{ script_id: string; status: string; link: string }> {
   return apiFetch("/audio-scripts", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export type RegenerateAudioScriptResponse = {
+  script_id: string;
+  status: string;
+  mode?: "full_rerun";
+  link?: string;
+};
+
+export async function regenerateAudioScript(
+  scriptId: string,
+  body: { feedback: string }
+): Promise<RegenerateAudioScriptResponse> {
+  return apiFetch(`/audio-scripts/${scriptId}/regenerate`, {
     method: "POST",
     body: JSON.stringify(body),
   });

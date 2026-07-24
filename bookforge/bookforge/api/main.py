@@ -888,12 +888,17 @@ def _list_audio_scripts() -> list[dict[str, Any]]:
         except Exception:
             continue
         script_id = path.parent.name
+        has_audio = _as_audio_path(script_id).is_file()
+        if not has_audio:
+            result = _read_as_result(script_id)
+            has_audio = bool(result and (result.audio_key or result.audio_link))
         jobs.append({
             "script_id": script_id,
             "title": state.get("title", ""),
             "status": state.get("status", "unknown"),
             "created_at": state.get("created_at", ""),
             "link": _audio_script_link(script_id),
+            "has_audio": has_audio,
         })
     jobs.sort(key=lambda j: j.get("created_at") or "", reverse=True)
     return jobs

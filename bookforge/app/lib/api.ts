@@ -307,3 +307,121 @@ export type RegenerateResponse = {
 export async function regenerateBook(bookId: string): Promise<RegenerateResponse> {
   return apiFetch(`/books/${bookId}/regenerate`, { method: "POST" });
 }
+
+// --------------------------------------------------------------------------- #
+// Audio scripts (transcript + optional ElevenLabs TTS)
+// --------------------------------------------------------------------------- #
+
+export type AudioScriptCategory =
+  | "psychology"
+  | "relationship"
+  | "philosophy"
+  | "general";
+
+export type CreateAudioScriptRequest = {
+  title: string;
+  category?: AudioScriptCategory;
+  item_limit?: number | null;
+  word_count?: number | null;
+  /** When true, skip ElevenLabs and return transcript only. */
+  skip_audio?: boolean;
+};
+
+export type AudioScriptSummary = {
+  script_id: string;
+  title: string;
+  status: string;
+  created_at: string;
+  link?: string;
+  has_audio?: boolean;
+};
+
+export type AudioScriptItem = {
+  number: number;
+  title: string;
+  body: string;
+  word_count: number;
+};
+
+export type AudioScriptStageMeta = {
+  id: string;
+  label: string;
+  description: string;
+};
+
+export type AudioScriptStatus = {
+  script_id: string;
+  status: "queued" | "running" | "done" | "failed" | string;
+  stage?: string;
+  title?: string;
+  category?: AudioScriptCategory | string;
+  item_limit?: number | null;
+  word_count?: number | null;
+  skip_audio?: boolean;
+  created_at?: string;
+  started_at?: string;
+  item_count?: number;
+  progress?: { done: number; total: number };
+  stages?: AudioScriptStageMeta[];
+  items?: AudioScriptItem[];
+  transcript?: string;
+  total_words?: number;
+  audio_link?: string;
+  audio_key?: string;
+  audio_size_bytes?: number;
+  error?: string;
+  link?: string;
+};
+
+export async function createAudioScript(
+  body: CreateAudioScriptRequest
+): Promise<{ script_id: string; status: string; link: string }> {
+  return apiFetch("/audio-scripts", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function getAudioScript(
+  scriptId: string
+): Promise<AudioScriptStatus> {
+  return apiFetch(`/audio-scripts/${scriptId}`);
+}
+
+export async function listAudioScripts(): Promise<AudioScriptSummary[]> {
+  const data = await apiFetch<{ scripts: AudioScriptSummary[] }>(
+    "/audio-scripts"
+  );
+  return data.scripts;
+}
+
+export function audioScriptUrl(scriptId: string): string {
+  return `${getApiUrlSync()}/audio-scripts/${scriptId}/audio`;
+}
+
+export async function downloadAudioScriptMp3(
+  scriptId: string,
+  filename: string
+): Promise<void> {
+  const apiUrl = await getApiUrl();
+  const res = await fetch(`${apiUrl}/audio-scripts/${scriptId}/audio`);
+  if (!res.ok) {
+    let detail: unknown = res.statusText;
+    try {
+      const body = await res.json();
+      detail = body.detail ?? body;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(formatApiError(detail));
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename.endsWith(".mp3") ? filename : `${filename}.mp3`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}

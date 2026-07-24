@@ -124,7 +124,9 @@ def test_list_audio_scripts():
             client.post("/audio-scripts", json={"title": "List Test Script", "item_limit": 1})
     res = client.get("/audio-scripts")
     assert res.status_code == 200
-    assert any(s.get("title") == "List Test Script" for s in res.json()["scripts"])
+    scripts = res.json()["scripts"]
+    match = next(s for s in scripts if s.get("title") == "List Test Script")
+    assert match["has_audio"] is True
 
 
 def test_post_accepts_word_count_and_persists_request():

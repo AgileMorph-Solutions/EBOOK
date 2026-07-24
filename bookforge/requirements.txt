@@ -10,6 +10,7 @@ structlog>=24.1
 anthropic>=0.40
 openai>=1.40             # content fallback + gpt-image-1 image generation
 google-genai>=0.3        # Gemini / Imagen image generation
+httpx>=0.27              # ElevenLabs TTS and outbound HTTP
 
 # --- Ingest ---
 youtube-transcript-api>=0.6

@@ -38,6 +38,11 @@ const NAV = [
     label: "Jobs",
     match: (p: string) => p.startsWith("/jobs") || p.startsWith("/books"),
   },
+  {
+    href: "/audio-scripts",
+    label: "Audio",
+    match: (p: string) => p.startsWith("/audio-scripts"),
+  },
 ];
 
 export function Header() {

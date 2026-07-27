@@ -1006,6 +1006,10 @@ def _run_audio_script(
         if not req.skip_audio:
             if not get_settings().elevenlabs_api_key.strip():
                 raise ElevenLabsError("ELEVENLABS_API_KEY is not set")
+            if not shutil.which("ffmpeg"):
+                raise RuntimeError(
+                    "ffmpeg is required to merge narration audio — install ffmpeg on the host"
+                )
             _set_as_state(
                 script_id,
                 stage=AudioScriptStage.GENERATING_AUDIO,
@@ -1052,6 +1056,35 @@ def _run_audio_script(
         )
 
 
+def _require_audio_deps(*, skip_audio: bool) -> None:
+    """Fail fast before queueing when TTS merge tools are missing."""
+    if skip_audio:
+        return
+    if not get_settings().elevenlabs_api_key.strip():
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "can_generate": False,
+                "title": "ElevenLabs not configured",
+                "message": "Set ELEVENLABS_API_KEY, or pass skip_audio=true for transcript only.",
+                "reason_code": "auth",
+            },
+        )
+    if not shutil.which("ffmpeg"):
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "can_generate": False,
+                "title": "Audio merge tool missing",
+                "message": (
+                    "ffmpeg is required to merge narration audio. "
+                    "Install ffmpeg on the server, or pass skip_audio=true."
+                ),
+                "reason_code": "auth",
+            },
+        )
+
+
 @app.get("/audio-scripts")
 def list_audio_scripts():
     """Recent audio-script jobs, newest first."""
@@ -1075,16 +1108,7 @@ def create_audio_script(req: CreateAudioScript, background_tasks: BackgroundTask
                 "reason_code": "quota_llm" if "credit" in (provider_detail or "").lower() else "network",
             },
         )
-    if not req.skip_audio and not get_settings().elevenlabs_api_key.strip():
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "can_generate": False,
-                "title": "ElevenLabs not configured",
-                "message": "Set ELEVENLABS_API_KEY, or pass skip_audio=true for transcript only.",
-                "reason_code": "auth",
-            },
-        )
+    _require_audio_deps(skip_audio=req.skip_audio)
     script_id = _make_script_id(req.title.strip())
     _set_as_state(
         script_id,
@@ -1151,16 +1175,7 @@ def regenerate_audio_script(
                 "reason_code": "quota_llm" if "credit" in (provider_detail or "").lower() else "network",
             },
         )
-    if not req.skip_audio and not get_settings().elevenlabs_api_key.strip():
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "can_generate": False,
-                "title": "ElevenLabs not configured",
-                "message": "Set ELEVENLABS_API_KEY, or recreate with skip_audio=true.",
-                "reason_code": "auth",
-            },
-        )
+    _require_audio_deps(skip_audio=req.skip_audio)
 
     feedback = body.feedback
     _set_as_state(

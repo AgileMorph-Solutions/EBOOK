@@ -248,6 +248,56 @@ def test_post_duration_title_derives_length():
     assert body.get("overall_word_limit") == 23400
 
 
+def test_post_estimate_duration_conflict():
+    res = client.post(
+        "/audio-scripts/estimate",
+        json={"title": "2 minutes of reading", "overall_word_limit": 200},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["conflict"] is True
+    assert body["words_needed"] == 260
+    assert body["overall_word_limit"] == 200
+
+
+def test_post_estimate_no_conflict_when_cap_enough():
+    res = client.post(
+        "/audio-scripts/estimate",
+        json={"title": "2 minutes of reading", "overall_word_limit": 300},
+    )
+    assert res.status_code == 200
+    assert res.json()["conflict"] is False
+
+
+def test_post_rejects_duration_conflict_without_accept():
+    res = client.post(
+        "/audio-scripts",
+        json={
+            "title": "2 minutes of reading",
+            "overall_word_limit": 200,
+            "skip_audio": True,
+        },
+    )
+    assert res.status_code == 409
+    detail = res.json()["detail"]
+    assert detail["conflict"] is True
+
+
+def test_post_accepts_duration_conflict_with_flag():
+    with patch("bookforge.api.main.generate_audio_script", return_value=_FAKE_RESULT) as gen:
+        res = client.post(
+            "/audio-scripts",
+            json={
+                "title": "2 minutes of reading",
+                "overall_word_limit": 200,
+                "accept_short_duration": True,
+                "skip_audio": True,
+            },
+        )
+    assert res.status_code == 202
+    gen.assert_called_once()
+
+
 def test_post_rejects_word_count_out_of_range():
     res = client.post(
         "/audio-scripts",

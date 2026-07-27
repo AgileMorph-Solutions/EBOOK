@@ -167,6 +167,64 @@ def resolve_overall_word_limit(
     return duration_minutes * _DURATION_WORDS_PER_MINUTE
 
 
+def _format_duration_label(minutes: float) -> str:
+    total_seconds = int(round(minutes * 60))
+    m, s = divmod(total_seconds, 60)
+    return f"{m}:{s:02d}"
+
+
+def estimate_duration_fit(
+    title: str,
+    overall_word_limit: int | None = None,
+) -> dict[str, int | float | str | bool | None]:
+    """Compare title duration vs an explicit overall word cap.
+
+    Conflict when the title promises a runtime and the cap is too low to reach
+    it at ``_DURATION_WORDS_PER_MINUTE``.
+    """
+    duration_minutes = parse_title_duration_minutes(title)
+    cap = (
+        int(overall_word_limit)
+        if overall_word_limit is not None and overall_word_limit > 0
+        else None
+    )
+    words_needed = (
+        duration_minutes * _DURATION_WORDS_PER_MINUTE
+        if duration_minutes is not None
+        else None
+    )
+    estimated_minutes_from_cap = (
+        cap / _DURATION_WORDS_PER_MINUTE if cap is not None else None
+    )
+
+    conflict = False
+    reason = ""
+    if (
+        duration_minutes is not None
+        and cap is not None
+        and words_needed is not None
+        and cap < words_needed
+    ):
+        conflict = True
+        title_label = _format_duration_label(duration_minutes)
+        cap_label = _format_duration_label(estimated_minutes_from_cap or 0)
+        reason = (
+            f"Title promises ~{title_label} of narration (~{words_needed} words "
+            f"at {_DURATION_WORDS_PER_MINUTE} wpm), but your word cap is {cap} "
+            f"(~{cap_label})."
+        )
+
+    return {
+        "title_duration_minutes": duration_minutes,
+        "words_needed": words_needed,
+        "overall_word_limit": cap,
+        "estimated_minutes_from_cap": estimated_minutes_from_cap,
+        "words_per_minute": _DURATION_WORDS_PER_MINUTE,
+        "conflict": conflict,
+        "reason": reason,
+    }
+
+
 def resolve_word_band(word_count: int | None = None) -> tuple[int, int, int]:
     """Return (word_min, word_max, target) for prompts and rewrite checks.
 

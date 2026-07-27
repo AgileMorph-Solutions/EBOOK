@@ -39,7 +39,8 @@ services:
     build: { context: .., dockerfile: infra/Dockerfile.python }
     command: uvicorn bookforge.api.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir /app/bookforge
     <<: *python-env
-    ports: ["8010:8000"]
+    # Host 8011 — Cursor often binds 8000/8010 on localhost and steals traffic.
+    ports: ["8011:8000"]
     volumes: *python-src
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
@@ -79,8 +80,8 @@ services:
     working_dir: /app
     command: sh -c "npm install && npm run dev -- --hostname 0.0.0.0 --port 3000"
     environment:
-      NEXT_PUBLIC_API_URL: "http://localhost:8010"
-      API_URL: "http://localhost:8010"
+      NEXT_PUBLIC_API_URL: "http://localhost:8011"
+      API_URL: "http://localhost:8011"
       NEXT_TELEMETRY_DISABLED: "1"
       NODE_ENV: "development"
     ports: ["3010:3000"]

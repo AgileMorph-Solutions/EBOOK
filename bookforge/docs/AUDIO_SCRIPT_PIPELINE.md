@@ -14,7 +14,7 @@ sentence case (first word capital only).
 
 | Host URL | Service |
 |----------|---------|
-| `http://localhost:8010` | API (`8010→8000`) |
+| `http://localhost:8011` | API (`8011→8000`) |
 | `http://localhost:3010` | UI |
 
 ```bash
@@ -27,7 +27,7 @@ docker compose up -d --build api
 ```
 ELEVENLABS_API_KEY=...
 ELEVENLABS_VOICE_ID=bP8FJDHmWVEgXJDitdQd
-API_PUBLIC_BASE_URL=http://localhost:8010
+API_PUBLIC_BASE_URL=http://localhost:8011
 ```
 
 ## API
@@ -95,12 +95,12 @@ Includes `transcript`, `items[]` (each with `word_count`), `total_words`, `audio
 ## Curl
 
 ```bash
-curl -X POST http://localhost:8010/audio-scripts \
+curl -X POST http://localhost:8011/audio-scripts \
   -H 'content-type: application/json' \
   -d '{"title":"100 Concepts That Make You See the World Differently Than 99% of People","item_limit":3,"word_count":270}'
 
-curl -s http://localhost:8010/audio-scripts/SCRIPT_ID
-curl -o narration.mp3 http://localhost:8010/audio-scripts/SCRIPT_ID/audio
+curl -s http://localhost:8011/audio-scripts/SCRIPT_ID
+curl -o narration.mp3 http://localhost:8011/audio-scripts/SCRIPT_ID/audio
 ```
 
 ## Code map

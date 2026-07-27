@@ -29,6 +29,7 @@ flowchart TD
 | `item_limit` | Exact item/section count when set (API-only; not shown on the create form). Omit → count from the title’s promised number, or a duration-derived count when the title is time-based. |
 | `word_count` | Target words **per paragraph/section** (API-only; not on the create form). Omit → SOP **265–270**, or derived from `overall_word_limit` / title duration. Allowed range: **100–500**. |
 | `overall_word_limit` | Cap for the **whole transcript**. UI: **Total transcript words**. Per-section length is derived automatically as `overall ÷ section count` (clamped 100–500). When omitted, duration titles derive `minutes × 130`. Allowed range: **100–150000**. |
+| `accept_short_duration` | When `true`, allow `overall_word_limit` below the word budget implied by a duration in the title. The UI sets this after the user confirms a conflict. |
 | `skip_audio` | Transcript only (no ElevenLabs / no MP3). |
 | `voice_id` / `model_id` / `voice_settings` | Optional TTS overrides (defaults documented in the pipeline doc). |
 
@@ -56,6 +57,15 @@ Title: `3 Hours of Emotional Control Secrets…` (no `item_limit` / `overall_wor
 
 Title: `100 Secrets for 3 Hours of Deep Focus` → keeps **100** items and still applies the 3-hour word budget (~234 words/item).
 
+### Duration vs word-cap conflict
+
+When the title promises a listening time (e.g. `2 Minutes of…`) **and** you set a lower `overall_word_limit`, the create form calls `POST /audio-scripts/estimate` first. If the cap is too low, you get a confirm dialog:
+
+- **Match title** — omit the low cap; duration sizing wins (~260 words for 2 minutes at 130 wpm).
+- **Keep shorter cap** — submit with `accept_short_duration: true` (~1:32 for 200 words).
+
+The API returns **409** on `POST /audio-scripts` when there is a conflict and `accept_short_duration` is not set.
+
 ## Stages
 
 | Stage | What happens |
@@ -82,7 +92,7 @@ artifacts/audio-scripts/{script_id}/
 ## Example curl
 
 ```bash
-curl -X POST http://localhost:8010/audio-scripts \
+curl -X POST http://localhost:8011/audio-scripts \
   -H 'content-type: application/json' \
   -d '{
     "title": "100 Concepts That Make You See the World Differently Than 99% of People",
@@ -93,8 +103,8 @@ curl -X POST http://localhost:8010/audio-scripts \
     "skip_audio": false
   }'
 
-curl -s http://localhost:8010/audio-scripts/SCRIPT_ID
-curl -o narration.mp3 http://localhost:8010/audio-scripts/SCRIPT_ID/audio
+curl -s http://localhost:8011/audio-scripts/SCRIPT_ID
+curl -o narration.mp3 http://localhost:8011/audio-scripts/SCRIPT_ID/audio
 ```
 
 When status is `done`, the GET body includes `transcript`, `items` (each with `word_count`), `total_words`, and `audio_link` (unless `skip_audio`).

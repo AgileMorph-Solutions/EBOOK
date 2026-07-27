@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from bookforge.pipeline.audio_script import (
     body_from_paragraphs,
+    estimate_duration_fit,
     format_transcript,
     parse_title_duration_minutes,
     resolve_effective_word_count,
@@ -89,6 +90,33 @@ def test_duration_plus_count_keeps_count_and_duration_budget():
     assert overall == 180 * 130
     per_item = resolve_effective_word_count(100, overall_word_limit=overall)
     assert per_item == 234  # 23400 // 100
+
+
+def test_estimate_duration_fit_conflict():
+    fit = estimate_duration_fit("2 minutes of reading", 200)
+    assert fit["conflict"] is True
+    assert fit["title_duration_minutes"] == 2
+    assert fit["words_needed"] == 260
+    assert fit["overall_word_limit"] == 200
+    assert fit["estimated_minutes_from_cap"] == 200 / 130
+    assert "260" in fit["reason"]
+    assert "200" in fit["reason"]
+
+
+def test_estimate_duration_fit_no_conflict_when_cap_sufficient():
+    fit = estimate_duration_fit("2 minutes of reading", 300)
+    assert fit["conflict"] is False
+    assert fit["reason"] == ""
+
+
+def test_estimate_duration_fit_no_conflict_without_duration():
+    fit = estimate_duration_fit("100 Dark Psychology Tricks", 200)
+    assert fit["conflict"] is False
+
+
+def test_estimate_duration_fit_no_conflict_without_cap():
+    fit = estimate_duration_fit("2 minutes of reading", None)
+    assert fit["conflict"] is False
 
 
 def test_resolve_item_count_default():

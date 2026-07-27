@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     elevenlabs_tts_workers: int = Field(2, alias="ELEVENLABS_TTS_WORKERS")
     # Docker Compose publishes API on host 8010 (8010→8000).
     api_public_base_url: str = Field(
-        "http://localhost:8010", alias="API_PUBLIC_BASE_URL",
+        "http://localhost:8011", alias="API_PUBLIC_BASE_URL",
     )
     audio_script_max_items: int = Field(100, alias="AUDIO_SCRIPT_MAX_ITEMS")
     audio_script_item_workers: int = Field(4, alias="AUDIO_SCRIPT_ITEM_WORKERS")

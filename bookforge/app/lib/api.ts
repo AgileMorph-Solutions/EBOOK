@@ -366,6 +366,16 @@ export async function regenerateBook(bookId: string): Promise<RegenerateResponse
 // Audio scripts (transcript + optional ElevenLabs TTS)
 // --------------------------------------------------------------------------- #
 
+export type AudioScriptDurationEstimate = {
+  title_duration_minutes: number | null;
+  words_needed: number | null;
+  overall_word_limit: number | null;
+  estimated_minutes_from_cap: number | null;
+  words_per_minute: number;
+  conflict: boolean;
+  reason: string;
+};
+
 export type CreateAudioScriptRequest = {
   title: string;
   /** Free-text niche for prompt voice (any category). */
@@ -374,6 +384,8 @@ export type CreateAudioScriptRequest = {
   word_count?: number | null;
   /** Total word budget across the whole script. */
   overall_word_limit?: number | null;
+  /** Allow word cap below title duration when user confirms. */
+  accept_short_duration?: boolean;
   /** When true, skip ElevenLabs and return transcript only. */
   skip_audio?: boolean;
 };
@@ -427,6 +439,16 @@ export type AudioScriptStatus = {
   feedback?: string;
   link?: string;
 };
+
+export async function estimateAudioScript(body: {
+  title: string;
+  overall_word_limit?: number | null;
+}): Promise<AudioScriptDurationEstimate> {
+  return apiFetch("/audio-scripts/estimate", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
 
 export async function createAudioScript(
   body: CreateAudioScriptRequest

@@ -56,6 +56,7 @@ from bookforge.pipeline.readiness import (
     writing_provider_status,
 )
 from bookforge.pipeline.audio_script import (
+    estimate_duration_fit,
     generate_audio_script,
     parse_title_duration_minutes,
     resolve_effective_word_count,
@@ -836,6 +837,13 @@ class CreateAudioScript(BaseModel):
     skip_audio: bool = Field(
         False, description="If true, only generate transcript (no ElevenLabs).",
     )
+    accept_short_duration: bool = Field(
+        False,
+        description=(
+            "When true, allow overall_word_limit below the word budget implied "
+            "by a duration in the title."
+        ),
+    )
 
     @field_validator("category")
     @classmethod
@@ -844,6 +852,14 @@ class CreateAudioScript(BaseModel):
         if not text:
             raise ValueError("category is required")
         return text
+
+
+class EstimateAudioScript(BaseModel):
+    title: str
+    overall_word_limit: int | None = Field(
+        None, ge=100, le=150000,
+        description="Proposed total transcript word cap to compare against title duration.",
+    )
 
 
 class RegenerateAudioScript(BaseModel):
@@ -1126,10 +1142,25 @@ def _require_audio_deps(*, skip_audio: bool) -> None:
         )
 
 
+def _check_duration_word_cap(req: CreateAudioScript) -> None:
+    """Reject when title duration and word cap conflict unless user opted in."""
+    fit = estimate_duration_fit(req.title, req.overall_word_limit)
+    if fit["conflict"] and not req.accept_short_duration:
+        raise HTTPException(status_code=409, detail=fit)
+
+
 @app.get("/audio-scripts")
 def list_audio_scripts():
     """Recent audio-script jobs, newest first."""
     return {"scripts": _list_audio_scripts()}
+
+
+@app.post("/audio-scripts/estimate")
+def estimate_audio_script(req: EstimateAudioScript):
+    """Preview whether title duration and word cap align (no job started)."""
+    if not req.title.strip():
+        raise HTTPException(status_code=422, detail="title is required")
+    return estimate_duration_fit(req.title.strip(), req.overall_word_limit)
 
 
 @app.post("/audio-scripts", status_code=202)
@@ -1137,6 +1168,7 @@ def create_audio_script(req: CreateAudioScript, background_tasks: BackgroundTask
     """Start an audio narration job. Poll GET /audio-scripts/{script_id}."""
     if not req.title.strip():
         raise HTTPException(status_code=422, detail="title is required")
+    _check_duration_word_cap(req)
     # Audio jobs need LLM writing only — not book image/layout readiness.
     provider_ok, provider_detail, _unfunded = writing_provider_status()
     if not provider_ok:

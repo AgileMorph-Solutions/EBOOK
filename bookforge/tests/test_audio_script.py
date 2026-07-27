@@ -4,13 +4,17 @@ from __future__ import annotations
 from bookforge.pipeline.audio_script import (
     body_from_paragraphs,
     format_transcript,
+    parse_title_duration_minutes,
+    resolve_effective_word_count,
     resolve_item_count,
+    resolve_overall_word_limit,
     resolve_word_band,
     to_sentence_case,
     word_count,
 )
 from bookforge.pipeline.audio_script_prompts import (
     brainstorm_user,
+    category_voice,
     feedback_block,
     item_rewrite_user,
     item_system,
@@ -51,10 +55,40 @@ def test_resolve_item_count_from_title():
 
 
 def test_resolve_item_count_limit_overrides_title_number():
-    # "3 Hours…" would parse as 3; explicit item_limit wins.
     title = "3 Hours of Emotional Control Secrets to Fall Asleep To"
-    assert resolve_item_count(title) == 3
+    # Without item_limit, duration wins — not the bare "3".
+    assert resolve_item_count(title) > 3
     assert resolve_item_count(title, item_limit=10) == 10
+
+
+def test_parse_title_duration_minutes():
+    assert parse_title_duration_minutes(
+        "3 Hours of Emotional Control Secrets to Fall Asleep To"
+    ) == 180
+    assert parse_title_duration_minutes("45 Minutes of Calm Breathwork") == 45
+    assert parse_title_duration_minutes("Three Hours of Stoic Wisdom") == 180
+    assert parse_title_duration_minutes("100 Dark Psychology Tricks") is None
+
+
+def test_duration_title_sizes_near_runtime():
+    title = "3 Hours of Emotional Control Secrets to Fall Asleep To"
+    items = resolve_item_count(title)
+    overall = resolve_overall_word_limit(title)
+    per_item = resolve_effective_word_count(items, overall_word_limit=overall)
+    assert overall == 180 * 130
+    assert per_item is not None
+    # ~3 hours at 130 wpm (±10%)
+    est_minutes = (items * per_item) / 130
+    assert 162 <= est_minutes <= 198
+
+
+def test_duration_plus_count_keeps_count_and_duration_budget():
+    title = "100 Secrets for 3 Hours of Deep Focus"
+    assert resolve_item_count(title) == 100
+    overall = resolve_overall_word_limit(title)
+    assert overall == 180 * 130
+    per_item = resolve_effective_word_count(100, overall_word_limit=overall)
+    assert per_item == 234  # 23400 // 100
 
 
 def test_resolve_item_count_default():
@@ -69,6 +103,48 @@ def test_resolve_word_band_default_sop():
 def test_resolve_word_band_custom():
     word_min, word_max, target = resolve_word_band(200)
     assert (word_min, word_max, target) == (195, 205, 200)
+
+
+def test_resolve_effective_word_count_neither():
+    assert resolve_effective_word_count(10) is None
+    assert resolve_effective_word_count(10, word_count=None, overall_word_limit=None) is None
+
+
+def test_resolve_effective_word_count_overall_only():
+    # 3000 / 10 = 300
+    assert resolve_effective_word_count(10, overall_word_limit=3000) == 300
+    # clamps to per-item max 500
+    assert resolve_effective_word_count(2, overall_word_limit=5000) == 500
+    # clamps to per-item min 100
+    assert resolve_effective_word_count(50, overall_word_limit=1000) == 100
+
+
+def test_resolve_effective_word_count_word_count_only():
+    assert resolve_effective_word_count(10, word_count=200) == 200
+
+
+def test_resolve_effective_word_count_overall_clamps_when_both_exceed():
+    # 270 * 20 = 5400 > 2000 → overall wins → 2000 // 20 = 100
+    assert (
+        resolve_effective_word_count(20, word_count=270, overall_word_limit=2000)
+        == 100
+    )
+
+
+def test_resolve_effective_word_count_word_count_wins_when_under_overall():
+    # 200 * 5 = 1000 < 3000 → keep explicit per-item
+    assert (
+        resolve_effective_word_count(5, word_count=200, overall_word_limit=3000)
+        == 200
+    )
+
+
+def test_category_voice_known_and_free_text():
+    assert "cognitive bias" in category_voice("psychology")
+    assert "cognitive bias" in category_voice("Psychology")
+    assert category_voice("true crime") == "true crime"
+    assert category_voice("  stoicism  ") == "stoicism"
+    assert "self-improvement" in category_voice("")
 
 
 def test_to_sentence_case():

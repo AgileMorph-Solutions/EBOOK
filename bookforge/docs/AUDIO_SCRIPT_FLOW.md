@@ -24,9 +24,11 @@ flowchart TD
 
 | Field | What it does |
 |-------|----------------|
-| `title` | Theme for the narration. If it says “100 ways…”, the default is **100 items**. |
-| `item_limit` | Exact item count when set (capped by max). Omit → count from the title’s promised number (e.g. “100 ways…” → 100). Title text is **not** rewritten. |
-| `word_count` | Target words **per item**. Omit → SOP **265–270**. Set e.g. `200` → band **195–205** (±5). Allowed range: **100–500**. |
+| `title` | Theme for the narration. If it says “100 ways…”, the default is **100 items**. If it says “3 Hours of…” / “45 Minutes of…”, the script is sized for that **listening time** (~130 words/minute) instead of treating the number as an item count. |
+| `category` | Free-text niche for prompt voice (e.g. `psychology`, `true crime`). Known niches get richer domain phrasing; anything else is used as-is. |
+| `item_limit` | Exact item/section count when set (API-only; not shown on the create form). Omit → count from the title’s promised number, or a duration-derived count when the title is time-based. |
+| `word_count` | Target words **per paragraph/section** (API-only; not on the create form). Omit → SOP **265–270**, or derived from `overall_word_limit` / title duration. Allowed range: **100–500**. |
+| `overall_word_limit` | Cap for the **whole transcript**. UI: **Total transcript words**. Per-section length is derived automatically as `overall ÷ section count` (clamped 100–500). When omitted, duration titles derive `minutes × 130`. Allowed range: **100–150000**. |
 | `skip_audio` | Transcript only (no ElevenLabs / no MP3). |
 | `voice_id` / `model_id` / `voice_settings` | Optional TTS overrides (defaults documented in the pipeline doc). |
 
@@ -36,10 +38,23 @@ Title: `100 Ways to Do Something` + `item_limit: 2` → **2 items** written and 
 Title: `3 Hours of …` + `item_limit: 10` → **10 items** (explicit limit overrides the “3” in the title).
 The stored title text is unchanged.
 
-### `word_count` example
+### `word_count` / `overall_word_limit` example
 
 - Omitted → each item prompted and rewrite-checked for **265–270** words.
 - `"word_count": 200` → each item targeted at **200** words (accept band **195–205**).
+- `"overall_word_limit": 3000` + 10 items → each item targeted at **300** words.
+- Both set with `word_count × items` over overall → per-item target clamped to `overall ÷ items`.
+
+### Duration title example
+
+Title: `3 Hours of Emotional Control Secrets…` (no `item_limit` / `overall_word_limit`):
+
+- Parses **180 minutes** (not “3 items”).
+- Overall budget ≈ `180 × 130` = **23,400** words.
+- Item count ≈ `23400 / 267` ≈ **88** items at SOP density.
+- Per-item target ≈ **265** words → ~3 hours of narration at 130 wpm.
+
+Title: `100 Secrets for 3 Hours of Deep Focus` → keeps **100** items and still applies the 3-hour word budget (~234 words/item).
 
 ## Stages
 
@@ -71,8 +86,10 @@ curl -X POST http://localhost:8010/audio-scripts \
   -H 'content-type: application/json' \
   -d '{
     "title": "100 Concepts That Make You See the World Differently Than 99% of People",
+    "category": "psychology",
     "item_limit": 3,
     "word_count": 270,
+    "overall_word_limit": null,
     "skip_audio": false
   }'
 

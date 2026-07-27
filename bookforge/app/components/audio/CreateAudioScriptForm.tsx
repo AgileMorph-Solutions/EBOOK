@@ -6,31 +6,20 @@ import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
 import { Input, Label } from "@/components/ui/Input";
-import { Select } from "@/components/ui/Select";
-import {
-  createAudioScript,
-  type AudioScriptCategory,
-} from "@/lib/api";
+import { createAudioScript } from "@/lib/api";
 import { cn } from "@/lib/cn";
-
-const CATEGORIES: { value: AudioScriptCategory; label: string }[] = [
-  { value: "psychology", label: "Psychology" },
-  { value: "relationship", label: "Relationship" },
-  { value: "philosophy", label: "Philosophy" },
-  { value: "general", label: "General" },
-];
 
 export function CreateAudioScriptForm() {
   const router = useRouter();
   const [title, setTitle] = useState("");
-  const [category, setCategory] = useState<AudioScriptCategory>("psychology");
-  const [itemLimit, setItemLimit] = useState("");
-  const [wordCount, setWordCount] = useState("");
+  const [category, setCategory] = useState("psychology");
+  const [totalTranscriptWords, setTotalTranscriptWords] = useState("");
   const [generateAudio, setGenerateAudio] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const canSubmit = title.trim().length > 0 && !submitting;
+  const canSubmit =
+    title.trim().length > 0 && category.trim().length > 0 && !submitting;
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -40,17 +29,16 @@ export function CreateAudioScriptForm() {
     setSubmitting(true);
 
     try {
-      const limit = itemLimit ? parseInt(itemLimit, 10) : null;
-      const words = wordCount ? parseInt(wordCount, 10) : null;
+      const overall = totalTranscriptWords
+        ? parseInt(totalTranscriptWords, 10)
+        : null;
 
       const res = await createAudioScript({
         title: title.trim(),
-        category,
-        item_limit:
-          limit != null && Number.isFinite(limit) && limit > 0 ? limit : null,
-        word_count:
-          words != null && Number.isFinite(words) && words >= 100
-            ? words
+        category: category.trim(),
+        overall_word_limit:
+          overall != null && Number.isFinite(overall) && overall >= 100
+            ? overall
             : null,
         skip_audio: !generateAudio,
       });
@@ -77,62 +65,49 @@ export function CreateAudioScriptForm() {
           placeholder="e.g. 30 Dark Psychology Tricks That Actually Work"
         />
         <p className="font-body text-body-sm italic text-secondary">
-          Include the item count in the title when you can — it drives how many
-          concepts get written.
+          Include an item count (e.g. “100 ways…”) or a listening time (e.g.
+          “3 Hours of…”) — that drives how long the script is when the word
+          cap below is left blank.
         </p>
       </div>
 
       <div className="flex flex-col gap-2">
-        <Label htmlFor="as-category">Category</Label>
-        <Select
+        <Label htmlFor="as-category">
+          Category <span className="text-primary">*</span>
+        </Label>
+        <Input
           id="as-category"
+          type="text"
+          required
+          maxLength={80}
           value={category}
-          onChange={(e) =>
-            setCategory(e.target.value as AudioScriptCategory)
-          }
-        >
-          {CATEGORIES.map((c) => (
-            <option key={c.value} value={c.value}>
-              {c.label}
-            </option>
-          ))}
-        </Select>
+          onChange={(e) => setCategory(e.target.value)}
+          placeholder="e.g. psychology, true crime, stoicism"
+        />
+        <p className="font-body text-body-sm italic text-secondary">
+          Any niche — used to steer the narration voice (not limited to a fixed
+          list).
+        </p>
       </div>
 
-      <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
-        <div className="flex flex-col gap-2">
-          <Label htmlFor="as-items">
-            Item limit{" "}
-            <span className="font-normal text-secondary">(optional)</span>
-          </Label>
-          <Input
-            id="as-items"
-            type="number"
-            min={1}
-            max={100}
-            placeholder="e.g. 3 for a cheap test"
-            value={itemLimit}
-            onChange={(e) => setItemLimit(e.target.value)}
-          />
-          <p className="font-body text-body-sm italic text-secondary">
-            Caps how many items to write. Leave blank for the full title count.
-          </p>
-        </div>
-        <div className="flex flex-col gap-2">
-          <Label htmlFor="as-words">
-            Words per item{" "}
-            <span className="font-normal text-secondary">(optional)</span>
-          </Label>
-          <Input
-            id="as-words"
-            type="number"
-            min={100}
-            max={500}
-            placeholder="default 265–270"
-            value={wordCount}
-            onChange={(e) => setWordCount(e.target.value)}
-          />
-        </div>
+      <div className="flex flex-col gap-2">
+        <Label htmlFor="as-total-words">
+          Total transcript words{" "}
+          <span className="font-normal text-secondary">(optional)</span>
+        </Label>
+        <Input
+          id="as-total-words"
+          type="number"
+          min={100}
+          max={150000}
+          placeholder="e.g. 3000"
+          value={totalTranscriptWords}
+          onChange={(e) => setTotalTranscriptWords(e.target.value)}
+        />
+        <p className="font-body text-body-sm italic text-secondary">
+          Cap for the whole transcript. Each numbered section is sized
+          automatically from this total (total ÷ section count).
+        </p>
       </div>
 
       <label

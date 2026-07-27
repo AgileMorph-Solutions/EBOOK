@@ -366,17 +366,14 @@ export async function regenerateBook(bookId: string): Promise<RegenerateResponse
 // Audio scripts (transcript + optional ElevenLabs TTS)
 // --------------------------------------------------------------------------- #
 
-export type AudioScriptCategory =
-  | "psychology"
-  | "relationship"
-  | "philosophy"
-  | "general";
-
 export type CreateAudioScriptRequest = {
   title: string;
-  category?: AudioScriptCategory;
+  /** Free-text niche for prompt voice (any category). */
+  category?: string;
   item_limit?: number | null;
   word_count?: number | null;
+  /** Total word budget across the whole script. */
+  overall_word_limit?: number | null;
   /** When true, skip ElevenLabs and return transcript only. */
   skip_audio?: boolean;
 };
@@ -408,9 +405,12 @@ export type AudioScriptStatus = {
   status: "queued" | "running" | "done" | "failed" | string;
   stage?: string;
   title?: string;
-  category?: AudioScriptCategory | string;
+  category?: string;
   item_limit?: number | null;
   word_count?: number | null;
+  overall_word_limit?: number | null;
+  effective_word_count?: number | null;
+  target_duration_minutes?: number | null;
   skip_audio?: boolean;
   created_at?: string;
   started_at?: string;

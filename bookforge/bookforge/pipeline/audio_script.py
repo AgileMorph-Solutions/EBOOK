@@ -5,10 +5,9 @@ band each, formatted as a transcript for ElevenLabs narration.
 """
 from __future__ import annotations
 
+import re
 import threading
 from collections.abc import Callable
-from typing import Literal
-
 import structlog
 from pydantic import BaseModel, Field, field_validator
 
@@ -22,12 +21,32 @@ from bookforge.schemas import AudioScriptItem, AudioScriptResult
 
 log = structlog.get_logger(__name__)
 
-Category = Literal["psychology", "relationship", "philosophy", "general"]
-
 # SOP default band when API omits word_count
 _SOP_WORD_MIN = 265
 _SOP_WORD_MAX = 270
 _SOP_WORD_TARGET = 267
+_PER_ITEM_WORD_MIN = 100
+_PER_ITEM_WORD_MAX = 500
+# Spoken narration pacing used to size titles like "3 Hours of …"
+_DURATION_WORDS_PER_MINUTE = 130
+# Duration-derived item counts may exceed AUDIO_SCRIPT_MAX_ITEMS so long
+# runtimes stay near the promised listening time at SOP density.
+_DURATION_ITEM_CAP = 500
+
+_TITLE_DURATION_RE = re.compile(
+    r"\b(?P<amount>\d{1,3})\s*(?P<unit>hours?|hrs?|minutes?|mins?)\b",
+    re.IGNORECASE,
+)
+
+_SPELLED_ONES = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+    "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+}
+_SPELLED_DURATION_RE = re.compile(
+    r"\b(?P<word>" + "|".join(_SPELLED_ONES) + r")\s*"
+    r"(?P<unit>hours?|hrs?|minutes?|mins?)\b",
+    re.IGNORECASE,
+)
 
 ProgressFn = Callable[[str, int, int], None]
 
@@ -74,12 +93,78 @@ def resolve_item_count(title: str, item_limit: int | None = None) -> int:
     """Resolve how many items to write.
 
     When ``item_limit`` is set, it is the exact count (capped by max).
-    Otherwise the count comes from the number promised in the title.
+    Otherwise prefer a real marketing count from the title (e.g. ``100 ways``).
+    Duration phrases like ``3 Hours of …`` are *not* treated as item counts —
+    they size the script via an overall word budget and a derived item count
+    at SOP density (~267 words/item at 130 wpm).
     """
     if item_limit is not None and item_limit > 0:
         return max(1, min(item_limit, settings.audio_script_max_items))
-    promised = parse_promised_count(title, "") or settings.audio_script_max_items
-    return max(1, min(promised, settings.audio_script_max_items))
+    promised = _resolve_promised_item_count(title)
+    if promised is not None:
+        return max(1, min(promised, settings.audio_script_max_items))
+    duration_minutes = parse_title_duration_minutes(title)
+    if duration_minutes is not None:
+        derived = round(
+            (duration_minutes * _DURATION_WORDS_PER_MINUTE) / _SOP_WORD_TARGET
+        )
+        cap = max(settings.audio_script_max_items, _DURATION_ITEM_CAP)
+        return max(1, min(derived, cap))
+    return max(1, settings.audio_script_max_items)
+
+
+def parse_title_duration_minutes(title: str) -> int | None:
+    """Extract a requested runtime from titles like ``3 Hours of ...``."""
+    text = title or ""
+    match = _TITLE_DURATION_RE.search(text)
+    if match:
+        amount = int(match.group("amount"))
+        unit = match.group("unit").lower()
+    else:
+        spelled = _SPELLED_DURATION_RE.search(text)
+        if not spelled:
+            return None
+        amount = _SPELLED_ONES[spelled.group("word").lower()]
+        unit = spelled.group("unit").lower()
+    if amount <= 0:
+        return None
+    if unit.startswith(("hour", "hr")):
+        return amount * 60
+    return amount
+
+
+def _resolve_promised_item_count(title: str) -> int | None:
+    """Return a title count unless it is actually a duration phrase.
+
+    ``3 Hours of … Secrets`` would otherwise parse as ``3`` via the secrets
+    noun — ignore that when the digit matches the duration amount.
+    """
+    promised = parse_promised_count(title, "")
+    if promised is None:
+        return None
+    duration_minutes = parse_title_duration_minutes(title)
+    if duration_minutes is None:
+        return promised
+    digit_match = _TITLE_DURATION_RE.search(title or "")
+    if digit_match and int(digit_match.group("amount")) == promised:
+        return None
+    spelled = _SPELLED_DURATION_RE.search(title or "")
+    if spelled and _SPELLED_ONES[spelled.group("word").lower()] == promised:
+        return None
+    return promised
+
+
+def resolve_overall_word_limit(
+    title: str,
+    overall_word_limit: int | None = None,
+) -> int | None:
+    """Return explicit overall limit or derive one from a title duration."""
+    if overall_word_limit is not None and overall_word_limit > 0:
+        return int(overall_word_limit)
+    duration_minutes = parse_title_duration_minutes(title)
+    if duration_minutes is None:
+        return None
+    return duration_minutes * _DURATION_WORDS_PER_MINUTE
 
 
 def resolve_word_band(word_count: int | None = None) -> tuple[int, int, int]:
@@ -92,6 +177,38 @@ def resolve_word_band(word_count: int | None = None) -> tuple[int, int, int]:
         return _SOP_WORD_MIN, _SOP_WORD_MAX, _SOP_WORD_TARGET
     target = int(word_count)
     return max(1, target - 5), target + 5, target
+
+
+def resolve_effective_word_count(
+    item_count: int,
+    word_count: int | None = None,
+    overall_word_limit: int | None = None,
+) -> int | None:
+    """Resolve per-item word target from ``word_count`` and/or overall budget.
+
+    Returns ``None`` when neither is set (caller uses SOP band via
+    ``resolve_word_band``). When both are set and
+    ``word_count * item_count`` exceeds the overall budget, the overall
+    budget wins (per-item target = overall // item_count, clamped 100–500).
+    """
+    n = max(1, int(item_count))
+    derived: int | None = None
+    if overall_word_limit is not None and overall_word_limit > 0:
+        derived = max(
+            _PER_ITEM_WORD_MIN,
+            min(_PER_ITEM_WORD_MAX, overall_word_limit // n),
+        )
+
+    if word_count is not None:
+        if (
+            derived is not None
+            and overall_word_limit is not None
+            and word_count * n > overall_word_limit
+        ):
+            return derived
+        return int(word_count)
+
+    return derived
 
 
 def word_count(text: str) -> int:
@@ -143,7 +260,7 @@ def _trim_concepts(concepts: list[str], count: int) -> list[str]:
 def _brainstorm(
     title: str,
     count: int,
-    category: Category,
+    category: str,
     feedback: str | None = None,
 ) -> list[str]:
     result = llm.structured(
@@ -163,7 +280,7 @@ def _refine(
     title: str,
     concepts: list[str],
     count: int,
-    category: Category,
+    category: str,
     feedback: str | None = None,
 ) -> list[str]:
     result = llm.structured(
@@ -189,7 +306,7 @@ def _write_item(
     concept_title: str,
     number: int,
     total: int,
-    category: Category,
+    category: str,
     *,
     word_min: int,
     word_max: int,
@@ -238,7 +355,7 @@ def _write_item(
 def generate_audio_script(
     title: str,
     *,
-    category: Category = "psychology",
+    category: str = "psychology",
     item_count: int | None = None,
     word_count: int | None = None,
     feedback: str | None = None,

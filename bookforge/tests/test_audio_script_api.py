@@ -153,6 +153,101 @@ def test_post_accepts_word_count_and_persists_request():
     assert req["item_limit"] == 2
 
 
+def test_post_accepts_free_text_category():
+    with patch("bookforge.api.main.generate_audio_script", return_value=_FAKE_RESULT) as gen:
+        res = client.post(
+            "/audio-scripts",
+            json={
+                "title": "True Crime Free Category",
+                "category": "true crime",
+                "item_limit": 1,
+                "skip_audio": True,
+            },
+        )
+    assert res.status_code == 202
+    script_id = res.json()["script_id"]
+    gen.assert_called_once()
+    assert gen.call_args.kwargs.get("category") == "true crime"
+
+    from bookforge.api.main import _as_request_path, _read_as_state
+    import json
+    req = json.loads(_as_request_path(script_id).read_text())
+    assert req["category"] == "true crime"
+    state = _read_as_state(script_id)
+    assert state is not None
+    assert state.get("category") == "true crime"
+
+
+def test_post_rejects_blank_category():
+    res = client.post(
+        "/audio-scripts",
+        json={"title": "Need Category", "category": "   ", "skip_audio": True},
+    )
+    assert res.status_code == 422
+
+
+def test_post_overall_word_limit_derives_per_item():
+    with patch("bookforge.api.main.generate_audio_script", return_value=_FAKE_RESULT) as gen:
+        res = client.post(
+            "/audio-scripts",
+            json={
+                "title": "Overall Budget Script",
+                "item_limit": 10,
+                "overall_word_limit": 3000,
+                "skip_audio": True,
+            },
+        )
+    assert res.status_code == 202
+    script_id = res.json()["script_id"]
+    gen.assert_called_once()
+    assert gen.call_args.kwargs.get("word_count") == 300  # 3000 // 10
+
+    from bookforge.api.main import _as_request_path
+    import json
+    req = json.loads(_as_request_path(script_id).read_text())
+    assert req["overall_word_limit"] == 3000
+    assert req.get("word_count") is None
+
+
+def test_post_overall_word_limit_clamps_explicit_word_count():
+    with patch("bookforge.api.main.generate_audio_script", return_value=_FAKE_RESULT) as gen:
+        res = client.post(
+            "/audio-scripts",
+            json={
+                "title": "Clamp Word Count Script",
+                "item_limit": 20,
+                "word_count": 270,
+                "overall_word_limit": 2000,
+                "skip_audio": True,
+            },
+        )
+    assert res.status_code == 202
+    gen.assert_called_once()
+    # 270 * 20 = 5400 > 2000 → 2000 // 20 = 100
+    assert gen.call_args.kwargs.get("word_count") == 100
+
+
+def test_post_duration_title_derives_length():
+    with patch("bookforge.api.main.generate_audio_script", return_value=_FAKE_RESULT) as gen:
+        res = client.post(
+            "/audio-scripts",
+            json={
+                "title": "3 Hours of Emotional Control Secrets to Fall Asleep To",
+                "skip_audio": True,
+            },
+        )
+    assert res.status_code == 202
+    gen.assert_called_once()
+    # ~180 min * 130 wpm / 267 ≈ 88 items; per-item ≈ 265
+    assert gen.call_args.kwargs.get("item_count") == 88
+    assert gen.call_args.kwargs.get("word_count") == 265
+
+    status = client.get(f"/audio-scripts/{res.json()['script_id']}")
+    body = status.json()
+    assert body.get("target_duration_minutes") == 180
+    assert body.get("overall_word_limit") == 23400
+
+
 def test_post_rejects_word_count_out_of_range():
     res = client.post(
         "/audio-scripts",

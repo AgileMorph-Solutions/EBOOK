@@ -6,10 +6,6 @@ Prompts are title/category-parameterized — never hardcode a sample title.
 """
 from __future__ import annotations
 
-from typing import Literal
-
-Category = Literal["psychology", "relationship", "philosophy", "general"]
-
 _CATEGORY_VOICE: dict[str, str] = {
     "psychology": "psychology, cognitive bias, and human behavior",
     "relationship": "relationships, social dynamics, and emotional intelligence",
@@ -29,8 +25,13 @@ And here is the quiet trap — people will defend that picture harder than they 
 Once you catch yourself mid-reaction, try a smaller move: ask what you are actually seeing, versus what you expected to see. That tiny pause is often enough to stop the old story from running the night."""
 
 
-def category_voice(category: Category) -> str:
-    return _CATEGORY_VOICE.get(category, _CATEGORY_VOICE["general"])
+def category_voice(category: str) -> str:
+    """Map known niches to rich domain phrases; otherwise use free-text as-is."""
+    key = (category or "").strip().lower()
+    if key in _CATEGORY_VOICE:
+        return _CATEGORY_VOICE[key]
+    text = (category or "").strip()
+    return text or _CATEGORY_VOICE["general"]
 
 
 def feedback_block(feedback: str | None) -> str:
@@ -46,7 +47,7 @@ def feedback_block(feedback: str | None) -> str:
     )
 
 
-def brainstorm_system(category: Category) -> str:
+def brainstorm_system(category: str) -> str:
     domain = category_voice(category)
     return (
         f"You are a 170-IQ writer specializing in {domain}. You write narration "
@@ -69,7 +70,7 @@ def brainstorm_user(title: str, count: int, feedback: str | None = None) -> str:
     )
 
 
-def refine_system(category: Category) -> str:
+def refine_system(category: str) -> str:
     domain = category_voice(category)
     return (
         f"You are an expert editor for {domain} narration scripts. Your job is to "
@@ -96,7 +97,7 @@ def refine_user(
     )
 
 
-def item_system(category: Category, word_min: int = 265, word_max: int = 270) -> str:
+def item_system(category: str, word_min: int = 265, word_max: int = 270) -> str:
     domain = category_voice(category)
     return (
         f"You are a late-night narration scriptwriter for {domain} audio. "

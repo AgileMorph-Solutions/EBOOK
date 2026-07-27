@@ -55,7 +55,13 @@ from bookforge.pipeline.readiness import (
     check_readiness,
     writing_provider_status,
 )
-from bookforge.pipeline.audio_script import generate_audio_script, resolve_item_count
+from bookforge.pipeline.audio_script import (
+    generate_audio_script,
+    parse_title_duration_minutes,
+    resolve_effective_word_count,
+    resolve_item_count,
+    resolve_overall_word_limit,
+)
 from bookforge.pipeline.audio_script_stages import AudioScriptStage, stages_payload
 from bookforge.pipeline.audio_tts import generate_narration_audio
 from bookforge.clients.elevenlabs import ElevenLabsError
@@ -786,8 +792,11 @@ class ElevenLabsVoiceSettings(BaseModel):
 
 class CreateAudioScript(BaseModel):
     title: str
-    category: Literal["psychology", "relationship", "philosophy", "general"] = (
-        "psychology"
+    category: str = Field(
+        default="psychology",
+        min_length=1,
+        max_length=80,
+        description="Free-text niche/category for prompt voice (e.g. psychology, true crime).",
     )
     item_limit: int | None = Field(
         None, gt=0, le=100,
@@ -796,6 +805,18 @@ class CreateAudioScript(BaseModel):
     word_count: int | None = Field(
         None, ge=100, le=500,
         description="Target words per item. Default: SOP 265–270.",
+    )
+    overall_word_limit: int | None = Field(
+        None,
+        ge=100,
+        le=150000,
+        description=(
+            "Optional total word budget for the whole script. When omitted, "
+            "titles like '3 Hours of …' derive a budget from ~130 wpm. "
+            "Without word_count, per-item target is overall ÷ item count "
+            "(clamped 100–500). When both are set and word_count × items "
+            "exceeds overall, overall wins."
+        ),
     )
     voice_id: str | None = Field(
         None, description="Override ELEVENLABS_VOICE_ID for this job.",
@@ -815,6 +836,14 @@ class CreateAudioScript(BaseModel):
     skip_audio: bool = Field(
         False, description="If true, only generate transcript (no ElevenLabs).",
     )
+
+    @field_validator("category")
+    @classmethod
+    def _strip_category(cls, v: str) -> str:
+        text = (v or "").strip()
+        if not text:
+            raise ValueError("category is required")
+        return text
 
 
 class RegenerateAudioScript(BaseModel):
@@ -978,6 +1007,15 @@ def _run_audio_script(
     feedback: str | None = None,
 ) -> None:
     item_count = resolve_item_count(req.title, req.item_limit)
+    overall_word_limit = resolve_overall_word_limit(
+        req.title, req.overall_word_limit,
+    )
+    effective_word_count = resolve_effective_word_count(
+        item_count,
+        word_count=req.word_count,
+        overall_word_limit=overall_word_limit,
+    )
+    duration_minutes = parse_title_duration_minutes(req.title)
     try:
         _set_as_state(
             script_id,
@@ -986,6 +1024,9 @@ def _run_audio_script(
             started_at=_now_iso(),
             item_count=item_count,
             progress={"done": 0, "total": item_count},
+            target_duration_minutes=duration_minutes,
+            overall_word_limit=overall_word_limit,
+            effective_word_count=effective_word_count,
             error=None,
             error_detail=None,
         )
@@ -997,7 +1038,7 @@ def _run_audio_script(
             req.title,
             category=req.category,
             item_count=item_count,
-            word_count=req.word_count,
+            word_count=effective_word_count,
             feedback=feedback,
             on_progress=on_progress,
         )
@@ -1117,6 +1158,7 @@ def create_audio_script(req: CreateAudioScript, background_tasks: BackgroundTask
         category=req.category,
         item_limit=req.item_limit,
         word_count=req.word_count,
+        overall_word_limit=req.overall_word_limit,
         skip_audio=req.skip_audio,
         created_at=_now_iso(),
         stage=AudioScriptStage.QUEUED,

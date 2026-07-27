@@ -43,6 +43,16 @@ def test_parse_promised_count_from_subtitle():
     ) == 250
 
 
+def test_parse_promised_count_level_range():
+    """'Level 1 to 100 … Secrets' must resolve to 100, not the start digit 1."""
+    title = "Level 1 to 100 Social Intelligence Secrets That Get Darker as You Go"
+    assert parse_promised_count(title, "") == 100
+    assert parse_promised_count("1-50 Dark Psychology Tricks", "") == 50
+    assert parse_promised_count("Levels 1–25 Relationship Habits", "") == 25
+    assert parse_promised_count("100 Dark Psychology Tricks", "") == 100
+    assert parse_promised_count("4 Quick Pan Suppers", "") == 4
+
+
 def test_parse_promised_count_none():
     assert parse_promised_count("Pest Guide", "How to Fight Roaches Without Paying Hundreds") is None
 

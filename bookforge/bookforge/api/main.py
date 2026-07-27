@@ -61,6 +61,7 @@ from bookforge.pipeline.readiness import (
 from bookforge.pipeline.audio_script import (
     estimate_duration_fit,
     generate_audio_script,
+    generic_min_per_item,
     parse_title_duration_minutes,
     resolve_effective_word_count,
     resolve_item_count,
@@ -1036,6 +1037,8 @@ def _run_audio_script(
         item_count,
         word_count=req.word_count,
         overall_word_limit=overall_word_limit,
+        min_per_item=generic_min_per_item(req.title, req.overall_word_limit),
+        title=req.title,
     )
     duration_minutes = parse_title_duration_minutes(req.title)
     try:
@@ -1061,6 +1064,7 @@ def _run_audio_script(
             category=req.category,
             item_count=item_count,
             word_count=effective_word_count,
+            overall_word_limit=overall_word_limit,
             feedback=feedback,
             on_progress=on_progress,
         )

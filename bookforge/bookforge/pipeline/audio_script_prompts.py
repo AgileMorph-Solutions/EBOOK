@@ -47,6 +47,37 @@ def feedback_block(feedback: str | None) -> str:
     )
 
 
+def _format_runtime_label(minutes: int) -> str:
+    hours, mins = divmod(minutes, 60)
+    if hours and mins:
+        return f"{hours} hour{'s' if hours != 1 else ''} {mins} minutes"
+    if hours:
+        return f"{hours} hour{'s' if hours != 1 else ''}"
+    return f"{minutes} minutes"
+
+
+def duration_context_block(
+    title: str,
+    *,
+    target_duration_minutes: int | None,
+    overall_word_limit: int | None = None,
+    item_count: int | None = None,
+) -> str:
+    """Runtime contract for duration titles like '3 Hours of …'."""
+    if not target_duration_minutes:
+        return ""
+    label = _format_runtime_label(target_duration_minutes)
+    words = overall_word_limit or target_duration_minutes * 130
+    items = item_count or "many"
+    return (
+        f"\n\nRUNTIME CONTRACT — the title promises ~{label} of spoken narration "
+        f"(~{words:,} words across {items} items). The listener expects the FULL "
+        f"runtime — not a highlight reel. Every item must hit its word band; "
+        f"thin or rushed sections will leave the final audio shorter than "
+        f"\"{title}\" promises. Write complete, fully developed segments."
+    )
+
+
 def brainstorm_system(category: str) -> str:
     domain = category_voice(category)
     return (
@@ -57,7 +88,14 @@ def brainstorm_system(category: str) -> str:
     )
 
 
-def brainstorm_user(title: str, count: int, feedback: str | None = None) -> str:
+def brainstorm_user(
+    title: str,
+    count: int,
+    feedback: str | None = None,
+    *,
+    target_duration_minutes: int | None = None,
+    overall_word_limit: int | None = None,
+) -> str:
     return (
         f'Write a detailed script plan for the title: "{title}".\n\n'
         f"List exactly {count} distinct concepts/secrets/items for this title. "
@@ -66,6 +104,7 @@ def brainstorm_user(title: str, count: int, feedback: str | None = None) -> str:
         "'Foot in the door escalation'). Never use Title Case like "
         "'Foot In The Door Escalation'. No trailing period on titles. "
         "No duplicates, no near-synonyms. Order for maximum retention across the full list."
+        f"{duration_context_block(title, target_duration_minutes=target_duration_minutes, overall_word_limit=overall_word_limit, item_count=count)}"
         f"{feedback_block(feedback)}"
     )
 
@@ -85,6 +124,9 @@ def refine_user(
     concepts: list[str],
     count: int,
     feedback: str | None = None,
+    *,
+    target_duration_minutes: int | None = None,
+    overall_word_limit: int | None = None,
 ) -> str:
     listing = "\n".join(f"  {i + 1}. {c}" for i, c in enumerate(concepts))
     return (
@@ -93,18 +135,27 @@ def refine_user(
         "(first word capital only; e.g. 'Identity protection', not "
         "'Identity Protection').\n\n"
         f"CURRENT LIST:\n{listing}"
+        f"{duration_context_block(title, target_duration_minutes=target_duration_minutes, overall_word_limit=overall_word_limit, item_count=count)}"
         f"{feedback_block(feedback)}"
     )
 
 
-def item_system(category: str, word_min: int = 265, word_max: int = 270) -> str:
+def item_system(
+    category: str,
+    word_min: int = 265,
+    word_max: int = 270,
+    *,
+    duration_context: str = "",
+) -> str:
     domain = category_voice(category)
     return (
         f"You are a late-night narration scriptwriter for {domain} audio. "
         "Speak to one listener like a sharp, warm friend — conversational and "
         "sticky, never like an encyclopedia entry. No bullet points, no headers "
         "inside the body — only flowing paragraphs.\n\n"
-        f"LENGTH: {word_min}–{word_max} words total. Use natural paragraph breaks.\n\n"
+        f"LENGTH: {word_min}–{word_max} words total — treat {word_max} as the "
+        f"target when the title promises a long runtime. Shorter drafts fail QA. "
+        "Use natural paragraph breaks.\n\n"
         "SOFT ARC (do not use fixed sentence starters):\n"
         "- Hook the listener with a scene, question, or vivid moment.\n"
         "- Make the idea concrete with \"you\" and everyday examples.\n"
@@ -123,6 +174,7 @@ def item_system(category: str, word_min: int = 265, word_max: int = 270) -> str:
         "Return the concept title in sentence case (first word capital only).\n\n"
         f"EXAMPLE (match conversational tone — do NOT copy content):\n\n"
         f"{_EXAMPLE_ITEM}"
+        f"{duration_context}"
     )
 
 
@@ -134,14 +186,19 @@ def item_user(
     word_min: int = 265,
     word_max: int = 270,
     feedback: str | None = None,
+    *,
+    duration_context: str = "",
 ) -> str:
     return (
         f'Narration title: "{title}"\n'
         f"Write item {number} of {total}: \"{concept_title}\".\n\n"
         "Make it conversational and high-retention — not encyclopedic. "
         "Vary your opening; do not use banned stock phrases. Word length MUST "
-        f"be between {word_min} and {word_max} words. Use natural paragraph breaks. "
+        f"be between {word_min} and {word_max} words — aim for the top of the "
+        f"band ({word_max}) when the title promises a long listening session. "
+        "Use natural paragraph breaks. "
         "Return the concept title in sentence case and the body as separate paragraphs."
+        f"{duration_context}"
         f"{feedback_block(feedback)}"
     )
 
@@ -154,16 +211,24 @@ def item_rewrite_user(
     word_min: int = 265,
     word_max: int = 270,
     feedback: str | None = None,
+    *,
+    duration_context: str = "",
 ) -> str:
     body = "\n\n".join(paragraphs)
+    target_hint = (
+        f" Aim for {word_max} words when the title promises a long runtime."
+        if duration_context
+        else ""
+    )
     return (
         f'Narration title: "{title}"\n'
         f'Rewrite item "{concept_title}" to be exactly {word_min}–{word_max} words '
-        f"(current: {word_count} words). Keep the meaning and conversational tone. "
-        "Do not fall back into banned stock phrases "
+        f"(current: {word_count} words).{target_hint} Keep the meaning and "
+        "conversational tone. Do not fall back into banned stock phrases "
         "(\"is one of the most…\", \"This becomes powerful because…\", "
         "\"The unsettling part is…\", \"Once you understand…\"). "
         "Vary the opening. Return body as separate paragraphs.\n\n"
         f"CURRENT DRAFT:\n{body}"
+        f"{duration_context}"
         f"{feedback_block(feedback)}"
     )

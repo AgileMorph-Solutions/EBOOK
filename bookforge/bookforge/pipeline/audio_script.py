@@ -27,14 +27,25 @@ _SOP_WORD_MAX = 270
 _SOP_WORD_TARGET = 267
 _PER_ITEM_WORD_MIN = 100
 _PER_ITEM_WORD_MAX = 500
+# Generic titles (no count, no duration, no explicit cap): cap total length and
+# size 2–4 substantial sections so scripts are not thin ~150-word teasers.
+_GENERIC_SECTION_TARGET = 300
+_GENERIC_MIN_SECTIONS = 2
+_GENERIC_MAX_SECTIONS = 4
+_GENERIC_MIN_PER_ITEM = 200
 # Spoken narration pacing used to size titles like "3 Hours of …"
 _DURATION_WORDS_PER_MINUTE = 130
+# Extra headroom so TTS + slight underwrites still meet the title runtime
+# (10–15 min over a 3-hour title is acceptable; under-running is not).
+_DURATION_WORD_BUFFER = 1.10
 # Duration-derived item counts may exceed AUDIO_SCRIPT_MAX_ITEMS so long
 # runtimes stay near the promised listening time at SOP density.
 _DURATION_ITEM_CAP = 500
 
+# Amounts may be whole or decimal hours ("1.5 Hours", "2.25 hrs"). Digits-only
+# would match the trailing "5" in "1.5 Hours" as a fake 5-hour runtime.
 _TITLE_DURATION_RE = re.compile(
-    r"\b(?P<amount>\d{1,3})\s*(?P<unit>hours?|hrs?|minutes?|mins?)\b",
+    r"\b(?P<amount>\d{1,3}(?:\.\d{1,2})?)\s*(?P<unit>hours?|hrs?|minutes?|mins?)\b",
     re.IGNORECASE,
 )
 
@@ -97,8 +108,33 @@ def is_generic_audio_title(title: str) -> bool:
     )
 
 
-def _derive_item_count_from_word_budget(budget: int, *, cap: int | None = None) -> int:
-    """Section count from an overall word budget at SOP item density."""
+def duration_word_budget(minutes: int) -> int:
+    """Total words to generate for a duration title (includes TTS headroom)."""
+    return int(minutes * _DURATION_WORDS_PER_MINUTE * _DURATION_WORD_BUFFER)
+
+
+def is_duration_audio_title(title: str) -> bool:
+    return parse_title_duration_minutes(title) is not None
+
+
+def _derive_item_count_from_word_budget(
+    budget: int,
+    *,
+    cap: int | None = None,
+    generic: bool = False,
+) -> int:
+    """Section count from an overall word budget.
+
+    Generic titles use fewer, meatier sections (~300 w/section, 2–4 items) so
+    the script fills out the topic instead of many thin ~150-word slices.
+    Duration/count titles use SOP density (~267 w/section).
+    """
+    if generic:
+        derived = round(budget / _GENERIC_SECTION_TARGET)
+        return max(
+            _GENERIC_MIN_SECTIONS,
+            min(_GENERIC_MAX_SECTIONS, derived),
+        )
     derived = round(budget / _SOP_WORD_TARGET)
     max_items = cap if cap is not None else settings.audio_script_max_items
     return max(1, min(derived, max_items))
@@ -127,9 +163,8 @@ def resolve_item_count(
         return max(1, min(promised, settings.audio_script_max_items))
     duration_minutes = parse_title_duration_minutes(title)
     if duration_minutes is not None:
-        derived = round(
-            (duration_minutes * _DURATION_WORDS_PER_MINUTE) / _SOP_WORD_TARGET
-        )
+        budget = duration_word_budget(duration_minutes)
+        derived = round(budget / _SOP_WORD_TARGET)
         cap = max(settings.audio_script_max_items, _DURATION_ITEM_CAP)
         return max(1, min(derived, cap))
     if is_generic_audio_title(title):
@@ -138,46 +173,57 @@ def resolve_item_count(
             if overall_word_limit is not None and overall_word_limit > 0
             else settings.audio_script_generic_default_words
         )
-        return _derive_item_count_from_word_budget(budget)
+        return _derive_item_count_from_word_budget(budget, generic=True)
     return max(1, settings.audio_script_max_items)
 
 
 def parse_title_duration_minutes(title: str) -> int | None:
-    """Extract a requested runtime from titles like ``3 Hours of ...``."""
+    """Extract a requested runtime from titles like ``3 Hours`` / ``1.5 Hours``."""
     text = title or ""
     match = _TITLE_DURATION_RE.search(text)
     if match:
-        amount = int(match.group("amount"))
+        amount = float(match.group("amount"))
         unit = match.group("unit").lower()
     else:
         spelled = _SPELLED_DURATION_RE.search(text)
         if not spelled:
             return None
-        amount = _SPELLED_ONES[spelled.group("word").lower()]
+        amount = float(_SPELLED_ONES[spelled.group("word").lower()])
         unit = spelled.group("unit").lower()
     if amount <= 0:
         return None
     if unit.startswith(("hour", "hr")):
-        return amount * 60
-    return amount
+        minutes = amount * 60
+    else:
+        minutes = amount
+    return max(1, int(round(minutes)))
 
 
 def _resolve_promised_item_count(title: str) -> int | None:
     """Return a title count unless it is actually a duration phrase.
 
     ``3 Hours of … Secrets`` would otherwise parse as ``3`` via the secrets
-    noun — ignore that when the digit matches the duration amount.
+    noun. ``1.5 Hours of … Tricks`` would otherwise parse the trailing ``5``
+    as five tricks. Suppress any marketing-count digit that overlaps the
+    duration amount token.
     """
     promised = parse_promised_count(title, "")
     if promised is None:
         return None
-    duration_minutes = parse_title_duration_minutes(title)
-    if duration_minutes is None:
+    text = title or ""
+    digit_duration = _TITLE_DURATION_RE.search(text)
+    if digit_duration is not None:
+        amount_start, amount_end = digit_duration.span("amount")
+        # Any \bdigits\b whose span overlaps the duration amount belongs to
+        # the runtime phrase, not an item count.
+        for m in re.finditer(r"\b(\d{1,4})\b", text):
+            if int(m.group(1)) != promised:
+                continue
+            if m.start() < amount_end and m.end() > amount_start:
+                return None
+            break
         return promised
-    digit_match = _TITLE_DURATION_RE.search(title or "")
-    if digit_match and int(digit_match.group("amount")) == promised:
-        return None
-    spelled = _SPELLED_DURATION_RE.search(title or "")
+    spelled = _SPELLED_DURATION_RE.search(text)
     if spelled and _SPELLED_ONES[spelled.group("word").lower()] == promised:
         return None
     return promised
@@ -192,7 +238,7 @@ def resolve_overall_word_limit(
         return int(overall_word_limit)
     duration_minutes = parse_title_duration_minutes(title)
     if duration_minutes is not None:
-        return duration_minutes * _DURATION_WORDS_PER_MINUTE
+        return duration_word_budget(duration_minutes)
     if is_generic_audio_title(title):
         return settings.audio_script_generic_default_words
     return None
@@ -224,6 +270,11 @@ def estimate_duration_fit(
         if duration_minutes is not None
         else None
     )
+    generation_budget = (
+        duration_word_budget(duration_minutes)
+        if duration_minutes is not None
+        else None
+    )
     estimated_minutes_from_cap = (
         cap / _DURATION_WORDS_PER_MINUTE if cap is not None else None
     )
@@ -248,6 +299,7 @@ def estimate_duration_fit(
     return {
         "title_duration_minutes": duration_minutes,
         "words_needed": words_needed,
+        "generation_word_budget": generation_budget,
         "overall_word_limit": cap,
         "estimated_minutes_from_cap": estimated_minutes_from_cap,
         "words_per_minute": _DURATION_WORDS_PER_MINUTE,
@@ -272,6 +324,9 @@ def resolve_effective_word_count(
     item_count: int,
     word_count: int | None = None,
     overall_word_limit: int | None = None,
+    *,
+    min_per_item: int | None = None,
+    title: str | None = None,
 ) -> int | None:
     """Resolve per-item word target from ``word_count`` and/or overall budget.
 
@@ -279,12 +334,21 @@ def resolve_effective_word_count(
     ``resolve_word_band``). When both are set and
     ``word_count * item_count`` exceeds the overall budget, the overall
     budget wins (per-item target = overall // item_count, clamped 100–500).
+
+    Duration titles without an explicit ``word_count`` use the full SOP band
+    (265–270) whenever it fits the generation budget — floor-division per-item
+    targets (e.g. 265) caused systematic under-runs vs promised runtime.
     """
     n = max(1, int(item_count))
+    floor = (
+        min_per_item
+        if min_per_item is not None
+        else _PER_ITEM_WORD_MIN
+    )
     derived: int | None = None
     if overall_word_limit is not None and overall_word_limit > 0:
         derived = max(
-            _PER_ITEM_WORD_MIN,
+            floor,
             min(_PER_ITEM_WORD_MAX, overall_word_limit // n),
         )
 
@@ -297,7 +361,24 @@ def resolve_effective_word_count(
             return derived
         return int(word_count)
 
+    if (
+        derived is not None
+        and title
+        and is_duration_audio_title(title)
+        and n * _SOP_WORD_TARGET <= overall_word_limit
+    ):
+        return None
+
     return derived
+
+
+def generic_min_per_item(title: str, overall_word_limit: int | None) -> int | None:
+    """Higher per-section floor for default-sized generic titles."""
+    if overall_word_limit is not None:
+        return None
+    if is_generic_audio_title(title):
+        return _GENERIC_MIN_PER_ITEM
+    return None
 
 
 def word_count(text: str) -> int:
@@ -351,9 +432,16 @@ def _brainstorm(
     count: int,
     category: str,
     feedback: str | None = None,
+    *,
+    target_duration_minutes: int | None = None,
+    overall_word_limit: int | None = None,
 ) -> list[str]:
     result = llm.structured(
-        prompts.brainstorm_user(title, count, feedback=feedback),
+        prompts.brainstorm_user(
+            title, count, feedback=feedback,
+            target_duration_minutes=target_duration_minutes,
+            overall_word_limit=overall_word_limit,
+        ),
         _ConceptList,
         system=prompts.brainstorm_system(category),
         model=settings.content_model,
@@ -371,9 +459,16 @@ def _refine(
     count: int,
     category: str,
     feedback: str | None = None,
+    *,
+    target_duration_minutes: int | None = None,
+    overall_word_limit: int | None = None,
 ) -> list[str]:
     result = llm.structured(
-        prompts.refine_user(title, concepts, count, feedback=feedback),
+        prompts.refine_user(
+            title, concepts, count, feedback=feedback,
+            target_duration_minutes=target_duration_minutes,
+            overall_word_limit=overall_word_limit,
+        ),
         _ConceptList,
         system=prompts.refine_system(category),
         model=settings.content_model,
@@ -400,32 +495,50 @@ def _write_item(
     word_min: int,
     word_max: int,
     feedback: str | None = None,
+    duration_context: str = "",
 ) -> AudioScriptItem:
+    max_rewrites = 3 if duration_context else 2
     draft = llm.structured(
         prompts.item_user(
             title, concept_title, number, total,
             word_min=word_min, word_max=word_max,
             feedback=feedback,
+            duration_context=duration_context,
         ),
         _ItemDraft,
-        system=prompts.item_system(category, word_min=word_min, word_max=word_max),
+        system=prompts.item_system(
+            category, word_min=word_min, word_max=word_max,
+            duration_context=duration_context,
+        ),
         model=settings.draft_model,
         max_tokens=2000,
     )
     body = body_from_paragraphs(draft.paragraphs)
     wc = word_count(body)
 
-    if wc < word_min or wc > word_max:
-        log.info("item_rewrite", concept=concept_title, words=wc,
-                 word_min=word_min, word_max=word_max)
+    for attempt in range(max_rewrites):
+        if word_min <= wc <= word_max:
+            break
+        log.info(
+            "item_rewrite",
+            concept=concept_title,
+            words=wc,
+            word_min=word_min,
+            word_max=word_max,
+            attempt=attempt + 1,
+        )
         draft = llm.structured(
             prompts.item_rewrite_user(
                 title, concept_title, draft.paragraphs, wc,
                 word_min=word_min, word_max=word_max,
                 feedback=feedback,
+                duration_context=duration_context,
             ),
             _ItemDraft,
-            system=prompts.item_system(category, word_min=word_min, word_max=word_max),
+            system=prompts.item_system(
+                category, word_min=word_min, word_max=word_max,
+                duration_context=duration_context,
+            ),
             model=settings.draft_model,
             max_tokens=2000,
         )
@@ -447,12 +560,32 @@ def generate_audio_script(
     category: str = "psychology",
     item_count: int | None = None,
     word_count: int | None = None,
+    overall_word_limit: int | None = None,
     feedback: str | None = None,
     on_progress: ProgressFn | None = None,
 ) -> AudioScriptResult:
     """Run brainstorm → refine → write and return a transcript result."""
-    count = item_count if item_count is not None else resolve_item_count(title)
-    word_min, word_max, word_target = resolve_word_band(word_count)
+    resolved_overall = resolve_overall_word_limit(title, overall_word_limit)
+    count = (
+        item_count
+        if item_count is not None
+        else resolve_item_count(title, overall_word_limit=resolved_overall)
+    )
+    effective_word_count = resolve_effective_word_count(
+        count,
+        word_count=word_count,
+        overall_word_limit=resolved_overall,
+        min_per_item=generic_min_per_item(title, overall_word_limit),
+        title=title,
+    )
+    word_min, word_max, word_target = resolve_word_band(effective_word_count)
+    target_duration_minutes = parse_title_duration_minutes(title)
+    duration_context = prompts.duration_context_block(
+        title,
+        target_duration_minutes=target_duration_minutes,
+        overall_word_limit=resolved_overall,
+        item_count=count,
+    )
     revision = (feedback or "").strip() or None
     log.info(
         "audio_script_start",
@@ -462,6 +595,8 @@ def generate_audio_script(
         word_min=word_min,
         word_max=word_max,
         word_target=word_target,
+        overall_word_limit=resolved_overall,
+        target_duration_minutes=target_duration_minutes,
         has_feedback=bool(revision),
     )
 
@@ -470,14 +605,22 @@ def generate_audio_script(
             on_progress(stage, done, total)
 
     _progress(AudioScriptStage.BRAINSTORMING, 0, count)
-    concepts = _brainstorm(title, count, category, feedback=revision)
+    concepts = _brainstorm(
+        title, count, category, feedback=revision,
+        target_duration_minutes=target_duration_minutes,
+        overall_word_limit=resolved_overall,
+    )
     if len(concepts) < count:
         raise ValueError(
             f"Brainstorm returned only {len(concepts)} concepts; need {count}"
         )
 
     _progress(AudioScriptStage.REFINING_LIST, 0, count)
-    concepts = _refine(title, concepts, count, category, feedback=revision)
+    concepts = _refine(
+        title, concepts, count, category, feedback=revision,
+        target_duration_minutes=target_duration_minutes,
+        overall_word_limit=resolved_overall,
+    )
 
     _progress(AudioScriptStage.WRITING_ITEMS, 0, count)
     items: list[AudioScriptItem | None] = [None] * count
@@ -490,6 +633,7 @@ def generate_audio_script(
             title, concept, idx + 1, count, category,
             word_min=word_min, word_max=word_max,
             feedback=revision,
+            duration_context=duration_context,
         )
         items[idx] = item
         with done_lock:

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from bookforge.pipeline.audio_script import (
     body_from_paragraphs,
+    duration_word_budget,
     estimate_duration_fit,
     format_transcript,
     is_generic_audio_title,
@@ -14,6 +15,7 @@ from bookforge.pipeline.audio_script import (
     to_sentence_case,
     word_count,
 )
+from bookforge.pipeline.audio_script import _SOP_WORD_TARGET
 from bookforge.pipeline.audio_script_prompts import (
     brainstorm_user,
     category_voice,
@@ -56,6 +58,15 @@ def test_resolve_item_count_from_title():
     assert resolve_item_count(title, item_limit=5) == 5
 
 
+def test_resolve_item_count_from_level_range_title():
+    title = "Level 1 to 100 Social Intelligence Secrets That Get Darker as You Go"
+    assert resolve_item_count(title) == 100
+    overall = resolve_overall_word_limit(title)
+    # Counted title — no generic 1000-word cap
+    assert overall is None
+    assert resolve_effective_word_count(100, overall_word_limit=overall) is None
+
+
 def test_resolve_item_count_limit_overrides_title_number():
     title = "3 Hours of Emotional Control Secrets to Fall Asleep To"
     # Without item_limit, duration wins — not the bare "3".
@@ -70,27 +81,48 @@ def test_parse_title_duration_minutes():
     assert parse_title_duration_minutes("45 Minutes of Calm Breathwork") == 45
     assert parse_title_duration_minutes("Three Hours of Stoic Wisdom") == 180
     assert parse_title_duration_minutes("100 Dark Psychology Tricks") is None
+    # Decimal hours must not be misread as the trailing digit (1.5 → 5 hours).
+    assert parse_title_duration_minutes(
+        "1.5 Hours of Dark Psychology Tricks to Fall Asleep To"
+    ) == 90
+    assert parse_title_duration_minutes("2.25 hours of calm rain sounds") == 135
+    assert parse_title_duration_minutes("90.5 minutes of focus") == 90
+
+
+def test_decimal_hour_title_sizes_near_runtime():
+    title = "1.5 Hours of Dark Psychology Tricks to Fall Asleep To"
+    assert resolve_item_count(title) != 5  # not the trailing digit as item count
+    overall = resolve_overall_word_limit(title)
+    items = resolve_item_count(title, overall_word_limit=overall)
+    assert overall == duration_word_budget(90)
+    # ~1.5h at 130 wpm with 10% headroom
+    est_minutes = (items * _SOP_WORD_TARGET) / 130
+    assert 90 <= est_minutes <= 110
+    assert overall < duration_word_budget(180)  # must not size like 3h+
 
 
 def test_duration_title_sizes_near_runtime():
     title = "3 Hours of Emotional Control Secrets to Fall Asleep To"
     items = resolve_item_count(title)
     overall = resolve_overall_word_limit(title)
-    per_item = resolve_effective_word_count(items, overall_word_limit=overall)
-    assert overall == 180 * 130
-    assert per_item is not None
-    # ~3 hours at 130 wpm (±10%)
-    est_minutes = (items * per_item) / 130
-    assert 162 <= est_minutes <= 198
+    per_item = resolve_effective_word_count(
+        items, overall_word_limit=overall, title=title,
+    )
+    assert overall == duration_word_budget(180)
+    assert per_item is None  # SOP 265–270 band
+    # ~3 hours at 130 wpm with 10% headroom (±10%)
+    est_minutes = (items * _SOP_WORD_TARGET) / 130
+    assert est_minutes >= 180
+    assert est_minutes <= 220
 
 
 def test_duration_plus_count_keeps_count_and_duration_budget():
     title = "100 Secrets for 3 Hours of Deep Focus"
     assert resolve_item_count(title) == 100
     overall = resolve_overall_word_limit(title)
-    assert overall == 180 * 130
-    per_item = resolve_effective_word_count(100, overall_word_limit=overall)
-    assert per_item == 234  # 23400 // 100
+    assert overall == duration_word_budget(180)
+    per_item = resolve_effective_word_count(100, overall_word_limit=overall, title=title)
+    assert per_item == 257  # 25740 // 100
 
 
 def test_estimate_duration_fit_conflict():
@@ -136,22 +168,26 @@ def test_resolve_item_count_generic():
     title = "How To Think Clearly"
     overall = resolve_overall_word_limit(title)
     assert overall == 1000
-    assert resolve_item_count(title, overall_word_limit=overall) == 4  # round(1000/267)
+    assert resolve_item_count(title, overall_word_limit=overall) == 3  # round(1000/300)
 
 
 def test_generic_sizing_end_to_end():
     title = "How to die single"
     overall = resolve_overall_word_limit(title)
     items = resolve_item_count(title, overall_word_limit=overall)
-    per_item = resolve_effective_word_count(items, overall_word_limit=overall)
+    per_item = resolve_effective_word_count(
+        items,
+        overall_word_limit=overall,
+        min_per_item=200,
+    )
     assert overall == 1000
-    assert items == 4
-    assert per_item == 250
-    assert items * per_item == 1000
+    assert items == 3
+    assert per_item == 333  # 1000 // 3
+    assert items * per_item == 999
 
 
 def test_resolve_item_count_default():
-    assert resolve_item_count("How To Think Clearly", overall_word_limit=1000) == 4
+    assert resolve_item_count("How To Think Clearly", overall_word_limit=1000) == 3
 
 
 def test_resolve_word_band_default_sop():
@@ -162,6 +198,14 @@ def test_resolve_word_band_default_sop():
 def test_resolve_word_band_custom():
     word_min, word_max, target = resolve_word_band(200)
     assert (word_min, word_max, target) == (195, 205, 200)
+
+
+def test_generic_min_per_item():
+    from bookforge.pipeline.audio_script import generic_min_per_item
+
+    assert generic_min_per_item("How to think clearly", None) == 200
+    assert generic_min_per_item("How to think clearly", 500) is None
+    assert generic_min_per_item("100 Dark Psychology Tricks", None) is None
 
 
 def test_resolve_effective_word_count_neither():
@@ -211,6 +255,38 @@ def test_to_sentence_case():
     assert to_sentence_case("  identity Protection  ") == "Identity protection"
     assert to_sentence_case("") == ""
     assert to_sentence_case("map-territory distinction") == "Map-territory distinction"
+
+
+def test_duration_context_in_prompts():
+    from bookforge.pipeline.audio_script_prompts import (
+        brainstorm_user,
+        duration_context_block,
+        item_user,
+    )
+
+    ctx = duration_context_block(
+        "3 Hours of Dark Psychology",
+        target_duration_minutes=180,
+        overall_word_limit=25740,
+        item_count=96,
+    )
+    assert "3 hours" in ctx.lower()
+    assert "RUNTIME CONTRACT" in ctx
+    assert "25,740" in ctx
+
+    brainstorm = brainstorm_user(
+        "3 Hours of Dark Psychology", 96,
+        target_duration_minutes=180,
+        overall_word_limit=25740,
+    )
+    assert "RUNTIME CONTRACT" in brainstorm
+
+    item = item_user(
+        "3 Hours of Dark Psychology", "Foot in the door", 1, 96,
+        duration_context=ctx,
+    )
+    assert "top of the band" in item
+    assert "RUNTIME CONTRACT" in item
 
 
 def test_item_system_bans_stock_phrases():

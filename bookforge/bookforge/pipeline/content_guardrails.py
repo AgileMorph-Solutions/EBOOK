@@ -73,15 +73,33 @@ _TITLE_COUNT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# "Level 1 to 100 … Secrets" / "1-50 tips" — take the range end, not the start
+# digit (which _TITLE_COUNT_RE would otherwise latch onto as the count).
+_RANGE_COUNT_RE = re.compile(
+    r"\b(?:levels?\s+)?(\d{1,4})\s*(?:to|-|–|—)\s*(\d{1,4})\b",
+    re.IGNORECASE,
+)
+
 
 def parse_promised_count(title: str, subtitle: str) -> int | None:
     """Extract a marketing count from title or subtitle — digits ('250 ways') or
-    spelled-out ('Fourteen Habits')."""
+    spelled-out ('Fourteen Habits').
+
+    Ranges like ``Level 1 to 100 Secrets`` resolve to the **end** of the range
+    (100), not the start digit (1).
+    """
     for text in (subtitle, title):
-        m = _TITLE_COUNT_RE.search(text or "")
+        if not text:
+            continue
+        ranged = _RANGE_COUNT_RE.search(text)
+        if ranged:
+            lo, hi = int(ranged.group(1)), int(ranged.group(2))
+            if hi > lo >= 1:
+                return hi
+        m = _TITLE_COUNT_RE.search(text)
         if m:
             return int(m.group(1))
-        w = _WORD_COUNT_RE.search(text or "")
+        w = _WORD_COUNT_RE.search(text)
         if w:
             n = _word_to_int(w.group(1))
             if n:

@@ -199,8 +199,8 @@ def test_post_generic_title_defaults_to_1000_words():
     assert res.status_code == 202
     script_id = res.json()["script_id"]
     gen.assert_called_once()
-    assert gen.call_args.kwargs.get("item_count") == 4
-    assert gen.call_args.kwargs.get("word_count") == 250
+    assert gen.call_args.kwargs.get("item_count") == 3
+    assert gen.call_args.kwargs.get("word_count") == 333
 
     from bookforge.api.main import _as_request_path, _read_as_state
     import json
@@ -210,8 +210,8 @@ def test_post_generic_title_defaults_to_1000_words():
     status = client.get(f"/audio-scripts/{script_id}")
     body = status.json()
     assert body.get("overall_word_limit") == 1000
-    assert body.get("item_count") == 4
-    assert body.get("effective_word_count") == 250
+    assert body.get("item_count") == 3
+    assert body.get("effective_word_count") == 333
 
 
 def test_post_overall_word_limit_derives_per_item():
@@ -266,14 +266,16 @@ def test_post_duration_title_derives_length():
         )
     assert res.status_code == 202
     gen.assert_called_once()
-    # ~180 min * 130 wpm / 267 ≈ 88 items; per-item ≈ 265
-    assert gen.call_args.kwargs.get("item_count") == 88
-    assert gen.call_args.kwargs.get("word_count") == 265
+    # ~180 min * 130 wpm * 1.10 buffer / 267 ≈ 96 items; SOP 265–270 band
+    assert gen.call_args.kwargs.get("item_count") == 96
+    assert gen.call_args.kwargs.get("word_count") is None
+    assert gen.call_args.kwargs.get("overall_word_limit") == 25740
 
     status = client.get(f"/audio-scripts/{res.json()['script_id']}")
     body = status.json()
     assert body.get("target_duration_minutes") == 180
-    assert body.get("overall_word_limit") == 23400
+    assert body.get("overall_word_limit") == 25740
+    assert body.get("effective_word_count") is None
 
 
 def test_post_estimate_duration_conflict():

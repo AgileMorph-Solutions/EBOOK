@@ -33,13 +33,34 @@ API_PUBLIC_BASE_URL=http://localhost:8011
 ## API
 
 ```
-GET  /audio-scripts
-POST /audio-scripts
-GET  /audio-scripts/{script_id}
-GET  /audio-scripts/{script_id}/audio
+GET    /voice-models
+POST   /voice-models
+DELETE /voice-models/{id}
+GET    /audio-scripts
+POST   /audio-scripts
+GET    /audio-scripts/{script_id}
+GET    /audio-scripts/{script_id}/audio
 ```
 
-### POST
+### Voice models (Postgres)
+
+Presets are stored in the `voice_models` table. The create form loads them for TTS voice selection; users can add new presets by ElevenLabs voice ID.
+
+```bash
+# List presets (default first)
+curl -s http://localhost:8011/voice-models
+
+# Add a preset
+curl -X POST http://localhost:8011/voice-models \
+  -H 'content-type: application/json' \
+  -d '{"name":"British narrator","voice_id":"YOUR_VOICE_ID","model_id":"eleven_multilingual_v2"}'
+```
+
+Run migrations after deploy: `docker compose exec api alembic upgrade head`
+
+Migration `0002` seeds a **Default narrator** row from the standard ElevenLabs IDs.
+
+### POST /audio-scripts
 
 ```json
 {
@@ -63,7 +84,7 @@ GET  /audio-scripts/{script_id}/audio
 
 - `category` (optional string): free-text niche for prompt voice. Known values (`psychology`, `relationship`, `philosophy`, `general`) get richer domain phrasing; any other text is used as-is.
 - `word_count` (optional, 100–500): target words per item. Omit → SOP **265–270**, or derived from `overall_word_limit` / title duration when set. When set, rewrite band is **target ± 5**.
-- `overall_word_limit` (optional, 100–150000): total word budget. When omitted, titles like `3 Hours of …` derive `minutes × 130` wpm. Without `word_count`, per-item target is `overall ÷ item_count` (clamped 100–500). When both are set and product exceeds overall, overall wins.
+- `overall_word_limit` (optional, 100–150000): total word budget. When omitted, duration titles derive `minutes × 130` wpm; **generic titles** (no count, no duration) default to **1000** words. Without `word_count`, per-item target is `overall ÷ item_count` (clamped 100–500). When both are set and product exceeds overall, overall wins.
 - Duration phrases in the title (`N hours` / `N minutes`, including spelled-out like `Three Hours`) size the script for that listening time; they are not treated as item counts.
 - Defaults (when `model_id` / `voice_settings` omitted): `eleven_multilingual_v2` and the voice settings above. Pass only the fields you want to override.
 

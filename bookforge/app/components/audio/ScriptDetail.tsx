@@ -69,6 +69,12 @@ export function ScriptDetail({
     : -1;
 
   const hasAudio = Boolean(script?.audio_link || script?.audio_key);
+  const hasTranscript = Boolean(script?.transcript?.trim());
+  const showResults =
+    script?.status === "done" ||
+    (script?.status === "failed" && hasTranscript);
+  const audioFailedOnly =
+    script?.status === "failed" && hasTranscript && !hasAudio;
 
   useEffect(() => {
     if (!hasAudio) {
@@ -216,11 +222,24 @@ export function ScriptDetail({
       {script?.status === "failed" && (
         <Alert variant="error">
           <p className="font-label text-label-md font-semibold">
-            Generation failed
+            {audioFailedOnly
+              ? "Audio generation failed"
+              : "Generation failed"}
           </p>
           <p className="mt-1 font-body text-body-sm">
             {script.error ?? "Something went wrong during script generation."}
           </p>
+          {script.error_detail && (
+            <p className="mt-2 font-body text-body-sm text-secondary">
+              {script.error_detail}
+            </p>
+          )}
+          {audioFailedOnly && (
+            <p className="mt-2 font-body text-body-sm text-on-surface">
+              The transcript was written successfully — you can copy or download
+              it below. Fix the voice preset and regenerate to create audio.
+            </p>
+          )}
           <div className="mt-4 flex flex-wrap items-center gap-3">
             <Button
               variant="surface"
@@ -243,7 +262,7 @@ export function ScriptDetail({
         </Alert>
       )}
 
-      {script?.status === "done" && (
+      {showResults && (
         <div className="space-y-6">
           {hasAudio && (
             <GlassPanel className="rounded-xl p-6 editorial-shadow">
@@ -316,7 +335,11 @@ export function ScriptDetail({
                 <span>{script.total_words} words</span>
               )}
               <span className="text-outline">
-                {hasAudio ? "Transcript + audio" : "Transcript only"}
+                {hasAudio
+                  ? "Transcript + audio"
+                  : audioFailedOnly
+                    ? "Transcript only (audio failed)"
+                    : "Transcript only"}
               </span>
               <div className="ml-auto flex flex-wrap items-center gap-2">
                 {!hasAudio && (

@@ -5,6 +5,7 @@ from bookforge.pipeline.audio_script import (
     body_from_paragraphs,
     estimate_duration_fit,
     format_transcript,
+    is_generic_audio_title,
     parse_title_duration_minutes,
     resolve_effective_word_count,
     resolve_item_count,
@@ -119,8 +120,38 @@ def test_estimate_duration_fit_no_conflict_without_cap():
     assert fit["conflict"] is False
 
 
+def test_is_generic_audio_title():
+    assert is_generic_audio_title("How To Think Clearly") is True
+    assert is_generic_audio_title("100 Dark Psychology Tricks") is False
+    assert is_generic_audio_title("3 Hours of Calm") is False
+    assert is_generic_audio_title("3 ways to die single") is False
+
+
+def test_resolve_overall_word_limit_generic():
+    assert resolve_overall_word_limit("How To Think Clearly") == 1000
+    assert resolve_overall_word_limit("How To Think Clearly", 500) == 500
+
+
+def test_resolve_item_count_generic():
+    title = "How To Think Clearly"
+    overall = resolve_overall_word_limit(title)
+    assert overall == 1000
+    assert resolve_item_count(title, overall_word_limit=overall) == 4  # round(1000/267)
+
+
+def test_generic_sizing_end_to_end():
+    title = "How to die single"
+    overall = resolve_overall_word_limit(title)
+    items = resolve_item_count(title, overall_word_limit=overall)
+    per_item = resolve_effective_word_count(items, overall_word_limit=overall)
+    assert overall == 1000
+    assert items == 4
+    assert per_item == 250
+    assert items * per_item == 1000
+
+
 def test_resolve_item_count_default():
-    assert resolve_item_count("How To Think Clearly") >= 1
+    assert resolve_item_count("How To Think Clearly", overall_word_limit=1000) == 4
 
 
 def test_resolve_word_band_default_sop():
@@ -185,7 +216,8 @@ def test_to_sentence_case():
 def test_item_system_bans_stock_phrases():
     system = item_system("psychology", word_min=195, word_max=205)
     assert "Opening hook:" not in system
-    assert "STRUCTURE (4–5 paragraphs" not in system
+    assert "4–5 paragraphs" not in system
+    assert "natural paragraph breaks" in system
     assert "BANNED stock phrases" in system
     assert "This becomes powerful because" in system  # listed as banned
     assert "Once you understand" in system  # listed as banned

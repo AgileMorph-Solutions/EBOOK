@@ -186,6 +186,34 @@ def test_post_rejects_blank_category():
     assert res.status_code == 422
 
 
+def test_post_generic_title_defaults_to_1000_words():
+    with patch("bookforge.api.main.generate_audio_script", return_value=_FAKE_RESULT) as gen:
+        res = client.post(
+            "/audio-scripts",
+            json={
+                "title": "How to think clearly",
+                "category": "psychology",
+                "skip_audio": True,
+            },
+        )
+    assert res.status_code == 202
+    script_id = res.json()["script_id"]
+    gen.assert_called_once()
+    assert gen.call_args.kwargs.get("item_count") == 4
+    assert gen.call_args.kwargs.get("word_count") == 250
+
+    from bookforge.api.main import _as_request_path, _read_as_state
+    import json
+    req = json.loads(_as_request_path(script_id).read_text())
+    assert req["overall_word_limit"] is None
+
+    status = client.get(f"/audio-scripts/{script_id}")
+    body = status.json()
+    assert body.get("overall_word_limit") == 1000
+    assert body.get("item_count") == 4
+    assert body.get("effective_word_count") == 250
+
+
 def test_post_overall_word_limit_derives_per_item():
     with patch("bookforge.api.main.generate_audio_script", return_value=_FAKE_RESULT) as gen:
         res = client.post(

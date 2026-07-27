@@ -77,7 +77,7 @@ class _ConceptList(BaseModel):
 class _ItemDraft(BaseModel):
     title: str
     paragraphs: list[str] = Field(
-        description="4–5 body paragraphs; no heading line in paragraphs.",
+        description="Body paragraphs; no heading line in paragraphs.",
     )
 
     @field_validator("paragraphs", mode="before")
@@ -89,7 +89,27 @@ class _ItemDraft(BaseModel):
         return v
 
 
-def resolve_item_count(title: str, item_limit: int | None = None) -> int:
+def is_generic_audio_title(title: str) -> bool:
+    """True when the title has no promised count and no duration phrase."""
+    return (
+        _resolve_promised_item_count(title) is None
+        and parse_title_duration_minutes(title) is None
+    )
+
+
+def _derive_item_count_from_word_budget(budget: int, *, cap: int | None = None) -> int:
+    """Section count from an overall word budget at SOP item density."""
+    derived = round(budget / _SOP_WORD_TARGET)
+    max_items = cap if cap is not None else settings.audio_script_max_items
+    return max(1, min(derived, max_items))
+
+
+def resolve_item_count(
+    title: str,
+    item_limit: int | None = None,
+    *,
+    overall_word_limit: int | None = None,
+) -> int:
     """Resolve how many items to write.
 
     When ``item_limit`` is set, it is the exact count (capped by max).
@@ -97,6 +117,8 @@ def resolve_item_count(title: str, item_limit: int | None = None) -> int:
     Duration phrases like ``3 Hours of …`` are *not* treated as item counts —
     they size the script via an overall word budget and a derived item count
     at SOP density (~267 words/item at 130 wpm).
+    Generic titles (no count, no duration) derive sections from the overall
+    word budget (default ``AUDIO_SCRIPT_GENERIC_DEFAULT_WORDS``).
     """
     if item_limit is not None and item_limit > 0:
         return max(1, min(item_limit, settings.audio_script_max_items))
@@ -110,6 +132,13 @@ def resolve_item_count(title: str, item_limit: int | None = None) -> int:
         )
         cap = max(settings.audio_script_max_items, _DURATION_ITEM_CAP)
         return max(1, min(derived, cap))
+    if is_generic_audio_title(title):
+        budget = (
+            overall_word_limit
+            if overall_word_limit is not None and overall_word_limit > 0
+            else settings.audio_script_generic_default_words
+        )
+        return _derive_item_count_from_word_budget(budget)
     return max(1, settings.audio_script_max_items)
 
 
@@ -158,13 +187,15 @@ def resolve_overall_word_limit(
     title: str,
     overall_word_limit: int | None = None,
 ) -> int | None:
-    """Return explicit overall limit or derive one from a title duration."""
+    """Return explicit overall limit or derive one from title duration/generic."""
     if overall_word_limit is not None and overall_word_limit > 0:
         return int(overall_word_limit)
     duration_minutes = parse_title_duration_minutes(title)
-    if duration_minutes is None:
-        return None
-    return duration_minutes * _DURATION_WORDS_PER_MINUTE
+    if duration_minutes is not None:
+        return duration_minutes * _DURATION_WORDS_PER_MINUTE
+    if is_generic_audio_title(title):
+        return settings.audio_script_generic_default_words
+    return None
 
 
 def _format_duration_label(minutes: float) -> str:

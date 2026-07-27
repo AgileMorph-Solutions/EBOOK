@@ -24,11 +24,11 @@ flowchart TD
 
 | Field | What it does |
 |-------|----------------|
-| `title` | Theme for the narration. If it says “100 ways…”, the default is **100 items**. If it says “3 Hours of…” / “45 Minutes of…”, the script is sized for that **listening time** (~130 words/minute) instead of treating the number as an item count. |
+| `title` | Theme for the narration. If it says “100 ways…”, the default is **100 items**. If it says “3 Hours of…” / “45 Minutes of…”, the script is sized for that **listening time** (~130 words/minute) instead of treating the number as an item count. **Generic titles** (no count, no duration) default to **~1000 words** split across ~4 sections. |
 | `category` | Free-text niche for prompt voice (e.g. `psychology`, `true crime`). Known niches get richer domain phrasing; anything else is used as-is. |
 | `item_limit` | Exact item/section count when set (API-only; not shown on the create form). Omit → count from the title’s promised number, or a duration-derived count when the title is time-based. |
 | `word_count` | Target words **per paragraph/section** (API-only; not on the create form). Omit → SOP **265–270**, or derived from `overall_word_limit` / title duration. Allowed range: **100–500**. |
-| `overall_word_limit` | Cap for the **whole transcript**. UI: **Total transcript words**. Per-section length is derived automatically as `overall ÷ section count` (clamped 100–500). When omitted, duration titles derive `minutes × 130`. Allowed range: **100–150000**. |
+| `overall_word_limit` | Cap for the **whole transcript**. UI: **Total transcript words**. Per-section length is derived automatically as `overall ÷ section count` (clamped 100–500). When omitted, duration titles derive `minutes × 130`; generic titles default to **1000**. Allowed range: **100–150000**. |
 | `accept_short_duration` | When `true`, allow `overall_word_limit` below the word budget implied by a duration in the title. The UI sets this after the user confirms a conflict. |
 | `skip_audio` | Transcript only (no ElevenLabs / no MP3). |
 | `voice_id` / `model_id` / `voice_settings` | Optional TTS overrides (defaults documented in the pipeline doc). |
@@ -45,6 +45,15 @@ The stored title text is unchanged.
 - `"word_count": 200` → each item targeted at **200** words (accept band **195–205**).
 - `"overall_word_limit": 3000` + 10 items → each item targeted at **300** words.
 - Both set with `word_count × items` over overall → per-item target clamped to `overall ÷ items`.
+
+### Generic title example
+
+Title: `How to think clearly` (no count, no duration, no word cap):
+
+- Overall budget → **1000 words** (`AUDIO_SCRIPT_GENERIC_DEFAULT_WORDS`)
+- Section count → `round(1000 / 267)` ≈ **4**
+- Per section → **250** words (`1000 ÷ 4`, clamped 100–500)
+- Paragraph breaks are flexible (word band only, no fixed paragraph count)
 
 ### Duration title example
 

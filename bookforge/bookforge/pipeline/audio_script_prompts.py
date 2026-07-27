@@ -104,7 +104,7 @@ def item_system(category: str, word_min: int = 265, word_max: int = 270) -> str:
         "Speak to one listener like a sharp, warm friend — conversational and "
         "sticky, never like an encyclopedia entry. No bullet points, no headers "
         "inside the body — only flowing paragraphs.\n\n"
-        f"LENGTH: 4–5 paragraphs, {word_min}–{word_max} words total.\n\n"
+        f"LENGTH: {word_min}–{word_max} words total. Use natural paragraph breaks.\n\n"
         "SOFT ARC (do not use fixed sentence starters):\n"
         "- Hook the listener with a scene, question, or vivid moment.\n"
         "- Make the idea concrete with \"you\" and everyday examples.\n"
@@ -121,7 +121,7 @@ def item_system(category: str, word_min: int = 265, word_max: int = 270) -> str:
         "- Prefer short punchy lines mixed with longer ones; concrete scenes over "
         "abstract definitions.\n\n"
         "Return the concept title in sentence case (first word capital only).\n\n"
-        f"EXAMPLE (match conversational tone and paragraph count — do NOT copy content):\n\n"
+        f"EXAMPLE (match conversational tone — do NOT copy content):\n\n"
         f"{_EXAMPLE_ITEM}"
     )
 
@@ -140,7 +140,7 @@ def item_user(
         f"Write item {number} of {total}: \"{concept_title}\".\n\n"
         "Make it conversational and high-retention — not encyclopedic. "
         "Vary your opening; do not use banned stock phrases. Word length MUST "
-        f"be between {word_min} and {word_max} words. Use 4–5 paragraphs. "
+        f"be between {word_min} and {word_max} words. Use natural paragraph breaks. "
         "Return the concept title in sentence case and the body as separate paragraphs."
         f"{feedback_block(feedback)}"
     )
@@ -163,7 +163,7 @@ def item_rewrite_user(
         "Do not fall back into banned stock phrases "
         "(\"is one of the most…\", \"This becomes powerful because…\", "
         "\"The unsettling part is…\", \"Once you understand…\"). "
-        "Vary the opening. Return 4–5 paragraphs.\n\n"
+        "Vary the opening. Return body as separate paragraphs.\n\n"
         f"CURRENT DRAFT:\n{body}"
         f"{feedback_block(feedback)}"
     )

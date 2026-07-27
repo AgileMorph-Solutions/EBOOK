@@ -54,6 +54,9 @@ class Settings(BaseSettings):
     )
     audio_script_max_items: int = Field(100, alias="AUDIO_SCRIPT_MAX_ITEMS")
     audio_script_item_workers: int = Field(4, alias="AUDIO_SCRIPT_ITEM_WORKERS")
+    audio_script_generic_default_words: int = Field(
+        1000, alias="AUDIO_SCRIPT_GENERIC_DEFAULT_WORDS",
+    )
 
     # --- Transcription / search ---
     deepgram_api_key: str = Field("", alias="DEEPGRAM_API_KEY")

@@ -363,6 +363,61 @@ export async function regenerateBook(bookId: string): Promise<RegenerateResponse
 }
 
 // --------------------------------------------------------------------------- #
+// Voice models (ElevenLabs presets in Postgres)
+// --------------------------------------------------------------------------- #
+
+export type VoiceModel = {
+  id: string;
+  name: string;
+  voice_id: string;
+  model_id: string | null;
+  is_default: boolean;
+  created_at: string;
+};
+
+export type CreateVoiceModelRequest = {
+  name: string;
+  voice_id: string;
+  model_id?: string | null;
+  is_default?: boolean;
+};
+
+export type VoiceSelection = {
+  voice_id: string;
+  model_id?: string | null;
+};
+
+export async function listVoiceModels(): Promise<{ voice_models: VoiceModel[] }> {
+  return apiFetch("/voice-models");
+}
+
+export async function createVoiceModel(
+  body: CreateVoiceModelRequest
+): Promise<VoiceModel> {
+  return apiFetch("/voice-models", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function deleteVoiceModel(voiceModelId: string): Promise<void> {
+  const apiUrl = await getApiUrl();
+  const res = await fetch(`${apiUrl}/voice-models/${voiceModelId}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) {
+    let detail: unknown = res.statusText;
+    try {
+      const body = await res.json();
+      detail = body.detail ?? body;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(formatApiError(detail));
+  }
+}
+
+// --------------------------------------------------------------------------- #
 // Audio scripts (transcript + optional ElevenLabs TTS)
 // --------------------------------------------------------------------------- #
 
@@ -386,6 +441,10 @@ export type CreateAudioScriptRequest = {
   overall_word_limit?: number | null;
   /** Allow word cap below title duration when user confirms. */
   accept_short_duration?: boolean;
+  /** ElevenLabs voice ID from a voice_models preset. */
+  voice_id?: string | null;
+  /** ElevenLabs TTS model ID from a voice_models preset. */
+  model_id?: string | null;
   /** When true, skip ElevenLabs and return transcript only. */
   skip_audio?: boolean;
 };
@@ -436,6 +495,7 @@ export type AudioScriptStatus = {
   audio_key?: string;
   audio_size_bytes?: number;
   error?: string;
+  error_detail?: string;
   feedback?: string;
   link?: string;
 };

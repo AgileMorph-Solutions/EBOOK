@@ -7,11 +7,13 @@ import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
 import { Input, Label } from "@/components/ui/Input";
 import { DurationConflictDialog } from "@/components/audio/DurationConflictDialog";
+import { VoiceModelPicker } from "@/components/audio/VoiceModelPicker";
 import {
   createAudioScript,
   estimateAudioScript,
   type AudioScriptDurationEstimate,
   type CreateAudioScriptRequest,
+  type VoiceSelection,
 } from "@/lib/api";
 import { cn } from "@/lib/cn";
 
@@ -21,6 +23,9 @@ export function CreateAudioScriptForm() {
   const [category, setCategory] = useState("psychology");
   const [totalTranscriptWords, setTotalTranscriptWords] = useState("");
   const [generateAudio, setGenerateAudio] = useState(true);
+  const [voiceSelection, setVoiceSelection] = useState<VoiceSelection | null>(
+    null
+  );
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [conflictEstimate, setConflictEstimate] =
@@ -40,11 +45,18 @@ export function CreateAudioScriptForm() {
   }
 
   function basePayload(): CreateAudioScriptRequest {
-    return {
+    const payload: CreateAudioScriptRequest = {
       title: title.trim(),
       category: category.trim(),
       skip_audio: !generateAudio,
     };
+    if (generateAudio && voiceSelection) {
+      payload.voice_id = voiceSelection.voice_id;
+      if (voiceSelection.model_id) {
+        payload.model_id = voiceSelection.model_id;
+      }
+    }
+    return payload;
   }
 
   async function startJob(payload: CreateAudioScriptRequest) {
@@ -122,8 +134,9 @@ export function CreateAudioScriptForm() {
           />
           <p className="font-body text-body-sm italic text-secondary">
             Include an item count (e.g. “100 ways…”) or a listening time (e.g.
-            “2 Minutes of…”) — title duration takes priority over a lower word
-            cap unless you confirm otherwise.
+            “2 Minutes of…”) — otherwise defaults to ~1000 words split across
+            automatically sized sections. Title duration takes priority over a
+            lower word cap unless you confirm otherwise.
           </p>
         </div>
 
@@ -156,15 +169,23 @@ export function CreateAudioScriptForm() {
             type="number"
             min={100}
             max={150000}
-            placeholder="e.g. 3000"
+            placeholder="Leave blank for ~1000 words"
             value={totalTranscriptWords}
             onChange={(e) => setTotalTranscriptWords(e.target.value)}
           />
           <p className="font-body text-body-sm italic text-secondary">
             Cap for the whole transcript. Each numbered section is sized
-            automatically from this total (total ÷ section count).
+            automatically from this total (total ÷ section count). Leave blank
+            for ~1000 words when the title has no count or duration.
           </p>
         </div>
+
+        {generateAudio && (
+          <VoiceModelPicker
+            value={voiceSelection}
+            onChange={setVoiceSelection}
+          />
+        )}
 
         <label
           htmlFor="as-generate-audio"

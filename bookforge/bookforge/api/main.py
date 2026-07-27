@@ -35,13 +35,16 @@ from typing import Any, Literal
 
 import anthropic
 import structlog
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field, field_validator, model_validator
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from bookforge.clients import llm, storage
 from bookforge.config import get_settings
+from bookforge.db import get_db
 from bookforge.cost import BudgetExceeded
 from bookforge.errors import (
     ContentQAError, EmptyBookError, GeometryError, ImageCoverageError,
@@ -66,6 +69,7 @@ from bookforge.pipeline.audio_script import (
 from bookforge.pipeline.audio_script_stages import AudioScriptStage, stages_payload
 from bookforge.pipeline.audio_tts import generate_narration_audio
 from bookforge.clients.elevenlabs import ElevenLabsError
+from bookforge.models import VoiceModel
 from bookforge.schemas import AudioScriptResult
 
 log = structlog.get_logger(__name__)
@@ -1022,9 +1026,11 @@ def _run_audio_script(
     *,
     feedback: str | None = None,
 ) -> None:
-    item_count = resolve_item_count(req.title, req.item_limit)
     overall_word_limit = resolve_overall_word_limit(
         req.title, req.overall_word_limit,
+    )
+    item_count = resolve_item_count(
+        req.title, req.item_limit, overall_word_limit=overall_word_limit,
     )
     effective_word_count = resolve_effective_word_count(
         item_count,
@@ -1147,6 +1153,85 @@ def _check_duration_word_cap(req: CreateAudioScript) -> None:
     fit = estimate_duration_fit(req.title, req.overall_word_limit)
     if fit["conflict"] and not req.accept_short_duration:
         raise HTTPException(status_code=409, detail=fit)
+
+
+class VoiceModelOut(BaseModel):
+    id: uuid.UUID
+    name: str
+    voice_id: str
+    model_id: str | None
+    is_default: bool
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class CreateVoiceModel(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    voice_id: str = Field(min_length=1, max_length=80)
+    model_id: str | None = Field(None, max_length=80)
+    is_default: bool = False
+
+    @field_validator("name", "voice_id")
+    @classmethod
+    def _strip_required(cls, v: str) -> str:
+        text = (v or "").strip()
+        if not text:
+            raise ValueError("required")
+        return text
+
+    @field_validator("model_id")
+    @classmethod
+    def _strip_model_id(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        text = v.strip()
+        return text or None
+
+
+def _clear_voice_defaults(db: Session) -> None:
+    for row in db.scalars(select(VoiceModel).where(VoiceModel.is_default.is_(True))).all():
+        row.is_default = False
+
+
+@app.get("/voice-models")
+def list_voice_models(db: Session = Depends(get_db)):
+    """List ElevenLabs voice presets (default first, then name)."""
+    rows = db.scalars(
+        select(VoiceModel).order_by(
+            VoiceModel.is_default.desc(),
+            VoiceModel.name.asc(),
+        )
+    ).all()
+    return {"voice_models": [VoiceModelOut.model_validate(r) for r in rows]}
+
+
+@app.post("/voice-models", status_code=201)
+def create_voice_model(req: CreateVoiceModel, db: Session = Depends(get_db)):
+    """Add a voice preset by ElevenLabs voice ID (and optional model ID)."""
+    if req.is_default:
+        _clear_voice_defaults(db)
+    row = VoiceModel(
+        name=req.name.strip(),
+        voice_id=req.voice_id.strip(),
+        model_id=req.model_id,
+        is_default=req.is_default,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return VoiceModelOut.model_validate(row)
+
+
+@app.delete("/voice-models/{voice_model_id}", status_code=204)
+def delete_voice_model(voice_model_id: uuid.UUID, db: Session = Depends(get_db)):
+    """Remove a voice preset."""
+    row = db.get(VoiceModel, voice_model_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="voice model not found")
+    db.delete(row)
+    db.commit()
+    return Response(status_code=204)
 
 
 @app.get("/audio-scripts")
@@ -1326,6 +1411,13 @@ def _friendly_error(exc: Exception) -> str:
         return ("This book reached its generation cost limit before finishing. "
                 "Try a shorter book or contact support to raise the limit.")
     if isinstance(exc, ElevenLabsError):
+        detail = str(exc).lower()
+        if "voice_id" in detail and "not found" in detail:
+            return (
+                "We couldn't generate the narration audio because the selected "
+                "ElevenLabs voice ID is invalid. Pick a different voice preset "
+                "or add one with a valid ID from your ElevenLabs account."
+            )
         return ("We couldn't generate the narration audio. Check the ElevenLabs "
                 "API key and voice settings, then try again.")
     if isinstance(exc, IngestError):

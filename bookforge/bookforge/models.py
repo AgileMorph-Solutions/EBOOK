@@ -43,3 +43,16 @@ class BookRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
     user: Mapped[User] = relationship(back_populates="books")
+
+
+class VoiceModel(Base):
+    """ElevenLabs voice preset for audio-script TTS (global catalog)."""
+
+    __tablename__ = "voice_models"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    voice_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    model_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)

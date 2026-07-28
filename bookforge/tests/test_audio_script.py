@@ -12,6 +12,7 @@ from bookforge.pipeline.audio_script import (
     resolve_overall_word_limit,
     resolve_paragraph_targets,
     resolve_word_band,
+    title_promises_item_count,
     to_sentence_case,
     word_count,
 )
@@ -24,6 +25,7 @@ from bookforge.pipeline.audio_script_prompts import (
     item_system,
     item_user,
     refine_user,
+    title_count_context_block,
 )
 from bookforge.pipeline.audio_script_stages import (
     AudioScriptStage,
@@ -56,6 +58,18 @@ def test_resolve_item_count_from_title():
     title = "100 Dark Confidence Secrets That Make People Respect You Instantly"
     assert resolve_item_count(title) == 100
     assert resolve_item_count(title, item_limit=5) == 5
+
+
+def test_resolve_item_count_signs_behaviors_concepts():
+    assert resolve_item_count("100 Signs Someone Secretly Dislikes You") == 100
+    assert resolve_item_count(
+        "100 Behaviors That Reveal Exactly How Someone Was Raised"
+    ) == 100
+    assert resolve_item_count(
+        "100 Concepts That Make You See the World Differently Than 99% of People"
+    ) == 100
+    assert is_generic_audio_title("100 Signs Someone Secretly Dislikes You") is False
+    assert title_promises_item_count("100 Signs Someone Secretly Dislikes You") is True
 
 
 def test_resolve_item_count_from_level_range_title():
@@ -119,6 +133,7 @@ def test_duration_plus_count_keeps_count_and_duration_budget():
 def test_is_generic_audio_title():
     assert is_generic_audio_title("How To Think Clearly") is True
     assert is_generic_audio_title("100 Dark Psychology Tricks") is False
+    assert is_generic_audio_title("100 Signs Someone Secretly Dislikes You") is False
     assert (
         is_generic_audio_title(
             '100 "Normal" Adult Habits That Reveal You Had to Grow Up Too Fast'
@@ -236,6 +251,26 @@ def test_duration_context_in_prompts():
     )
     assert "top of the band" in item
     assert "RUNTIME CONTRACT" in item
+
+
+def test_title_count_context_in_prompts():
+    title = "100 Signs Someone Secretly Dislikes You"
+    ctx = title_count_context_block(title, 100, "signs")
+    assert "TITLE COUNT CONTRACT" in ctx
+    assert "100 distinct signs" in ctx
+
+    brainstorm = brainstorm_user(
+        title, 100, title_count_context=ctx, item_label="signs",
+    )
+    assert "100 distinct signs" in brainstorm
+    assert "TITLE COUNT CONTRACT" in brainstorm
+
+    refine = refine_user(title, ["One sign", "Two sign"], 100, title_count_context=ctx, item_label="signs")
+    assert "100 signs" in refine
+    assert "TITLE COUNT CONTRACT" in refine
+
+    generic = brainstorm_user("How To Think Clearly", 3)
+    assert "TITLE COUNT CONTRACT" not in generic
 
 
 def test_item_system_bans_stock_phrases():

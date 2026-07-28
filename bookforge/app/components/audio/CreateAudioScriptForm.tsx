@@ -100,9 +100,11 @@ export function CreateAudioScriptForm() {
           placeholder="e.g. 30 Dark Psychology Tricks That Actually Work"
         />
         <p className="font-body text-body-sm italic text-secondary">
-          Include an item count (e.g. “100 ways…”) or a listening time (e.g.
-          “3 Hours of…”) to set how many sections are written. Each section is
-          sized to the word band below.
+          A leading number sets section count — e.g. &quot;100 Signs…&quot;,
+          &quot;100 Concepts…&quot;, &quot;30 Tricks…&quot;, or &quot;100
+          ways…&quot;. A listening time (e.g. &quot;3 Hours of…&quot;) sizes the
+          script for that runtime instead. Generic titles with no number default
+          to ~3 sections.
         </p>
       </div>
 

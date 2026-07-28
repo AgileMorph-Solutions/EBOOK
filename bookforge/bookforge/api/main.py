@@ -65,6 +65,7 @@ from bookforge.pipeline.audio_script import (
     resolve_item_count,
     resolve_overall_word_limit,
     resolve_paragraph_targets,
+    title_promises_item_count,
 )
 from bookforge.pipeline.audio_script_stages import AudioScriptStage, stages_payload
 from bookforge.pipeline.audio_tts import generate_narration_audio
@@ -1066,6 +1067,9 @@ def _run_audio_script(
             paragraph_count=req.paragraph_count,
             feedback=feedback,
             on_progress=on_progress,
+            promised_from_title=(
+                req.item_limit is None and title_promises_item_count(req.title)
+            ),
         )
         _write_as_result(script_id, result)
 

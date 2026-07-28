@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from bookforge.pipeline.content_guardrails import (
+    extract_title_item_label,
+    parse_leading_marketing_count,
     parse_promised_count,
     planned_use_count,
     scan_chapters_for_count_drift,
@@ -67,6 +69,40 @@ def test_parse_promised_count_fixes():
         "Senior Pest Control",
         "21 Cheap, Safe DIY Fixes Before You Pay an Exterminator",
     ) == 21
+
+
+def test_parse_promised_count_psychology_list_nouns():
+    assert parse_promised_count("100 Signs Someone Secretly Dislikes You", "") == 100
+    assert parse_promised_count(
+        "100 Behaviors That Reveal Exactly How Someone Was Raised", ""
+    ) == 100
+    assert parse_promised_count(
+        "100 Concepts That Make You See the World Differently Than 99% of People",
+        "",
+    ) == 100
+
+
+def test_parse_leading_marketing_count():
+    assert parse_leading_marketing_count("100 Signs Someone Secretly Dislikes You") == 100
+    assert parse_leading_marketing_count("4 Quick Pan Suppers") == 4
+    assert parse_leading_marketing_count("3 Hours of Calm") is None
+    assert parse_leading_marketing_count("The 1950s Grandma Cookbook") is None
+    assert parse_leading_marketing_count("2024 Garden Guide") is None
+
+
+def test_extract_title_item_label():
+    assert extract_title_item_label("100 Signs Someone Secretly Dislikes You") == "signs"
+    assert extract_title_item_label("100 Psychological Reasons People Cut Everyone Off") == "reasons"
+    assert extract_title_item_label("How To Think Clearly") == "items"
+
+
+def test_parse_promised_count_negative_titles():
+    assert parse_promised_count("Pest Guide", "") is None
+    assert parse_promised_count("The 1950s Grandma Cookbook", "") is None
+    assert parse_promised_count(
+        "Pest Guide",
+        "How to Fight Roaches Without Paying Hundreds",
+    ) is None
 
 
 def test_shrink_pamphlet_sections_to_promise():

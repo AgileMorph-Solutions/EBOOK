@@ -13,7 +13,10 @@ from pydantic import BaseModel, Field, field_validator
 
 from bookforge.clients import llm
 from bookforge.config import settings
-from bookforge.pipeline.content_guardrails import parse_promised_count
+from bookforge.pipeline.content_guardrails import (
+    extract_title_item_label,
+    parse_promised_count,
+)
 from bookforge.pipeline.pools import ctx_pool
 from bookforge.pipeline import audio_script_prompts as prompts
 from bookforge.pipeline.audio_script_stages import AudioScriptStage
@@ -95,6 +98,11 @@ class _ItemDraft(BaseModel):
             parts = [p.strip() for p in v.split("\n\n") if p.strip()]
             return parts or [v.strip()]
         return v
+
+
+def title_promises_item_count(title: str) -> bool:
+    """True when the title carries an explicit marketing count (not duration-only)."""
+    return _resolve_promised_item_count(title) is not None
 
 
 def is_generic_audio_title(title: str) -> bool:
@@ -321,12 +329,16 @@ def _brainstorm(
     *,
     target_duration_minutes: int | None = None,
     overall_word_limit: int | None = None,
+    title_count_context: str = "",
+    item_label: str = "items",
 ) -> list[str]:
     result = llm.structured(
         prompts.brainstorm_user(
             title, count, feedback=feedback,
             target_duration_minutes=target_duration_minutes,
             overall_word_limit=overall_word_limit,
+            title_count_context=title_count_context,
+            item_label=item_label,
         ),
         _ConceptList,
         system=prompts.brainstorm_system(category),
@@ -348,12 +360,16 @@ def _refine(
     *,
     target_duration_minutes: int | None = None,
     overall_word_limit: int | None = None,
+    title_count_context: str = "",
+    item_label: str = "items",
 ) -> list[str]:
     result = llm.structured(
         prompts.refine_user(
             title, concepts, count, feedback=feedback,
             target_duration_minutes=target_duration_minutes,
             overall_word_limit=overall_word_limit,
+            title_count_context=title_count_context,
+            item_label=item_label,
         ),
         _ConceptList,
         system=prompts.refine_system(category),
@@ -382,6 +398,7 @@ def _write_item(
     word_max: int,
     feedback: str | None = None,
     duration_context: str = "",
+    title_count_context: str = "",
     paragraph_target: int | None = None,
 ) -> AudioScriptItem:
     max_rewrites = 3 if duration_context else 2
@@ -391,12 +408,14 @@ def _write_item(
             word_min=word_min, word_max=word_max,
             feedback=feedback,
             duration_context=duration_context,
+            title_count_context=title_count_context,
             paragraph_target=paragraph_target,
         ),
         _ItemDraft,
         system=prompts.item_system(
             category, word_min=word_min, word_max=word_max,
             duration_context=duration_context,
+            title_count_context=title_count_context,
             paragraph_target=paragraph_target,
         ),
         model=settings.draft_model,
@@ -432,12 +451,14 @@ def _write_item(
                 word_min=word_min, word_max=word_max,
                 feedback=feedback,
                 duration_context=duration_context,
+                title_count_context=title_count_context,
                 paragraph_target=paragraph_target,
             ),
             _ItemDraft,
             system=prompts.item_system(
                 category, word_min=word_min, word_max=word_max,
                 duration_context=duration_context,
+                title_count_context=title_count_context,
                 paragraph_target=paragraph_target,
             ),
             model=settings.draft_model,
@@ -464,6 +485,7 @@ def generate_audio_script(
     paragraph_count: int | None = None,
     feedback: str | None = None,
     on_progress: ProgressFn | None = None,
+    promised_from_title: bool = False,
 ) -> AudioScriptResult:
     """Run brainstorm → refine → write and return a transcript result."""
     resolved_overall = resolve_overall_word_limit(title, None)
@@ -476,6 +498,12 @@ def generate_audio_script(
     word_min, word_max, word_target = resolve_word_band(effective_word_count)
     paragraph_targets = resolve_paragraph_targets(count, paragraph_count)
     target_duration_minutes = parse_title_duration_minutes(title)
+    item_label = extract_title_item_label(title) if promised_from_title else "items"
+    title_count_context = (
+        prompts.title_count_context_block(title, count, item_label)
+        if promised_from_title
+        else ""
+    )
     duration_context = prompts.duration_context_block(
         title,
         target_duration_minutes=target_duration_minutes,
@@ -506,6 +534,8 @@ def generate_audio_script(
         title, count, category, feedback=revision,
         target_duration_minutes=target_duration_minutes,
         overall_word_limit=resolved_overall,
+        title_count_context=title_count_context,
+        item_label=item_label,
     )
     if len(concepts) < count:
         raise ValueError(
@@ -517,6 +547,8 @@ def generate_audio_script(
         title, concepts, count, category, feedback=revision,
         target_duration_minutes=target_duration_minutes,
         overall_word_limit=resolved_overall,
+        title_count_context=title_count_context,
+        item_label=item_label,
     )
 
     _progress(AudioScriptStage.WRITING_ITEMS, 0, count)
@@ -534,6 +566,7 @@ def generate_audio_script(
             word_min=word_min, word_max=word_max,
             feedback=revision,
             duration_context=duration_context,
+            title_count_context=title_count_context,
             paragraph_target=para_target,
         )
         items[idx] = item

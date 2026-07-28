@@ -78,6 +78,22 @@ def duration_context_block(
     )
 
 
+def title_count_context_block(
+    title: str,
+    item_count: int,
+    item_label: str,
+) -> str:
+    """Count contract when the title promises a numbered list (e.g. 100 signs)."""
+    label = (item_label or "items").strip().lower() or "items"
+    return (
+        f"\n\nTITLE COUNT CONTRACT — the title \"{title}\" explicitly promises "
+        f"exactly {item_count} distinct {label}. Deliver the FULL list — "
+        f"not a highlight reel, teaser, or sample. Brainstorm and refine must "
+        f"return exactly {item_count} unique {label}; do not stop early, "
+        f"merge entries, or pad with duplicates."
+    )
+
+
 def brainstorm_system(category: str) -> str:
     domain = category_voice(category)
     return (
@@ -95,15 +111,19 @@ def brainstorm_user(
     *,
     target_duration_minutes: int | None = None,
     overall_word_limit: int | None = None,
+    title_count_context: str = "",
+    item_label: str = "items",
 ) -> str:
+    label = (item_label or "items").strip().lower() or "items"
     return (
         f'Write a detailed script plan for the title: "{title}".\n\n'
-        f"List exactly {count} distinct concepts/secrets/items for this title. "
+        f"List exactly {count} distinct {label} promised by this title. "
         "Each item title should be 2–6 words in sentence case: capitalize only "
         "the first word (e.g. 'Map-territory distinction', "
         "'Foot in the door escalation'). Never use Title Case like "
         "'Foot In The Door Escalation'. No trailing period on titles. "
         "No duplicates, no near-synonyms. Order for maximum retention across the full list."
+        f"{title_count_context}"
         f"{duration_context_block(title, target_duration_minutes=target_duration_minutes, overall_word_limit=overall_word_limit, item_count=count)}"
         f"{feedback_block(feedback)}"
     )
@@ -127,14 +147,18 @@ def refine_user(
     *,
     target_duration_minutes: int | None = None,
     overall_word_limit: int | None = None,
+    title_count_context: str = "",
+    item_label: str = "items",
 ) -> str:
+    label = (item_label or "items").strip().lower() or "items"
     listing = "\n".join(f"  {i + 1}. {c}" for i, c in enumerate(concepts))
     return (
         f'Read through this list and refine it maximally for the title "{title}". '
-        f"Aim for maximum retention. Return exactly {count} items in sentence case "
+        f"Aim for maximum retention. Return exactly {count} {label} in sentence case "
         "(first word capital only; e.g. 'Identity protection', not "
         "'Identity Protection').\n\n"
         f"CURRENT LIST:\n{listing}"
+        f"{title_count_context}"
         f"{duration_context_block(title, target_duration_minutes=target_duration_minutes, overall_word_limit=overall_word_limit, item_count=count)}"
         f"{feedback_block(feedback)}"
     )
@@ -146,6 +170,7 @@ def item_system(
     word_max: int = 270,
     *,
     duration_context: str = "",
+    title_count_context: str = "",
     paragraph_target: int | None = None,
 ) -> str:
     domain = category_voice(category)
@@ -183,6 +208,7 @@ def item_system(
         "Return the concept title in sentence case (first word capital only).\n\n"
         f"EXAMPLE (match conversational tone — do NOT copy content):\n\n"
         f"{_EXAMPLE_ITEM}"
+        f"{title_count_context}"
         f"{duration_context}"
     )
 
@@ -197,6 +223,7 @@ def item_user(
     feedback: str | None = None,
     *,
     duration_context: str = "",
+    title_count_context: str = "",
     paragraph_target: int | None = None,
 ) -> str:
     if paragraph_target is not None:
@@ -216,6 +243,7 @@ def item_user(
         f"band ({word_max}) when the title promises a long listening session. "
         f"{paragraph_instruction}"
         "Return the concept title in sentence case and the body as separate paragraphs."
+        f"{title_count_context}"
         f"{duration_context}"
         f"{feedback_block(feedback)}"
     )
@@ -231,6 +259,7 @@ def item_rewrite_user(
     feedback: str | None = None,
     *,
     duration_context: str = "",
+    title_count_context: str = "",
     paragraph_target: int | None = None,
 ) -> str:
     body = "\n\n".join(paragraphs)
@@ -256,6 +285,7 @@ def item_rewrite_user(
         "\"The unsettling part is…\", \"Once you understand…\"). "
         "Vary the opening. Return body as separate paragraphs.\n\n"
         f"CURRENT DRAFT:\n{body}"
+        f"{title_count_context}"
         f"{duration_context}"
         f"{feedback_block(feedback)}"
     )

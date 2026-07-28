@@ -24,7 +24,7 @@ flowchart TD
 
 | Field | What it does |
 |-------|----------------|
-| `title` | Theme for the narration. If it says “100 ways…”, the default is **100 items**. If it says “3 Hours of…” / “45 Minutes of…”, the script is sized for that **listening time** (~130 words/minute) instead of treating the number as an item count. **Generic titles** (no count, no duration) default to **~3 sections** at SOP density. |
+| `title` | Theme for the narration. A **leading number** (e.g. `100 Signs…`, `100 Concepts…`, `30 Tricks…`, `100 ways…`) sets **that many sections**. If it says `3 Hours of…` / `45 Minutes of…`, the script is sized for that **listening time** (~130 words/minute) instead of treating the number as an item count. **Generic titles** (no count, no duration) default to **~3 sections** at SOP density. |
 | `category` | Free-text niche for prompt voice (e.g. `psychology`, `true crime`). Known niches get richer domain phrasing; anything else is used as-is. |
 | `item_limit` | Exact item/section count when set (API-only; not shown on the create form). Omit → count from the title’s promised number, or a duration-derived count when the title is time-based. |
 | `word_count` | Target words **per section** (UI: **Words per section**). Omit → SOP **265–270**. Allowed range: **100–500**. |
@@ -61,6 +61,15 @@ Title: `3 Hours of Emotional Control Secrets…` (no `item_limit` / `word_count`
 - Per-item target → **265–270** words (SOP band) → ~3 hours of narration at 130 wpm.
 
 Title: `100 Secrets for 3 Hours of Deep Focus` → keeps **100** items at the SOP band.
+
+### Count-from-title example
+
+Title: `100 Signs Someone Secretly Dislikes You` (no `item_limit` / `word_count`):
+
+- Parses **100** from the leading count (works for signs, behaviors, concepts, tricks, ways, etc.).
+- Section count → **100**
+- Per section → **265–270** words (SOP band)
+- Prompts include a **TITLE COUNT CONTRACT** so brainstorm/refine/write deliver the full list
 
 ## Stages
 

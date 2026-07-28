@@ -21,7 +21,8 @@ _COUNT_NOUNS = (
     r"dinners?|fixes?|projects?|patterns?|exercises?|lessons?|entries|habits?|steps?|rules?|"
     r"principles?|moves?|shifts?|strategies|strategy|secrets?|mistakes?|"
     r"reasons?|laws?|keys?|changes?|foods?|drinks?|workouts?|stretches|poses?|"
-    r"questions?|skills?|routines?|swaps?|rituals?|practices?"
+    r"questions?|skills?|routines?|swaps?|rituals?|practices?|"
+    r"signs?|behaviors?|concepts?|indicators?|signals?|traits?|types?|facts?|truths?|examples?"
 )
 # Spelled-out cardinals (ten … ninety-nine) so "sixty habits" is caught too.
 _ONES = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
@@ -81,6 +82,76 @@ _RANGE_COUNT_RE = re.compile(
     re.IGNORECASE,
 )
 
+_LEADING_COUNT_RE = re.compile(
+    r"^(?:the\s+)?(?P<count>\d{1,4})\s+(?P<next>\w+)",
+    re.IGNORECASE,
+)
+_DURATION_START_WORDS = frozenset({
+    "hour", "hours", "hr", "hrs", "minute", "minutes", "min", "mins",
+})
+# Filler adjectives between count and list noun — skip when extracting item label.
+_LABEL_SKIP_WORDS = frozenset({
+    "dark", "psychological", "normal", "cheap", "forgotten", "brutal", "quick",
+    "best", "deep", "simple", "easy", "hard", "adult", "ancient", "modern",
+    "classic", "ultimate", "essential", "powerful", "surprising", "hidden",
+    "subtle", "tiny", "micro", "real", "true", "raw", "lost", "secret",
+    "deadly", "dangerous", "silent", "quiet", "loud", "weird", "strange",
+    "unspoken", "invisible", "forbidden",
+})
+_STOP_WORDS = frozenset({
+    "of", "that", "the", "a", "an", "to", "for", "and", "or", "in", "on", "at",
+    "with", "from", "by", "as", "is", "are", "was", "were", "be", "been",
+})
+
+
+def parse_leading_marketing_count(title: str) -> int | None:
+    """Return a leading title count (``100 Signs…``) when no count-noun match exists.
+
+    Rejects duration starts (``3 Hours…``), year-like counts (``2024 Guide``),
+    and titles with no leading digit.
+    """
+    text = (title or "").strip()
+    if not text:
+        return None
+    match = _LEADING_COUNT_RE.match(text)
+    if not match:
+        return None
+    count = int(match.group("count"))
+    if count < 1:
+        return None
+    if 1900 <= count <= 2099:
+        return None
+    next_word = match.group("next").lower().rstrip("s") if match.group("next") else ""
+    if match.group("next").lower() in _DURATION_START_WORDS:
+        return None
+    if next_word in {"hour", "hr", "minute", "min"}:
+        return None
+    return count
+
+
+def extract_title_item_label(title: str) -> str:
+    """First meaningful list noun after a title count, default ``items``."""
+    text = (title or "").strip()
+    if not text:
+        return "items"
+    noun_re = re.compile(
+        r"\b\d{1,4}\b" + _GAP_WORDS + r"\s*(?:\+?\s*)?(?P<noun>" + _COUNT_NOUNS + r")\b",
+        re.IGNORECASE,
+    )
+    noun_match = noun_re.search(text)
+    if noun_match:
+        return noun_match.group("noun").lower()
+    leading = _LEADING_COUNT_RE.match(text)
+    if not leading:
+        return "items"
+    rest = text[leading.end() :].strip()
+    for word in re.findall(r"\b[\w']+\b", rest):
+        clean = word.strip("'\"").lower()
+        if clean in _LABEL_SKIP_WORDS or clean in _STOP_WORDS:
+            continue
+        return clean
+    return "items"
+
 
 def parse_promised_count(title: str, subtitle: str) -> int | None:
     """Extract a marketing count from title or subtitle — digits ('250 ways') or
@@ -105,6 +176,9 @@ def parse_promised_count(title: str, subtitle: str) -> int | None:
             n = _word_to_int(w.group(1))
             if n:
                 return n
+        leading = parse_leading_marketing_count(text)
+        if leading is not None:
+            return leading
     return None
 
 

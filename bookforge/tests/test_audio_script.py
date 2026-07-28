@@ -119,6 +119,12 @@ def test_duration_plus_count_keeps_count_and_duration_budget():
 def test_is_generic_audio_title():
     assert is_generic_audio_title("How To Think Clearly") is True
     assert is_generic_audio_title("100 Dark Psychology Tricks") is False
+    assert (
+        is_generic_audio_title(
+            '100 "Normal" Adult Habits That Reveal You Had to Grow Up Too Fast'
+        )
+        is False
+    )
     assert is_generic_audio_title("3 Hours of Calm") is False
     assert is_generic_audio_title("3 ways to die single") is False
 
@@ -133,6 +139,11 @@ def test_resolve_item_count_generic():
     overall = resolve_overall_word_limit(title)
     assert overall == 1000
     assert resolve_item_count(title, overall_word_limit=overall) == 3
+
+
+def test_resolve_item_count_with_quoted_gap_words():
+    title = '100 "Normal" Adult Habits That Reveal You Had to Grow Up Too Fast'
+    assert resolve_item_count(title) == 100
 
 
 def test_generic_sizing_uses_sop_band():

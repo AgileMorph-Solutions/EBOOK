@@ -33,8 +33,9 @@ _TENS = {"twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60,
          "seventy": 70, "eighty": 80, "ninety": 90}
 _NUMBER_WORDS = {**_ONES, **_TEENS, **_TENS}
 _WORDS_ALT = "|".join(sorted(_NUMBER_WORDS, key=len, reverse=True))
-# Gap words between count and noun (commas in "21 Cheap, Safe DIY Fixes").
-_GAP_WORDS = r"(?:\s+[\w',.-]+){0,6}"
+# Gap words between count and noun (commas in "21 Cheap, Safe DIY Fixes",
+# quotes in '100 "Normal" Adult Habits').
+_GAP_WORDS = r"(?:\s+[\w\"'“”‘’.,-]+){0,6}"
 _WORD_COUNT_RE = re.compile(
     r"\b((?:%s)(?:[- ](?:%s))?)\b%s\s*(?:%s)\b"
     % (_WORDS_ALT, "|".join(_ONES), _GAP_WORDS, _COUNT_NOUNS),

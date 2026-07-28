@@ -53,6 +53,11 @@ def test_parse_promised_count_level_range():
     assert parse_promised_count("4 Quick Pan Suppers", "") == 4
 
 
+def test_parse_promised_count_with_quoted_gap_words():
+    title = '100 "Normal" Adult Habits That Reveal You Had to Grow Up Too Fast'
+    assert parse_promised_count(title, "") == 100
+
+
 def test_parse_promised_count_none():
     assert parse_promised_count("Pest Guide", "How to Fight Roaches Without Paying Hundreds") is None
 

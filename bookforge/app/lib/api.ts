@@ -421,26 +421,15 @@ export async function deleteVoiceModel(voiceModelId: string): Promise<void> {
 // Audio scripts (transcript + optional ElevenLabs TTS)
 // --------------------------------------------------------------------------- #
 
-export type AudioScriptDurationEstimate = {
-  title_duration_minutes: number | null;
-  words_needed: number | null;
-  overall_word_limit: number | null;
-  estimated_minutes_from_cap: number | null;
-  words_per_minute: number;
-  conflict: boolean;
-  reason: string;
-};
-
 export type CreateAudioScriptRequest = {
   title: string;
   /** Free-text niche for prompt voice (any category). */
   category?: string;
   item_limit?: number | null;
+  /** Target words per section (100–500). Omit for default 265–270 band. */
   word_count?: number | null;
-  /** Total word budget across the whole script. */
-  overall_word_limit?: number | null;
-  /** Allow word cap below title duration when user confirms. */
-  accept_short_duration?: boolean;
+  /** Total paragraphs across the full transcript. */
+  paragraph_count?: number | null;
   /** ElevenLabs voice ID from a voice_models preset. */
   voice_id?: string | null;
   /** ElevenLabs TTS model ID from a voice_models preset. */
@@ -456,6 +445,13 @@ export type AudioScriptSummary = {
   created_at: string;
   link?: string;
   has_audio?: boolean;
+  category?: string | null;
+  word_count?: number | null;
+  effective_word_count?: number | null;
+  paragraph_count?: number | null;
+  skip_audio?: boolean;
+  item_count?: number | null;
+  target_duration_minutes?: number | null;
 };
 
 export type AudioScriptItem = {
@@ -479,10 +475,14 @@ export type AudioScriptStatus = {
   category?: string;
   item_limit?: number | null;
   word_count?: number | null;
-  overall_word_limit?: number | null;
   effective_word_count?: number | null;
+  paragraph_count?: number | null;
+  paragraph_targets?: number[] | null;
   target_duration_minutes?: number | null;
   skip_audio?: boolean;
+  voice_id?: string | null;
+  model_id?: string | null;
+  creation?: CreateAudioScriptRequest;
   created_at?: string;
   started_at?: string;
   item_count?: number;
@@ -499,16 +499,6 @@ export type AudioScriptStatus = {
   feedback?: string;
   link?: string;
 };
-
-export async function estimateAudioScript(body: {
-  title: string;
-  overall_word_limit?: number | null;
-}): Promise<AudioScriptDurationEstimate> {
-  return apiFetch("/audio-scripts/estimate", {
-    method: "POST",
-    body: JSON.stringify(body),
-  });
-}
 
 export async function createAudioScript(
   body: CreateAudioScriptRequest

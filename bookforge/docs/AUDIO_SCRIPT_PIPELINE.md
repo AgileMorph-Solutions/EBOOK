@@ -68,7 +68,6 @@ Migration `0002` seeds a **Default narrator** row from the standard ElevenLabs I
   "category": "psychology",
   "item_limit": 3,
   "word_count": 270,
-  "overall_word_limit": null,
   "voice_id": null,
   "model_id": "eleven_multilingual_v2",
   "voice_settings": {
@@ -83,8 +82,7 @@ Migration `0002` seeds a **Default narrator** row from the standard ElevenLabs I
 ```
 
 - `category` (optional string): free-text niche for prompt voice. Known values (`psychology`, `relationship`, `philosophy`, `general`) get richer domain phrasing; any other text is used as-is.
-- `word_count` (optional, 100–500): target words per item. Omit → SOP **265–270**, or derived from `overall_word_limit` / title duration when set. When set, rewrite band is **target ± 5**.
-- `overall_word_limit` (optional, 100–150000): total word budget. When omitted, duration titles derive `minutes × 130` wpm; **generic titles** (no count, no duration) default to **1000** words. Without `word_count`, per-item target is `overall ÷ item_count` (clamped 100–500). When both are set and product exceeds overall, overall wins.
+- `word_count` (optional, 100–500): target words per item/section. Omit → SOP **265–270**. When set, rewrite band is **target ± 5**.
 - Duration phrases in the title (`N hours` / `N minutes`, including spelled-out like `Three Hours`) size the script for that listening time; they are not treated as item counts.
 - Defaults (when `model_id` / `voice_settings` omitted): `eleven_multilingual_v2` and the voice settings above. Pass only the fields you want to override.
 

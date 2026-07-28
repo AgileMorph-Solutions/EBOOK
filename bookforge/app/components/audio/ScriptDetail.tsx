@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { RegenerateFeedbackDialog } from "@/components/audio/RegenerateFeedbackDialog";
+import { ScriptCreationMeta } from "@/components/audio/ScriptCreationMeta";
 import { Alert } from "@/components/ui/Alert";
 import { Breadcrumb } from "@/components/ui/Breadcrumb";
 import { Button } from "@/components/ui/Button";
@@ -168,6 +169,15 @@ export function ScriptDetail({
       </div>
 
       {error && !script && <Alert variant="error">{error}</Alert>}
+
+      {script && (
+        <GlassPanel className="rounded-xl p-6 editorial-shadow">
+          <h2 className="mb-4 font-display text-headline-sm text-on-surface">
+            Script settings
+          </h2>
+          <ScriptCreationMeta script={script} />
+        </GlassPanel>
+      )}
 
       {isActive && script && (
         <GlassPanel className="rounded-xl p-6 editorial-shadow">

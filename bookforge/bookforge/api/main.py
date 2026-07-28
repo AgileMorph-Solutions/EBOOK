@@ -59,13 +59,12 @@ from bookforge.pipeline.readiness import (
     writing_provider_status,
 )
 from bookforge.pipeline.audio_script import (
-    estimate_duration_fit,
     generate_audio_script,
-    generic_min_per_item,
     parse_title_duration_minutes,
     resolve_effective_word_count,
     resolve_item_count,
     resolve_overall_word_limit,
+    resolve_paragraph_targets,
 )
 from bookforge.pipeline.audio_script_stages import AudioScriptStage, stages_payload
 from bookforge.pipeline.audio_tts import generate_narration_audio
@@ -812,17 +811,9 @@ class CreateAudioScript(BaseModel):
         None, ge=100, le=500,
         description="Target words per item. Default: SOP 265–270.",
     )
-    overall_word_limit: int | None = Field(
-        None,
-        ge=100,
-        le=150000,
-        description=(
-            "Optional total word budget for the whole script. When omitted, "
-            "titles like '3 Hours of …' derive a budget from ~130 wpm. "
-            "Without word_count, per-item target is overall ÷ item count "
-            "(clamped 100–500). When both are set and word_count × items "
-            "exceeds overall, overall wins."
-        ),
+    paragraph_count: int | None = Field(
+        None, ge=1, le=5000,
+        description="Total paragraphs across the full transcript, distributed across items.",
     )
     voice_id: str | None = Field(
         None, description="Override ELEVENLABS_VOICE_ID for this job.",
@@ -842,13 +833,8 @@ class CreateAudioScript(BaseModel):
     skip_audio: bool = Field(
         False, description="If true, only generate transcript (no ElevenLabs).",
     )
-    accept_short_duration: bool = Field(
-        False,
-        description=(
-            "When true, allow overall_word_limit below the word budget implied "
-            "by a duration in the title."
-        ),
-    )
+
+    model_config = {"extra": "ignore"}
 
     @field_validator("category")
     @classmethod
@@ -857,14 +843,6 @@ class CreateAudioScript(BaseModel):
         if not text:
             raise ValueError("category is required")
         return text
-
-
-class EstimateAudioScript(BaseModel):
-    title: str
-    overall_word_limit: int | None = Field(
-        None, ge=100, le=150000,
-        description="Proposed total transcript word cap to compare against title duration.",
-    )
 
 
 class RegenerateAudioScript(BaseModel):
@@ -996,6 +974,13 @@ def _list_audio_scripts() -> list[dict[str, Any]]:
             "created_at": state.get("created_at", ""),
             "link": _audio_script_link(script_id),
             "has_audio": has_audio,
+            "category": state.get("category"),
+            "word_count": state.get("word_count"),
+            "effective_word_count": state.get("effective_word_count"),
+            "paragraph_count": state.get("paragraph_count"),
+            "skip_audio": state.get("skip_audio"),
+            "item_count": state.get("item_count"),
+            "target_duration_minutes": state.get("target_duration_minutes"),
         })
     jobs.sort(key=lambda j: j.get("created_at") or "", reverse=True)
     return jobs
@@ -1011,6 +996,9 @@ def _audio_script_response(script_id: str) -> dict[str, Any]:
         "stages": stages_payload(),
         **state,
     }
+    req = _read_as_request(script_id)
+    if req is not None:
+        resp["creation"] = req.model_dump(exclude_none=True)
     if state.get("status") in ("done", "failed"):
         result = _read_as_result(script_id)
         if result is not None:
@@ -1021,26 +1009,37 @@ def _audio_script_response(script_id: str) -> dict[str, Any]:
     return resp
 
 
+def _validate_audio_paragraph_count(req: CreateAudioScript) -> None:
+    """Reject when total paragraphs cannot cover at least one per section."""
+    if req.paragraph_count is None:
+        return
+    overall = resolve_overall_word_limit(req.title, None)
+    item_count = resolve_item_count(
+        req.title, req.item_limit, overall_word_limit=overall,
+    )
+    if req.paragraph_count < item_count:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"paragraph_count ({req.paragraph_count}) must be at least "
+                f"the section count ({item_count})"
+            ),
+        )
+
+
 def _run_audio_script(
     script_id: str,
     req: CreateAudioScript,
     *,
     feedback: str | None = None,
 ) -> None:
-    overall_word_limit = resolve_overall_word_limit(
-        req.title, req.overall_word_limit,
-    )
+    overall_word_limit = resolve_overall_word_limit(req.title, None)
     item_count = resolve_item_count(
         req.title, req.item_limit, overall_word_limit=overall_word_limit,
     )
-    effective_word_count = resolve_effective_word_count(
-        item_count,
-        word_count=req.word_count,
-        overall_word_limit=overall_word_limit,
-        min_per_item=generic_min_per_item(req.title, req.overall_word_limit),
-        title=req.title,
-    )
+    effective_word_count = resolve_effective_word_count(req.word_count)
     duration_minutes = parse_title_duration_minutes(req.title)
+    paragraph_targets = resolve_paragraph_targets(item_count, req.paragraph_count)
     try:
         _set_as_state(
             script_id,
@@ -1050,8 +1049,8 @@ def _run_audio_script(
             item_count=item_count,
             progress={"done": 0, "total": item_count},
             target_duration_minutes=duration_minutes,
-            overall_word_limit=overall_word_limit,
             effective_word_count=effective_word_count,
+            paragraph_targets=paragraph_targets,
             error=None,
             error_detail=None,
         )
@@ -1064,7 +1063,7 @@ def _run_audio_script(
             category=req.category,
             item_count=item_count,
             word_count=effective_word_count,
-            overall_word_limit=overall_word_limit,
+            paragraph_count=req.paragraph_count,
             feedback=feedback,
             on_progress=on_progress,
         )
@@ -1152,13 +1151,6 @@ def _require_audio_deps(*, skip_audio: bool) -> None:
         )
 
 
-def _check_duration_word_cap(req: CreateAudioScript) -> None:
-    """Reject when title duration and word cap conflict unless user opted in."""
-    fit = estimate_duration_fit(req.title, req.overall_word_limit)
-    if fit["conflict"] and not req.accept_short_duration:
-        raise HTTPException(status_code=409, detail=fit)
-
-
 class VoiceModelOut(BaseModel):
     id: uuid.UUID
     name: str
@@ -1244,20 +1236,11 @@ def list_audio_scripts():
     return {"scripts": _list_audio_scripts()}
 
 
-@app.post("/audio-scripts/estimate")
-def estimate_audio_script(req: EstimateAudioScript):
-    """Preview whether title duration and word cap align (no job started)."""
-    if not req.title.strip():
-        raise HTTPException(status_code=422, detail="title is required")
-    return estimate_duration_fit(req.title.strip(), req.overall_word_limit)
-
-
 @app.post("/audio-scripts", status_code=202)
 def create_audio_script(req: CreateAudioScript, background_tasks: BackgroundTasks):
     """Start an audio narration job. Poll GET /audio-scripts/{script_id}."""
     if not req.title.strip():
         raise HTTPException(status_code=422, detail="title is required")
-    _check_duration_word_cap(req)
     # Audio jobs need LLM writing only — not book image/layout readiness.
     provider_ok, provider_detail, _unfunded = writing_provider_status()
     if not provider_ok:
@@ -1271,7 +1254,12 @@ def create_audio_script(req: CreateAudioScript, background_tasks: BackgroundTask
             },
         )
     _require_audio_deps(skip_audio=req.skip_audio)
+    _validate_audio_paragraph_count(req)
     script_id = _make_script_id(req.title.strip())
+    overall = resolve_overall_word_limit(req.title, None)
+    resolved_item_count = resolve_item_count(
+        req.title, req.item_limit, overall_word_limit=overall,
+    )
     _set_as_state(
         script_id,
         status=AudioScriptStage.QUEUED,
@@ -1279,8 +1267,11 @@ def create_audio_script(req: CreateAudioScript, background_tasks: BackgroundTask
         category=req.category,
         item_limit=req.item_limit,
         word_count=req.word_count,
-        overall_word_limit=req.overall_word_limit,
+        paragraph_count=req.paragraph_count,
+        voice_id=req.voice_id,
+        model_id=req.model_id,
         skip_audio=req.skip_audio,
+        item_count=resolved_item_count,
         created_at=_now_iso(),
         stage=AudioScriptStage.QUEUED,
     )

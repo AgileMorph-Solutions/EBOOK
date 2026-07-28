@@ -186,7 +186,7 @@ def test_post_rejects_blank_category():
     assert res.status_code == 422
 
 
-def test_post_generic_title_defaults_to_1000_words():
+def test_post_generic_title_uses_sop_band():
     with patch("bookforge.api.main.generate_audio_script", return_value=_FAKE_RESULT) as gen:
         res = client.post(
             "/audio-scripts",
@@ -200,59 +200,80 @@ def test_post_generic_title_defaults_to_1000_words():
     script_id = res.json()["script_id"]
     gen.assert_called_once()
     assert gen.call_args.kwargs.get("item_count") == 3
-    assert gen.call_args.kwargs.get("word_count") == 333
-
-    from bookforge.api.main import _as_request_path, _read_as_state
-    import json
-    req = json.loads(_as_request_path(script_id).read_text())
-    assert req["overall_word_limit"] is None
+    assert gen.call_args.kwargs.get("word_count") is None
 
     status = client.get(f"/audio-scripts/{script_id}")
     body = status.json()
-    assert body.get("overall_word_limit") == 1000
     assert body.get("item_count") == 3
-    assert body.get("effective_word_count") == 333
+    assert body.get("effective_word_count") is None
 
 
-def test_post_overall_word_limit_derives_per_item():
+def test_post_word_count_270_passes_through():
     with patch("bookforge.api.main.generate_audio_script", return_value=_FAKE_RESULT) as gen:
         res = client.post(
             "/audio-scripts",
             json={
-                "title": "Overall Budget Script",
-                "item_limit": 10,
-                "overall_word_limit": 3000,
+                "title": "30 Dark Psychology Tricks",
+                "word_count": 270,
+                "skip_audio": True,
+            },
+        )
+    assert res.status_code == 202
+    gen.assert_called_once()
+    assert gen.call_args.kwargs.get("word_count") == 270
+
+
+def test_post_paragraph_count_passes_through():
+    with patch("bookforge.api.main.generate_audio_script", return_value=_FAKE_RESULT) as gen:
+        res = client.post(
+            "/audio-scripts",
+            json={
+                "title": "How to think clearly",
+                "paragraph_count": 12,
                 "skip_audio": True,
             },
         )
     assert res.status_code == 202
     script_id = res.json()["script_id"]
     gen.assert_called_once()
-    assert gen.call_args.kwargs.get("word_count") == 300  # 3000 // 10
+    assert gen.call_args.kwargs.get("paragraph_count") == 12
 
-    from bookforge.api.main import _as_request_path
-    import json
-    req = json.loads(_as_request_path(script_id).read_text())
-    assert req["overall_word_limit"] == 3000
-    assert req.get("word_count") is None
+    from bookforge.api.main import _read_as_state
+    state = _read_as_state(script_id)
+    assert state is not None
+    assert state.get("paragraph_count") == 12
+    assert state.get("voice_id") is None
 
 
-def test_post_overall_word_limit_clamps_explicit_word_count():
-    with patch("bookforge.api.main.generate_audio_script", return_value=_FAKE_RESULT) as gen:
+def test_post_persists_voice_fields():
+    with patch("bookforge.api.main.generate_audio_script", return_value=_FAKE_RESULT):
         res = client.post(
             "/audio-scripts",
             json={
-                "title": "Clamp Word Count Script",
-                "item_limit": 20,
-                "word_count": 270,
-                "overall_word_limit": 2000,
+                "title": "Voice Persist Test",
+                "item_limit": 2,
+                "voice_id": "voice-abc",
+                "model_id": "eleven_multilingual_v2",
                 "skip_audio": True,
             },
         )
     assert res.status_code == 202
-    gen.assert_called_once()
-    # 270 * 20 = 5400 > 2000 → 2000 // 20 = 100
-    assert gen.call_args.kwargs.get("word_count") == 100
+    from bookforge.api.main import _read_as_state
+    state = _read_as_state(res.json()["script_id"])
+    assert state.get("voice_id") == "voice-abc"
+    assert state.get("model_id") == "eleven_multilingual_v2"
+
+
+def test_post_rejects_paragraph_count_below_sections():
+    res = client.post(
+        "/audio-scripts",
+        json={
+            "title": "100 Dark Psychology Tricks",
+            "paragraph_count": 10,
+            "skip_audio": True,
+        },
+    )
+    assert res.status_code == 422
 
 
 def test_post_duration_title_derives_length():
@@ -269,63 +290,11 @@ def test_post_duration_title_derives_length():
     # ~180 min * 130 wpm * 1.10 buffer / 267 ≈ 96 items; SOP 265–270 band
     assert gen.call_args.kwargs.get("item_count") == 96
     assert gen.call_args.kwargs.get("word_count") is None
-    assert gen.call_args.kwargs.get("overall_word_limit") == 25740
 
     status = client.get(f"/audio-scripts/{res.json()['script_id']}")
     body = status.json()
     assert body.get("target_duration_minutes") == 180
-    assert body.get("overall_word_limit") == 25740
     assert body.get("effective_word_count") is None
-
-
-def test_post_estimate_duration_conflict():
-    res = client.post(
-        "/audio-scripts/estimate",
-        json={"title": "2 minutes of reading", "overall_word_limit": 200},
-    )
-    assert res.status_code == 200
-    body = res.json()
-    assert body["conflict"] is True
-    assert body["words_needed"] == 260
-    assert body["overall_word_limit"] == 200
-
-
-def test_post_estimate_no_conflict_when_cap_enough():
-    res = client.post(
-        "/audio-scripts/estimate",
-        json={"title": "2 minutes of reading", "overall_word_limit": 300},
-    )
-    assert res.status_code == 200
-    assert res.json()["conflict"] is False
-
-
-def test_post_rejects_duration_conflict_without_accept():
-    res = client.post(
-        "/audio-scripts",
-        json={
-            "title": "2 minutes of reading",
-            "overall_word_limit": 200,
-            "skip_audio": True,
-        },
-    )
-    assert res.status_code == 409
-    detail = res.json()["detail"]
-    assert detail["conflict"] is True
-
-
-def test_post_accepts_duration_conflict_with_flag():
-    with patch("bookforge.api.main.generate_audio_script", return_value=_FAKE_RESULT) as gen:
-        res = client.post(
-            "/audio-scripts",
-            json={
-                "title": "2 minutes of reading",
-                "overall_word_limit": 200,
-                "accept_short_duration": True,
-                "skip_audio": True,
-            },
-        )
-    assert res.status_code == 202
-    gen.assert_called_once()
 
 
 def test_post_rejects_word_count_out_of_range():

@@ -4,13 +4,13 @@ from __future__ import annotations
 from bookforge.pipeline.audio_script import (
     body_from_paragraphs,
     duration_word_budget,
-    estimate_duration_fit,
     format_transcript,
     is_generic_audio_title,
     parse_title_duration_minutes,
     resolve_effective_word_count,
     resolve_item_count,
     resolve_overall_word_limit,
+    resolve_paragraph_targets,
     resolve_word_band,
     to_sentence_case,
     word_count,
@@ -62,14 +62,12 @@ def test_resolve_item_count_from_level_range_title():
     title = "Level 1 to 100 Social Intelligence Secrets That Get Darker as You Go"
     assert resolve_item_count(title) == 100
     overall = resolve_overall_word_limit(title)
-    # Counted title — no generic 1000-word cap
     assert overall is None
-    assert resolve_effective_word_count(100, overall_word_limit=overall) is None
+    assert resolve_effective_word_count() is None
 
 
 def test_resolve_item_count_limit_overrides_title_number():
     title = "3 Hours of Emotional Control Secrets to Fall Asleep To"
-    # Without item_limit, duration wins — not the bare "3".
     assert resolve_item_count(title) > 3
     assert resolve_item_count(title, item_limit=10) == 10
 
@@ -81,7 +79,6 @@ def test_parse_title_duration_minutes():
     assert parse_title_duration_minutes("45 Minutes of Calm Breathwork") == 45
     assert parse_title_duration_minutes("Three Hours of Stoic Wisdom") == 180
     assert parse_title_duration_minutes("100 Dark Psychology Tricks") is None
-    # Decimal hours must not be misread as the trailing digit (1.5 → 5 hours).
     assert parse_title_duration_minutes(
         "1.5 Hours of Dark Psychology Tricks to Fall Asleep To"
     ) == 90
@@ -91,26 +88,21 @@ def test_parse_title_duration_minutes():
 
 def test_decimal_hour_title_sizes_near_runtime():
     title = "1.5 Hours of Dark Psychology Tricks to Fall Asleep To"
-    assert resolve_item_count(title) != 5  # not the trailing digit as item count
+    assert resolve_item_count(title) != 5
     overall = resolve_overall_word_limit(title)
     items = resolve_item_count(title, overall_word_limit=overall)
     assert overall == duration_word_budget(90)
-    # ~1.5h at 130 wpm with 10% headroom
     est_minutes = (items * _SOP_WORD_TARGET) / 130
     assert 90 <= est_minutes <= 110
-    assert overall < duration_word_budget(180)  # must not size like 3h+
+    assert overall < duration_word_budget(180)
 
 
 def test_duration_title_sizes_near_runtime():
     title = "3 Hours of Emotional Control Secrets to Fall Asleep To"
     items = resolve_item_count(title)
     overall = resolve_overall_word_limit(title)
-    per_item = resolve_effective_word_count(
-        items, overall_word_limit=overall, title=title,
-    )
+    assert resolve_effective_word_count() is None
     assert overall == duration_word_budget(180)
-    assert per_item is None  # SOP 265–270 band
-    # ~3 hours at 130 wpm with 10% headroom (±10%)
     est_minutes = (items * _SOP_WORD_TARGET) / 130
     assert est_minutes >= 180
     assert est_minutes <= 220
@@ -121,35 +113,7 @@ def test_duration_plus_count_keeps_count_and_duration_budget():
     assert resolve_item_count(title) == 100
     overall = resolve_overall_word_limit(title)
     assert overall == duration_word_budget(180)
-    per_item = resolve_effective_word_count(100, overall_word_limit=overall, title=title)
-    assert per_item == 257  # 25740 // 100
-
-
-def test_estimate_duration_fit_conflict():
-    fit = estimate_duration_fit("2 minutes of reading", 200)
-    assert fit["conflict"] is True
-    assert fit["title_duration_minutes"] == 2
-    assert fit["words_needed"] == 260
-    assert fit["overall_word_limit"] == 200
-    assert fit["estimated_minutes_from_cap"] == 200 / 130
-    assert "260" in fit["reason"]
-    assert "200" in fit["reason"]
-
-
-def test_estimate_duration_fit_no_conflict_when_cap_sufficient():
-    fit = estimate_duration_fit("2 minutes of reading", 300)
-    assert fit["conflict"] is False
-    assert fit["reason"] == ""
-
-
-def test_estimate_duration_fit_no_conflict_without_duration():
-    fit = estimate_duration_fit("100 Dark Psychology Tricks", 200)
-    assert fit["conflict"] is False
-
-
-def test_estimate_duration_fit_no_conflict_without_cap():
-    fit = estimate_duration_fit("2 minutes of reading", None)
-    assert fit["conflict"] is False
+    assert resolve_effective_word_count() is None
 
 
 def test_is_generic_audio_title():
@@ -168,22 +132,16 @@ def test_resolve_item_count_generic():
     title = "How To Think Clearly"
     overall = resolve_overall_word_limit(title)
     assert overall == 1000
-    assert resolve_item_count(title, overall_word_limit=overall) == 3  # round(1000/300)
+    assert resolve_item_count(title, overall_word_limit=overall) == 3
 
 
-def test_generic_sizing_end_to_end():
+def test_generic_sizing_uses_sop_band():
     title = "How to die single"
     overall = resolve_overall_word_limit(title)
     items = resolve_item_count(title, overall_word_limit=overall)
-    per_item = resolve_effective_word_count(
-        items,
-        overall_word_limit=overall,
-        min_per_item=200,
-    )
     assert overall == 1000
     assert items == 3
-    assert per_item == 333  # 1000 // 3
-    assert items * per_item == 999
+    assert resolve_effective_word_count() is None
 
 
 def test_resolve_item_count_default():
@@ -200,46 +158,26 @@ def test_resolve_word_band_custom():
     assert (word_min, word_max, target) == (195, 205, 200)
 
 
-def test_generic_min_per_item():
-    from bookforge.pipeline.audio_script import generic_min_per_item
-
-    assert generic_min_per_item("How to think clearly", None) == 200
-    assert generic_min_per_item("How to think clearly", 500) is None
-    assert generic_min_per_item("100 Dark Psychology Tricks", None) is None
+def test_resolve_effective_word_count_default():
+    assert resolve_effective_word_count() is None
+    assert resolve_effective_word_count(None) is None
 
 
-def test_resolve_effective_word_count_neither():
-    assert resolve_effective_word_count(10) is None
-    assert resolve_effective_word_count(10, word_count=None, overall_word_limit=None) is None
+def test_resolve_effective_word_count_explicit():
+    assert resolve_effective_word_count(200) == 200
+    assert resolve_effective_word_count(270) == 270
 
 
-def test_resolve_effective_word_count_overall_only():
-    # 3000 / 10 = 300
-    assert resolve_effective_word_count(10, overall_word_limit=3000) == 300
-    # clamps to per-item max 500
-    assert resolve_effective_word_count(2, overall_word_limit=5000) == 500
-    # clamps to per-item min 100
-    assert resolve_effective_word_count(50, overall_word_limit=1000) == 100
+def test_resolve_paragraph_targets_unset():
+    assert resolve_paragraph_targets(10) is None
+    assert resolve_paragraph_targets(10, None) is None
 
 
-def test_resolve_effective_word_count_word_count_only():
-    assert resolve_effective_word_count(10, word_count=200) == 200
-
-
-def test_resolve_effective_word_count_overall_clamps_when_both_exceed():
-    # 270 * 20 = 5400 > 2000 → overall wins → 2000 // 20 = 100
-    assert (
-        resolve_effective_word_count(20, word_count=270, overall_word_limit=2000)
-        == 100
-    )
-
-
-def test_resolve_effective_word_count_word_count_wins_when_under_overall():
-    # 200 * 5 = 1000 < 3000 → keep explicit per-item
-    assert (
-        resolve_effective_word_count(5, word_count=200, overall_word_limit=3000)
-        == 200
-    )
+def test_resolve_paragraph_targets_distribution():
+    assert resolve_paragraph_targets(3, 10) == [4, 3, 3]
+    assert resolve_paragraph_targets(3, 9) == [3, 3, 3]
+    assert resolve_paragraph_targets(5, 5) == [1, 1, 1, 1, 1]
+    assert sum(resolve_paragraph_targets(100, 250)) == 250
 
 
 def test_category_voice_known_and_free_text():
@@ -295,8 +233,8 @@ def test_item_system_bans_stock_phrases():
     assert "4–5 paragraphs" not in system
     assert "natural paragraph breaks" in system
     assert "BANNED stock phrases" in system
-    assert "This becomes powerful because" in system  # listed as banned
-    assert "Once you understand" in system  # listed as banned
+    assert "This becomes powerful because" in system
+    assert "Once you understand" in system
     assert "late-night" in system.lower()
 
 

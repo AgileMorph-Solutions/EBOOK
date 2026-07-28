@@ -25,14 +25,11 @@ log = structlog.get_logger(__name__)
 _SOP_WORD_MIN = 265
 _SOP_WORD_MAX = 270
 _SOP_WORD_TARGET = 267
-_PER_ITEM_WORD_MIN = 100
-_PER_ITEM_WORD_MAX = 500
-# Generic titles (no count, no duration, no explicit cap): cap total length and
+# Generic titles (no count, no duration): cap total length and
 # size 2–4 substantial sections so scripts are not thin ~150-word teasers.
 _GENERIC_SECTION_TARGET = 300
 _GENERIC_MIN_SECTIONS = 2
 _GENERIC_MAX_SECTIONS = 4
-_GENERIC_MIN_PER_ITEM = 200
 # Spoken narration pacing used to size titles like "3 Hours of …"
 _DURATION_WORDS_PER_MINUTE = 130
 # Extra headroom so TTS + slight underwrites still meet the title runtime
@@ -111,10 +108,6 @@ def is_generic_audio_title(title: str) -> bool:
 def duration_word_budget(minutes: int) -> int:
     """Total words to generate for a duration title (includes TTS headroom)."""
     return int(minutes * _DURATION_WORDS_PER_MINUTE * _DURATION_WORD_BUFFER)
-
-
-def is_duration_audio_title(title: str) -> bool:
-    return parse_title_duration_minutes(title) is not None
 
 
 def _derive_item_count_from_word_budget(
@@ -244,70 +237,6 @@ def resolve_overall_word_limit(
     return None
 
 
-def _format_duration_label(minutes: float) -> str:
-    total_seconds = int(round(minutes * 60))
-    m, s = divmod(total_seconds, 60)
-    return f"{m}:{s:02d}"
-
-
-def estimate_duration_fit(
-    title: str,
-    overall_word_limit: int | None = None,
-) -> dict[str, int | float | str | bool | None]:
-    """Compare title duration vs an explicit overall word cap.
-
-    Conflict when the title promises a runtime and the cap is too low to reach
-    it at ``_DURATION_WORDS_PER_MINUTE``.
-    """
-    duration_minutes = parse_title_duration_minutes(title)
-    cap = (
-        int(overall_word_limit)
-        if overall_word_limit is not None and overall_word_limit > 0
-        else None
-    )
-    words_needed = (
-        duration_minutes * _DURATION_WORDS_PER_MINUTE
-        if duration_minutes is not None
-        else None
-    )
-    generation_budget = (
-        duration_word_budget(duration_minutes)
-        if duration_minutes is not None
-        else None
-    )
-    estimated_minutes_from_cap = (
-        cap / _DURATION_WORDS_PER_MINUTE if cap is not None else None
-    )
-
-    conflict = False
-    reason = ""
-    if (
-        duration_minutes is not None
-        and cap is not None
-        and words_needed is not None
-        and cap < words_needed
-    ):
-        conflict = True
-        title_label = _format_duration_label(duration_minutes)
-        cap_label = _format_duration_label(estimated_minutes_from_cap or 0)
-        reason = (
-            f"Title promises ~{title_label} of narration (~{words_needed} words "
-            f"at {_DURATION_WORDS_PER_MINUTE} wpm), but your word cap is {cap} "
-            f"(~{cap_label})."
-        )
-
-    return {
-        "title_duration_minutes": duration_minutes,
-        "words_needed": words_needed,
-        "generation_word_budget": generation_budget,
-        "overall_word_limit": cap,
-        "estimated_minutes_from_cap": estimated_minutes_from_cap,
-        "words_per_minute": _DURATION_WORDS_PER_MINUTE,
-        "conflict": conflict,
-        "reason": reason,
-    }
-
-
 def resolve_word_band(word_count: int | None = None) -> tuple[int, int, int]:
     """Return (word_min, word_max, target) for prompts and rewrite checks.
 
@@ -320,65 +249,22 @@ def resolve_word_band(word_count: int | None = None) -> tuple[int, int, int]:
     return max(1, target - 5), target + 5, target
 
 
-def resolve_effective_word_count(
+def resolve_effective_word_count(word_count: int | None = None) -> int | None:
+    """Return per-item word target, or ``None`` for the SOP 265–270 band."""
+    return int(word_count) if word_count is not None else None
+
+
+def resolve_paragraph_targets(
     item_count: int,
-    word_count: int | None = None,
-    overall_word_limit: int | None = None,
-    *,
-    min_per_item: int | None = None,
-    title: str | None = None,
-) -> int | None:
-    """Resolve per-item word target from ``word_count`` and/or overall budget.
-
-    Returns ``None`` when neither is set (caller uses SOP band via
-    ``resolve_word_band``). When both are set and
-    ``word_count * item_count`` exceeds the overall budget, the overall
-    budget wins (per-item target = overall // item_count, clamped 100–500).
-
-    Duration titles without an explicit ``word_count`` use the full SOP band
-    (265–270) whenever it fits the generation budget — floor-division per-item
-    targets (e.g. 265) caused systematic under-runs vs promised runtime.
-    """
+    paragraph_count: int | None = None,
+) -> list[int] | None:
+    """Distribute total paragraph budget across items (each item ≥ 1 when set)."""
+    if paragraph_count is None:
+        return None
     n = max(1, int(item_count))
-    floor = (
-        min_per_item
-        if min_per_item is not None
-        else _PER_ITEM_WORD_MIN
-    )
-    derived: int | None = None
-    if overall_word_limit is not None and overall_word_limit > 0:
-        derived = max(
-            floor,
-            min(_PER_ITEM_WORD_MAX, overall_word_limit // n),
-        )
-
-    if word_count is not None:
-        if (
-            derived is not None
-            and overall_word_limit is not None
-            and word_count * n > overall_word_limit
-        ):
-            return derived
-        return int(word_count)
-
-    if (
-        derived is not None
-        and title
-        and is_duration_audio_title(title)
-        and n * _SOP_WORD_TARGET <= overall_word_limit
-    ):
-        return None
-
-    return derived
-
-
-def generic_min_per_item(title: str, overall_word_limit: int | None) -> int | None:
-    """Higher per-section floor for default-sized generic titles."""
-    if overall_word_limit is not None:
-        return None
-    if is_generic_audio_title(title):
-        return _GENERIC_MIN_PER_ITEM
-    return None
+    total = int(paragraph_count)
+    base, rem = divmod(total, n)
+    return [base + (1 if i < rem else 0) for i in range(n)]
 
 
 def word_count(text: str) -> int:
@@ -496,6 +382,7 @@ def _write_item(
     word_max: int,
     feedback: str | None = None,
     duration_context: str = "",
+    paragraph_target: int | None = None,
 ) -> AudioScriptItem:
     max_rewrites = 3 if duration_context else 2
     draft = llm.structured(
@@ -504,11 +391,13 @@ def _write_item(
             word_min=word_min, word_max=word_max,
             feedback=feedback,
             duration_context=duration_context,
+            paragraph_target=paragraph_target,
         ),
         _ItemDraft,
         system=prompts.item_system(
             category, word_min=word_min, word_max=word_max,
             duration_context=duration_context,
+            paragraph_target=paragraph_target,
         ),
         model=settings.draft_model,
         max_tokens=2000,
@@ -516,8 +405,16 @@ def _write_item(
     body = body_from_paragraphs(draft.paragraphs)
     wc = word_count(body)
 
+    def _needs_rewrite() -> bool:
+        if not (word_min <= wc <= word_max):
+            return True
+        if paragraph_target is not None:
+            para_count = len([p for p in draft.paragraphs if p.strip()])
+            return para_count != paragraph_target
+        return False
+
     for attempt in range(max_rewrites):
-        if word_min <= wc <= word_max:
+        if not _needs_rewrite():
             break
         log.info(
             "item_rewrite",
@@ -525,6 +422,8 @@ def _write_item(
             words=wc,
             word_min=word_min,
             word_max=word_max,
+            paragraph_target=paragraph_target,
+            paragraphs=len(draft.paragraphs),
             attempt=attempt + 1,
         )
         draft = llm.structured(
@@ -533,11 +432,13 @@ def _write_item(
                 word_min=word_min, word_max=word_max,
                 feedback=feedback,
                 duration_context=duration_context,
+                paragraph_target=paragraph_target,
             ),
             _ItemDraft,
             system=prompts.item_system(
                 category, word_min=word_min, word_max=word_max,
                 duration_context=duration_context,
+                paragraph_target=paragraph_target,
             ),
             model=settings.draft_model,
             max_tokens=2000,
@@ -560,25 +461,20 @@ def generate_audio_script(
     category: str = "psychology",
     item_count: int | None = None,
     word_count: int | None = None,
-    overall_word_limit: int | None = None,
+    paragraph_count: int | None = None,
     feedback: str | None = None,
     on_progress: ProgressFn | None = None,
 ) -> AudioScriptResult:
     """Run brainstorm → refine → write and return a transcript result."""
-    resolved_overall = resolve_overall_word_limit(title, overall_word_limit)
+    resolved_overall = resolve_overall_word_limit(title, None)
     count = (
         item_count
         if item_count is not None
         else resolve_item_count(title, overall_word_limit=resolved_overall)
     )
-    effective_word_count = resolve_effective_word_count(
-        count,
-        word_count=word_count,
-        overall_word_limit=resolved_overall,
-        min_per_item=generic_min_per_item(title, overall_word_limit),
-        title=title,
-    )
+    effective_word_count = resolve_effective_word_count(word_count)
     word_min, word_max, word_target = resolve_word_band(effective_word_count)
+    paragraph_targets = resolve_paragraph_targets(count, paragraph_count)
     target_duration_minutes = parse_title_duration_minutes(title)
     duration_context = prompts.duration_context_block(
         title,
@@ -597,6 +493,7 @@ def generate_audio_script(
         word_target=word_target,
         overall_word_limit=resolved_overall,
         target_duration_minutes=target_duration_minutes,
+        paragraph_count=paragraph_count,
         has_feedback=bool(revision),
     )
 
@@ -629,11 +526,15 @@ def generate_audio_script(
 
     def _write_one(idx: int, concept: str) -> None:
         nonlocal done_count
+        para_target = (
+            paragraph_targets[idx] if paragraph_targets is not None else None
+        )
         item = _write_item(
             title, concept, idx + 1, count, category,
             word_min=word_min, word_max=word_max,
             feedback=revision,
             duration_context=duration_context,
+            paragraph_target=para_target,
         )
         items[idx] = item
         with done_lock:

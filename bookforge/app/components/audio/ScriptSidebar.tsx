@@ -7,6 +7,7 @@ import {
   listAudioScripts,
   type AudioScriptSummary,
 } from "@/lib/api";
+import { compactSidebarMeta } from "@/components/audio/scriptMeta";
 import { usePolling } from "@/hooks/usePolling";
 import { Alert } from "@/components/ui/Alert";
 import { StatusBadge } from "@/components/ui/Badge";
@@ -93,18 +94,13 @@ function ScriptCard({ script }: { script: AudioScriptSummary }) {
             <StatusBadge status={script.status} />
           </div>
         </div>
-        <div className="mt-2 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Icon
-              name={hasAudio ? "graphic_eq" : "mic"}
-              className="text-tertiary"
-              size={14}
-            />
-            <span className="font-body text-body-sm text-secondary">
-              {hasAudio ? "Narration" : "Transcript"}
-            </span>
+        <div className="mt-2 flex items-center justify-between gap-2">
+          <div className="min-w-0 flex-1">
+            <p className="truncate font-label text-label-sm text-secondary">
+              {compactSidebarMeta(script)}
+            </p>
           </div>
-          <span className="font-label text-label-sm text-outline">
+          <span className="shrink-0 font-label text-label-sm text-outline">
             {formatRelative(script.created_at)}
           </span>
         </div>

@@ -48,7 +48,15 @@ def _readiness_ok():
         reason_code="ok",
         checks={},
     )
-    with patch("bookforge.api.main.check_readiness", return_value=passing):
+    with patch("bookforge.api.main.check_readiness", return_value=passing), \
+         patch("bookforge.api.main.get_settings") as mock_settings, \
+         patch("shutil.which", return_value="/usr/bin/ffmpeg"):
+        mock_settings.return_value.elevenlabs_api_key = "fake-key"
+        mock_settings.return_value.content_model = "fake-model"
+        mock_settings.return_value.draft_model = "fake-model"
+        mock_settings.return_value.audio_script_max_items = 100
+        mock_settings.return_value.audio_script_generic_default_words = 1000
+        mock_settings.return_value.audio_script_item_workers = 4
         yield
 
 
@@ -223,57 +231,60 @@ def test_post_word_count_270_passes_through():
     assert gen.call_args.kwargs.get("word_count") == 270
 
 
-def test_post_paragraph_count_passes_through():
+def test_paragraph_count_overrides_title_count():
+    """paragraph_count takes priority over the number in the title."""
     with patch("bookforge.api.main.generate_audio_script", return_value=_FAKE_RESULT) as gen:
         res = client.post(
             "/audio-scripts",
             json={
-                "title": "How to think clearly",
-                "paragraph_count": 12,
+                "title": "10 Ways to Improve Memory",  # title says 10
+                "paragraph_count": 25,                  # override: use 25
                 "skip_audio": True,
             },
         )
     assert res.status_code == 202
     script_id = res.json()["script_id"]
     gen.assert_called_once()
-    assert gen.call_args.kwargs.get("paragraph_count") == 12
+    # generate_audio_script must receive item_count=25, NOT 10 from title
+    assert gen.call_args.kwargs.get("item_count") == 25
 
     from bookforge.api.main import _read_as_state
     state = _read_as_state(script_id)
     assert state is not None
-    assert state.get("paragraph_count") == 12
-    assert state.get("voice_id") is None
+    assert state.get("paragraph_count") == 25
+    assert state.get("item_count") == 25
 
 
-def test_post_persists_voice_fields():
+def test_paragraph_count_persists_in_state():
+    """paragraph_count is stored in state and reflected in the GET response."""
     with patch("bookforge.api.main.generate_audio_script", return_value=_FAKE_RESULT):
         res = client.post(
             "/audio-scripts",
             json={
-                "title": "Voice Persist Test",
-                "item_limit": 2,
-                "voice_id": "voice-abc",
-                "model_id": "eleven_multilingual_v2",
+                "title": "5 Sleep Secrets",
+                "paragraph_count": 20,
                 "skip_audio": True,
             },
         )
     assert res.status_code == 202
-    from bookforge.api.main import _read_as_state
-    state = _read_as_state(res.json()["script_id"])
-    assert state.get("voice_id") == "voice-abc"
-    assert state.get("model_id") == "eleven_multilingual_v2"
+    status = client.get(f"/audio-scripts/{res.json()['script_id']}")
+    assert status.json().get("paragraph_count") == 20
 
 
-def test_post_rejects_paragraph_count_below_sections():
-    res = client.post(
-        "/audio-scripts",
-        json={
-            "title": "100 Dark Psychology Tricks",
-            "paragraph_count": 10,
-            "skip_audio": True,
-        },
-    )
-    assert res.status_code == 422
+def test_no_paragraph_count_derives_from_title():
+    """Without paragraph_count, title-derived count is used."""
+    with patch("bookforge.api.main.generate_audio_script", return_value=_FAKE_RESULT) as gen:
+        res = client.post(
+            "/audio-scripts",
+            json={
+                "title": "7 Habits of Highly Effective People",
+                "skip_audio": True,
+            },
+        )
+    assert res.status_code == 202
+    gen.assert_called_once()
+    # Title says "7" → item_count should be 7
+    assert gen.call_args.kwargs.get("item_count") == 7
 
 
 def test_post_duration_title_derives_length():

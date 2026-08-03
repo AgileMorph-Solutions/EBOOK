@@ -425,11 +425,10 @@ export type CreateAudioScriptRequest = {
   title: string;
   /** Free-text niche for prompt voice (any category). */
   category?: string;
-  item_limit?: number | null;
-  /** Target words per section (100–500). Omit for default 265–270 band. */
-  word_count?: number | null;
-  /** Total paragraphs across the full transcript. */
+  /** Total paragraphs to generate — overrides the count in the title when set. */
   paragraph_count?: number | null;
+  /** Target words per paragraph (100–500). Omit for default 265–270 band. */
+  word_count?: number | null;
   /** ElevenLabs voice ID from a voice_models preset. */
   voice_id?: string | null;
   /** ElevenLabs TTS model ID from a voice_models preset. */
@@ -473,11 +472,9 @@ export type AudioScriptStatus = {
   stage?: string;
   title?: string;
   category?: string;
-  item_limit?: number | null;
+  paragraph_count?: number | null;
   word_count?: number | null;
   effective_word_count?: number | null;
-  paragraph_count?: number | null;
-  paragraph_targets?: number[] | null;
   target_duration_minutes?: number | null;
   skip_audio?: boolean;
   voice_id?: string | null;

@@ -171,25 +171,15 @@ def item_system(
     *,
     duration_context: str = "",
     title_count_context: str = "",
-    paragraph_target: int | None = None,
 ) -> str:
     domain = category_voice(category)
-    if paragraph_target is not None:
-        paragraph_rule = (
-            f"PARAGRAPHS: Write exactly {paragraph_target} paragraph"
-            f"{'s' if paragraph_target != 1 else ''} in the body "
-            "(each as a separate entry in the paragraphs array).\n\n"
-        )
-    else:
-        paragraph_rule = "Use natural paragraph breaks.\n\n"
     return (
         f"You are a late-night narration scriptwriter for {domain} audio. "
         "Speak to one listener like a sharp, warm friend — conversational and "
-        "sticky, never like an encyclopedia entry. No bullet points, no headers "
-        "inside the body — only flowing paragraphs.\n\n"
-        f"LENGTH: {word_min}–{word_max} words total — treat {word_max} as the "
-        f"target when the title promises a long runtime. Shorter drafts fail QA. "
-        f"{paragraph_rule}"
+        "sticky, never like an encyclopedia entry. No bullet points, no sub-headers, "
+        "no multiple paragraphs — write exactly ONE single flowing paragraph for the body.\n\n"
+        f"LENGTH: {word_min}–{word_max} words for this single paragraph — treat {word_max} as the "
+        f"target when the title promises a long runtime. Shorter drafts fail QA.\n\n"
         "SOFT ARC (do not use fixed sentence starters):\n"
         "- Hook the listener with a scene, question, or vivid moment.\n"
         "- Make the idea concrete with \"you\" and everyday examples.\n"
@@ -205,7 +195,7 @@ def item_system(
         "  • \"Once you understand…\"\n"
         "- Prefer short punchy lines mixed with longer ones; concrete scenes over "
         "abstract definitions.\n\n"
-        "Return the concept title in sentence case (first word capital only).\n\n"
+        "Return the concept title in sentence case (first word capital only) and the body as a single paragraph string.\n\n"
         f"EXAMPLE (match conversational tone — do NOT copy content):\n\n"
         f"{_EXAMPLE_ITEM}"
         f"{title_count_context}"
@@ -224,25 +214,14 @@ def item_user(
     *,
     duration_context: str = "",
     title_count_context: str = "",
-    paragraph_target: int | None = None,
 ) -> str:
-    if paragraph_target is not None:
-        paragraph_instruction = (
-            f"Write exactly {paragraph_target} paragraph"
-            f"{'s' if paragraph_target != 1 else ''} "
-            "(return each as a separate entry in the paragraphs array). "
-        )
-    else:
-        paragraph_instruction = "Use natural paragraph breaks. "
     return (
         f'Narration title: "{title}"\n'
         f"Write item {number} of {total}: \"{concept_title}\".\n\n"
         "Make it conversational and high-retention — not encyclopedic. "
         "Vary your opening; do not use banned stock phrases. Word length MUST "
-        f"be between {word_min} and {word_max} words — aim for the top of the "
-        f"band ({word_max}) when the title promises a long listening session. "
-        f"{paragraph_instruction}"
-        "Return the concept title in sentence case and the body as separate paragraphs."
+        f"be between {word_min} and {word_max} words in a single single-paragraph block. "
+        "Return the concept title in sentence case and body text for this paragraph."
         f"{title_count_context}"
         f"{duration_context}"
         f"{feedback_block(feedback)}"
@@ -252,7 +231,7 @@ def item_user(
 def item_rewrite_user(
     title: str,
     concept_title: str,
-    paragraphs: list[str],
+    body: str,
     word_count: int,
     word_min: int = 265,
     word_max: int = 270,
@@ -260,32 +239,23 @@ def item_rewrite_user(
     *,
     duration_context: str = "",
     title_count_context: str = "",
-    paragraph_target: int | None = None,
 ) -> str:
-    body = "\n\n".join(paragraphs)
     target_hint = (
         f" Aim for {word_max} words when the title promises a long runtime."
         if duration_context
         else ""
     )
-    paragraph_hint = ""
-    if paragraph_target is not None:
-        current_paras = len([p for p in paragraphs if p.strip()])
-        paragraph_hint = (
-            f" The body must have exactly {paragraph_target} paragraph"
-            f"{'s' if paragraph_target != 1 else ''} "
-            f"(current: {current_paras})."
-        )
     return (
         f'Narration title: "{title}"\n'
-        f'Rewrite item "{concept_title}" to be exactly {word_min}–{word_max} words '
-        f"(current: {word_count} words).{target_hint}{paragraph_hint} Keep the meaning and "
-        "conversational tone. Do not fall back into banned stock phrases "
+        f'Rewrite paragraph item "{concept_title}" to be exactly {word_min}–{word_max} words '
+        f"(current: {word_count} words).{target_hint} Keep the meaning and "
+        "conversational tone in a single flowing paragraph. Do not fall back into banned stock phrases "
         "(\"is one of the most…\", \"This becomes powerful because…\", "
         "\"The unsettling part is…\", \"Once you understand…\"). "
-        "Vary the opening. Return body as separate paragraphs.\n\n"
+        "Vary the opening. Return body as a single paragraph.\n\n"
         f"CURRENT DRAFT:\n{body}"
         f"{title_count_context}"
         f"{duration_context}"
         f"{feedback_block(feedback)}"
     )
+

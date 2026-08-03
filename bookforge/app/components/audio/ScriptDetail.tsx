@@ -339,7 +339,7 @@ export function ScriptDetail({
                 <span className="capitalize">{script.category}</span>
               )}
               {script.item_count != null && (
-                <span>{script.item_count} items</span>
+                <span>{script.item_count} paragraphs</span>
               )}
               {script.total_words != null && (
                 <span>{script.total_words} words</span>
@@ -393,7 +393,7 @@ export function ScriptDetail({
           {script.items && script.items.length > 0 && (
             <div className="space-y-4">
               <h2 className="font-display text-headline-sm text-on-surface">
-                Items
+                Paragraphs
               </h2>
               {script.items.map((item) => (
                 <GlassPanel key={item.number} className="rounded-xl p-5">

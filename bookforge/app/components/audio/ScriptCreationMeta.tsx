@@ -5,8 +5,7 @@ import { listVoiceModels, type VoiceModel } from "@/lib/api";
 import {
   formatDurationLabel,
   formatOutputMode,
-  formatParagraphLabel,
-  formatWordsPerSection,
+  formatWordsPerParagraph,
   type ScriptMetaInput,
 } from "@/components/audio/scriptMeta";
 
@@ -45,27 +44,24 @@ export function ScriptCreationMeta({
       `${voiceId.slice(0, 8)}…`
     : null;
 
-  const sectionCount =
-    script.item_count ??
-    script.item_limit ??
-    script.creation?.item_limit ??
-    null;
-  const sectionLabel = script.item_limit
-    ? `${sectionCount ?? "—"} (explicit limit)`
-    : sectionCount != null
-      ? `${sectionCount} (from title)`
+  // paragraph_count (explicit) overrides title — show as "override" when set
+  const explicitParagraphCount =
+    script.paragraph_count ?? script.creation?.paragraph_count ?? null;
+  const actualItemCount = script.item_count ?? null;
+
+  const paragraphLabel = explicitParagraphCount != null
+    ? `${explicitParagraphCount} (override)`
+    : actualItemCount != null
+      ? `${actualItemCount} (from title)`
       : null;
 
-  const duration =
-    script.target_duration_minutes ??
-    null;
-  const paragraphLabel = formatParagraphLabel(script);
+  const duration = script.target_duration_minutes ?? null;
 
   if (compact) {
     const chips = [
       script.category,
-      formatWordsPerSection(script),
-      paragraphLabel,
+      formatWordsPerParagraph(script),
+      explicitParagraphCount != null ? `${explicitParagraphCount} paragraphs` : null,
       formatOutputMode(script),
     ].filter(Boolean);
     return (
@@ -87,11 +83,10 @@ export function ScriptCreationMeta({
       {script.category && (
         <MetaRow label="Category" value={script.category} />
       )}
-      <MetaRow label="Words per section" value={formatWordsPerSection(script)} />
+      <MetaRow label="Words per paragraph" value={formatWordsPerParagraph(script)} />
       {paragraphLabel && (
-        <MetaRow label="Paragraphs" value={paragraphLabel} />
+        <MetaRow label="Total paragraphs" value={paragraphLabel} />
       )}
-      {sectionLabel && <MetaRow label="Sections" value={sectionLabel} />}
       {duration != null && duration > 0 && (
         <MetaRow
           label="Duration target"
@@ -101,9 +96,6 @@ export function ScriptCreationMeta({
       <MetaRow label="Output" value={formatOutputMode(script)} />
       {voiceName && <MetaRow label="Voice" value={voiceName} />}
       {modelId && <MetaRow label="TTS model" value={modelId} />}
-      {!paragraphLabel && (
-        <MetaRow label="Paragraphs" value="Natural breaks (default)" />
-      )}
     </dl>
   );
 }

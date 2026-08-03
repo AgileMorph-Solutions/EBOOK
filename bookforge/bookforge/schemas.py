@@ -480,7 +480,7 @@ class BookArtifact(BaseModel):
 # Audio scripts (SOP narration + ElevenLabs TTS)
 # --------------------------------------------------------------------------- #
 class AudioScriptItem(BaseModel):
-    """One narrated segment: heading + body paragraphs."""
+    """One narrated paragraph segment: heading + paragraph body."""
 
     number: int
     title: str

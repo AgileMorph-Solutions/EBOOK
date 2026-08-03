@@ -87,17 +87,17 @@ class _ConceptList(BaseModel):
 
 class _ItemDraft(BaseModel):
     title: str
-    paragraphs: list[str] = Field(
-        description="Body paragraphs; no heading line in paragraphs.",
+    body: str = Field(
+        description="Paragraph body text; single flowing paragraph with no sub-headings.",
     )
 
-    @field_validator("paragraphs", mode="before")
+    @field_validator("body", mode="before")
     @classmethod
-    def _coerce_paragraphs(cls, v):
-        if isinstance(v, str):
-            parts = [p.strip() for p in v.split("\n\n") if p.strip()]
-            return parts or [v.strip()]
-        return v
+    def _coerce_body(cls, v):
+        if isinstance(v, list):
+            return " ".join(str(p).strip() for p in v if str(p).strip())
+        return str(v).strip() if v else ""
+
 
 
 def title_promises_item_count(title: str) -> bool:
@@ -262,19 +262,6 @@ def resolve_effective_word_count(word_count: int | None = None) -> int | None:
     return int(word_count) if word_count is not None else None
 
 
-def resolve_paragraph_targets(
-    item_count: int,
-    paragraph_count: int | None = None,
-) -> list[int] | None:
-    """Distribute total paragraph budget across items (each item ≥ 1 when set)."""
-    if paragraph_count is None:
-        return None
-    n = max(1, int(item_count))
-    total = int(paragraph_count)
-    base, rem = divmod(total, n)
-    return [base + (1 if i < rem else 0) for i in range(n)]
-
-
 def word_count(text: str) -> int:
     return len(text.split())
 
@@ -293,9 +280,6 @@ def to_sentence_case(title: str) -> str:
             return lower[:i] + ch.upper() + lower[i + 1 :]
     return lower
 
-
-def body_from_paragraphs(paragraphs: list[str]) -> str:
-    return "\n\n".join(p.strip() for p in paragraphs if p.strip())
 
 
 def format_transcript(items: list[AudioScriptItem]) -> str:
@@ -399,7 +383,6 @@ def _write_item(
     feedback: str | None = None,
     duration_context: str = "",
     title_count_context: str = "",
-    paragraph_target: int | None = None,
 ) -> AudioScriptItem:
     max_rewrites = 3 if duration_context else 2
     draft = llm.structured(
@@ -409,28 +392,21 @@ def _write_item(
             feedback=feedback,
             duration_context=duration_context,
             title_count_context=title_count_context,
-            paragraph_target=paragraph_target,
         ),
         _ItemDraft,
         system=prompts.item_system(
             category, word_min=word_min, word_max=word_max,
             duration_context=duration_context,
             title_count_context=title_count_context,
-            paragraph_target=paragraph_target,
         ),
         model=settings.draft_model,
         max_tokens=2000,
     )
-    body = body_from_paragraphs(draft.paragraphs)
+    body = draft.body.strip()
     wc = word_count(body)
 
     def _needs_rewrite() -> bool:
-        if not (word_min <= wc <= word_max):
-            return True
-        if paragraph_target is not None:
-            para_count = len([p for p in draft.paragraphs if p.strip()])
-            return para_count != paragraph_target
-        return False
+        return not (word_min <= wc <= word_max)
 
     for attempt in range(max_rewrites):
         if not _needs_rewrite():
@@ -441,30 +417,26 @@ def _write_item(
             words=wc,
             word_min=word_min,
             word_max=word_max,
-            paragraph_target=paragraph_target,
-            paragraphs=len(draft.paragraphs),
             attempt=attempt + 1,
         )
         draft = llm.structured(
             prompts.item_rewrite_user(
-                title, concept_title, draft.paragraphs, wc,
+                title, concept_title, draft.body, wc,
                 word_min=word_min, word_max=word_max,
                 feedback=feedback,
                 duration_context=duration_context,
                 title_count_context=title_count_context,
-                paragraph_target=paragraph_target,
             ),
             _ItemDraft,
             system=prompts.item_system(
                 category, word_min=word_min, word_max=word_max,
                 duration_context=duration_context,
                 title_count_context=title_count_context,
-                paragraph_target=paragraph_target,
             ),
             model=settings.draft_model,
             max_tokens=2000,
         )
-        body = body_from_paragraphs(draft.paragraphs)
+        body = draft.body.strip()
         wc = word_count(body)
 
     item_title = to_sentence_case(draft.title.strip() or concept_title)
@@ -482,7 +454,6 @@ def generate_audio_script(
     category: str = "psychology",
     item_count: int | None = None,
     word_count: int | None = None,
-    paragraph_count: int | None = None,
     feedback: str | None = None,
     on_progress: ProgressFn | None = None,
     promised_from_title: bool = False,
@@ -496,7 +467,6 @@ def generate_audio_script(
     )
     effective_word_count = resolve_effective_word_count(word_count)
     word_min, word_max, word_target = resolve_word_band(effective_word_count)
-    paragraph_targets = resolve_paragraph_targets(count, paragraph_count)
     target_duration_minutes = parse_title_duration_minutes(title)
     item_label = extract_title_item_label(title) if promised_from_title else "items"
     title_count_context = (
@@ -521,7 +491,6 @@ def generate_audio_script(
         word_target=word_target,
         overall_word_limit=resolved_overall,
         target_duration_minutes=target_duration_minutes,
-        paragraph_count=paragraph_count,
         has_feedback=bool(revision),
     )
 
@@ -558,16 +527,12 @@ def generate_audio_script(
 
     def _write_one(idx: int, concept: str) -> None:
         nonlocal done_count
-        para_target = (
-            paragraph_targets[idx] if paragraph_targets is not None else None
-        )
         item = _write_item(
             title, concept, idx + 1, count, category,
             word_min=word_min, word_max=word_max,
             feedback=revision,
             duration_context=duration_context,
             title_count_context=title_count_context,
-            paragraph_target=para_target,
         )
         items[idx] = item
         with done_lock:

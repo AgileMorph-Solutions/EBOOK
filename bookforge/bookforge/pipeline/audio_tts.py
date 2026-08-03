@@ -30,7 +30,7 @@ def speakable_text(item: AudioScriptItem) -> str:
 
 
 def _concat_mp3(parts: list[Path], dest: Path) -> None:
-    """Concatenate MP3 files with ffmpeg stream copy."""
+    """Concatenate MP3 files using ffmpeg if available, otherwise pure binary frame join."""
     if not parts:
         raise RuntimeError("No audio parts to concatenate")
     if len(parts) == 1:
@@ -38,26 +38,28 @@ def _concat_mp3(parts: list[Path], dest: Path) -> None:
         return
 
     ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        raise RuntimeError("ffmpeg is required to merge narration audio")
+    if ffmpeg:
+        list_file = dest.parent / "concat.txt"
+        lines = []
+        for p in parts:
+            # ffmpeg concat demuxer needs escaped single quotes in paths
+            escaped = str(p.resolve()).replace("'", "'\\''")
+            lines.append(f"file '{escaped}'")
+        list_file.write_text("\n".join(lines) + "\n")
 
-    list_file = dest.parent / "concat.txt"
-    lines = []
-    for p in parts:
-        # ffmpeg concat demuxer needs escaped single quotes in paths
-        escaped = str(p.resolve()).replace("'", "'\\''")
-        lines.append(f"file '{escaped}'")
-    list_file.write_text("\n".join(lines) + "\n")
+        cmd = [
+            ffmpeg, "-y", "-f", "concat", "-safe", "0",
+            "-i", str(list_file), "-c", "copy", str(dest),
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if proc.returncode == 0 and dest.is_file() and dest.stat().st_size >= 100:
+            return
+        log.warning("ffmpeg_concat_failed_fallback_binary", err=(proc.stderr or proc.stdout or "")[:200])
 
-    cmd = [
-        ffmpeg, "-y", "-f", "concat", "-safe", "0",
-        "-i", str(list_file), "-c", "copy", str(dest),
-    ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    if proc.returncode != 0 or not dest.is_file() or dest.stat().st_size < 100:
-        raise RuntimeError(
-            f"ffmpeg concat failed: {(proc.stderr or proc.stdout or '')[:400]}"
-        )
+    # Fallback: MP3 streams from ElevenLabs have identical encoding settings,
+    # so binary concatenation of MPEG audio frame chunks is valid and playable.
+    combined = b"".join(p.read_bytes() for p in parts)
+    dest.write_bytes(combined)
 
 
 def generate_narration_audio(

@@ -18,7 +18,7 @@ export function CreateAudioScriptForm() {
   const router = useRouter();
   const [title, setTitle] = useState("");
   const [category, setCategory] = useState("psychology");
-  const [wordsPerSection, setWordsPerSection] = useState("");
+  const [wordsPerParagraph, setWordsPerParagraph] = useState("");
   const [totalParagraphs, setTotalParagraphs] = useState("");
   const [generateAudio, setGenerateAudio] = useState(true);
   const [voiceSelection, setVoiceSelection] = useState<VoiceSelection | null>(
@@ -31,7 +31,7 @@ export function CreateAudioScriptForm() {
     title.trim().length > 0 && category.trim().length > 0 && !submitting;
 
   function parseWordCount(): number | null {
-    const count = wordsPerSection ? parseInt(wordsPerSection, 10) : null;
+    const count = wordsPerParagraph ? parseInt(wordsPerParagraph, 10) : null;
     if (count != null && Number.isFinite(count) && count >= 100 && count <= 500) {
       return count;
     }
@@ -40,7 +40,7 @@ export function CreateAudioScriptForm() {
 
   function parseParagraphCount(): number | null {
     const count = totalParagraphs ? parseInt(totalParagraphs, 10) : null;
-    if (count != null && Number.isFinite(count) && count >= 1) {
+    if (count != null && Number.isFinite(count) && count >= 1 && count <= 500) {
       return count;
     }
     return null;
@@ -97,7 +97,7 @@ export function CreateAudioScriptForm() {
           required
           value={title}
           onChange={(e) => setTitle(e.target.value)}
-          placeholder="e.g. 30 Dark Psychology Tricks That Actually Work"
+          placeholder="e.g. 100 Mental Models That Make You Think 10 Steps Ahead of Everyone"
         />
         <p className="font-body text-body-sm italic text-secondary">
           A leading number sets section count — e.g. &quot;100 Signs…&quot;,
@@ -129,7 +129,7 @@ export function CreateAudioScriptForm() {
 
       <div className="flex flex-col gap-2">
         <Label htmlFor="as-word-count">
-          Words per section{" "}
+          Words per paragraph{" "}
           <span className="font-normal text-secondary">(optional)</span>
         </Label>
         <Input
@@ -138,12 +138,12 @@ export function CreateAudioScriptForm() {
           min={100}
           max={500}
           placeholder="Leave blank for 265–270 (default)"
-          value={wordsPerSection}
-          onChange={(e) => setWordsPerSection(e.target.value)}
+          value={wordsPerParagraph}
+          onChange={(e) => setWordsPerParagraph(e.target.value)}
         />
         <p className="font-body text-body-sm italic text-secondary">
-          Target word count for each numbered section. Leave blank to use the
-          default band of 265–270 words per section.
+          Target word count for each individual paragraph. Leave blank to use the
+          default band of 265–270 words per paragraph.
         </p>
       </div>
 
@@ -156,15 +156,15 @@ export function CreateAudioScriptForm() {
           id="as-paragraph-count"
           type="number"
           min={1}
-          max={5000}
-          placeholder="Leave blank for natural breaks"
+          max={500}
+          placeholder="Leave blank to use count from title"
           value={totalParagraphs}
           onChange={(e) => setTotalParagraphs(e.target.value)}
         />
         <p className="font-body text-body-sm italic text-secondary">
-          Total paragraphs across the full transcript, split across all sections.
-          Must be at least the section count. Leave blank for natural paragraph
-          breaks.
+          Overrides the count in the title. E.g. set to 50 on a "10 ways…"
+          title to generate 50 paragraphs instead of 10. Leave blank to use the
+          title.
         </p>
       </div>
 

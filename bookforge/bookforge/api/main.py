@@ -149,11 +149,12 @@ _active_jobs: dict[str, Thread] = {}
 _active_jobs_lock = Lock()
 
 _cors_origins = os.environ.get(
-    "CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000"
+    "CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000,http://localhost:3010,http://localhost:3011"
 ).split(",")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[o.strip() for o in _cors_origins if o.strip()],
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1|.*\.nip\.io)(:\d+)?",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -804,17 +805,21 @@ class CreateAudioScript(BaseModel):
         max_length=80,
         description="Free-text niche/category for prompt voice (e.g. psychology, true crime).",
     )
-    item_limit: int | None = Field(
-        None, gt=0, le=100,
-        description="Exact item count when set; omit to use the number from the title.",
+    paragraph_count: int | None = Field(
+        None, gt=0, le=500,
+        description=(
+            "Total paragraphs to generate. Takes priority over the count in the title. "
+            "Omit to derive from the title (e.g. '10 ways' → 10 paragraphs)."
+        ),
     )
     word_count: int | None = Field(
         None, ge=100, le=500,
-        description="Target words per item. Default: SOP 265–270.",
+        description="Target words per paragraph. Default: SOP 265–270.",
     )
-    paragraph_count: int | None = Field(
-        None, ge=1, le=5000,
-        description="Total paragraphs across the full transcript, distributed across items.",
+    # item_limit kept for backwards-compat; paragraph_count takes priority when both set
+    item_limit: int | None = Field(
+        None, gt=0, le=500,
+        description="Deprecated alias for paragraph_count. Use paragraph_count instead.",
     )
     voice_id: str | None = Field(
         None, description="Override ELEVENLABS_VOICE_ID for this job.",
@@ -844,6 +849,10 @@ class CreateAudioScript(BaseModel):
         if not text:
             raise ValueError("category is required")
         return text
+
+    def resolved_paragraph_count(self) -> int | None:
+        """paragraph_count takes priority; fall back to item_limit for compat."""
+        return self.paragraph_count if self.paragraph_count is not None else self.item_limit
 
 
 class RegenerateAudioScript(BaseModel):
@@ -1010,24 +1019,6 @@ def _audio_script_response(script_id: str) -> dict[str, Any]:
     return resp
 
 
-def _validate_audio_paragraph_count(req: CreateAudioScript) -> None:
-    """Reject when total paragraphs cannot cover at least one per section."""
-    if req.paragraph_count is None:
-        return
-    overall = resolve_overall_word_limit(req.title, None)
-    item_count = resolve_item_count(
-        req.title, req.item_limit, overall_word_limit=overall,
-    )
-    if req.paragraph_count < item_count:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"paragraph_count ({req.paragraph_count}) must be at least "
-                f"the section count ({item_count})"
-            ),
-        )
-
-
 def _run_audio_script(
     script_id: str,
     req: CreateAudioScript,
@@ -1035,12 +1026,16 @@ def _run_audio_script(
     feedback: str | None = None,
 ) -> None:
     overall_word_limit = resolve_overall_word_limit(req.title, None)
-    item_count = resolve_item_count(
-        req.title, req.item_limit, overall_word_limit=overall_word_limit,
-    )
+    explicit_count = req.resolved_paragraph_count()
+    # Priority: explicit paragraph_count > title-derived count
+    if explicit_count is not None:
+        item_count = explicit_count
+    else:
+        item_count = resolve_item_count(
+            req.title, None, overall_word_limit=overall_word_limit,
+        )
     effective_word_count = resolve_effective_word_count(req.word_count)
     duration_minutes = parse_title_duration_minutes(req.title)
-    paragraph_targets = resolve_paragraph_targets(item_count, req.paragraph_count)
     try:
         _set_as_state(
             script_id,
@@ -1051,7 +1046,6 @@ def _run_audio_script(
             progress={"done": 0, "total": item_count},
             target_duration_minutes=duration_minutes,
             effective_word_count=effective_word_count,
-            paragraph_targets=paragraph_targets,
             error=None,
             error_detail=None,
         )
@@ -1064,11 +1058,10 @@ def _run_audio_script(
             category=req.category,
             item_count=item_count,
             word_count=effective_word_count,
-            paragraph_count=req.paragraph_count,
             feedback=feedback,
             on_progress=on_progress,
             promised_from_title=(
-                req.item_limit is None and title_promises_item_count(req.title)
+                req.resolved_paragraph_count() is None and title_promises_item_count(req.title)
             ),
         )
         _write_as_result(script_id, result)
@@ -1076,10 +1069,6 @@ def _run_audio_script(
         if not req.skip_audio:
             if not get_settings().elevenlabs_api_key.strip():
                 raise ElevenLabsError("ELEVENLABS_API_KEY is not set")
-            if not shutil.which("ffmpeg"):
-                raise RuntimeError(
-                    "ffmpeg is required to merge narration audio — install ffmpeg on the host"
-                )
             _set_as_state(
                 script_id,
                 stage=AudioScriptStage.GENERATING_AUDIO,
@@ -1137,19 +1126,6 @@ def _require_audio_deps(*, skip_audio: bool) -> None:
                 "can_generate": False,
                 "title": "ElevenLabs not configured",
                 "message": "Set ELEVENLABS_API_KEY, or pass skip_audio=true for transcript only.",
-                "reason_code": "auth",
-            },
-        )
-    if not shutil.which("ffmpeg"):
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "can_generate": False,
-                "title": "Audio merge tool missing",
-                "message": (
-                    "ffmpeg is required to merge narration audio. "
-                    "Install ffmpeg on the server, or pass skip_audio=true."
-                ),
                 "reason_code": "auth",
             },
         )
@@ -1258,20 +1234,21 @@ def create_audio_script(req: CreateAudioScript, background_tasks: BackgroundTask
             },
         )
     _require_audio_deps(skip_audio=req.skip_audio)
-    _validate_audio_paragraph_count(req)
     script_id = _make_script_id(req.title.strip())
     overall = resolve_overall_word_limit(req.title, None)
-    resolved_item_count = resolve_item_count(
-        req.title, req.item_limit, overall_word_limit=overall,
+    explicit_count = req.resolved_paragraph_count()
+    resolved_item_count = (
+        explicit_count
+        if explicit_count is not None
+        else resolve_item_count(req.title, None, overall_word_limit=overall)
     )
     _set_as_state(
         script_id,
         status=AudioScriptStage.QUEUED,
         title=req.title.strip(),
         category=req.category,
-        item_limit=req.item_limit,
+        paragraph_count=req.resolved_paragraph_count(),
         word_count=req.word_count,
-        paragraph_count=req.paragraph_count,
         voice_id=req.voice_id,
         model_id=req.model_id,
         skip_audio=req.skip_audio,

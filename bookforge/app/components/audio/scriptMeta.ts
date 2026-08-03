@@ -22,32 +22,14 @@ export function formatDurationLabel(minutes: number): string {
   return `${mins} minute${mins === 1 ? "" : "s"}`;
 }
 
-export function formatWordsPerSection(script: ScriptMetaInput): string {
+export function formatWordsPerParagraph(script: ScriptMetaInput): string {
   const raw =
     script.word_count ??
     script.effective_word_count ??
     script.creation?.word_count ??
     null;
-  if (raw != null) return `${raw} words/section`;
-  return "265–270 words/section";
-}
-
-export function formatParagraphLabel(script: ScriptMetaInput): string | null {
-  const total =
-    script.paragraph_count ?? script.creation?.paragraph_count ?? null;
-  if (total == null) return null;
-  const sections =
-    script.item_count ??
-    script.item_limit ??
-    script.creation?.item_limit ??
-    null;
-  if (sections && sections > 0) {
-    const per = Math.floor(total / sections);
-    const rem = total % sections;
-    const avg = rem ? `~${per}–${per + 1}` : `${per}`;
-    return `${total} paragraphs (${avg}/section)`;
-  }
-  return `${total} paragraphs`;
+  if (raw != null) return `${raw} words/paragraph`;
+  return "265–270 words/paragraph";
 }
 
 export function formatOutputMode(script: ScriptMetaInput): string {
@@ -59,9 +41,10 @@ export function formatOutputMode(script: ScriptMetaInput): string {
 export function compactSidebarMeta(script: AudioScriptSummary): string {
   const parts: string[] = [];
   if (script.category) parts.push(script.category);
-  parts.push(formatWordsPerSection(script));
-  const para = formatParagraphLabel(script);
-  if (para) parts.push(para.replace(" paragraphs", " ¶").replace("/section", "/sec"));
+  parts.push(formatWordsPerParagraph(script));
+  if (script.paragraph_count != null) {
+    parts.push(`${script.paragraph_count} ¶`);
+  }
   parts.push(script.has_audio ? "Narration" : "Transcript");
   return parts.join(" · ");
 }

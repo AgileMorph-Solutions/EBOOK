@@ -22,7 +22,8 @@ _COUNT_NOUNS = (
     r"principles?|moves?|shifts?|strategies|strategy|secrets?|mistakes?|"
     r"reasons?|laws?|keys?|changes?|foods?|drinks?|workouts?|stretches|poses?|"
     r"questions?|skills?|routines?|swaps?|rituals?|practices?|"
-    r"signs?|behaviors?|concepts?|indicators?|signals?|traits?|types?|facts?|truths?|examples?"
+    r"signs?|behaviors?|concepts?|indicators?|signals?|traits?|types?|facts?|truths?|examples?|"
+    r"models?|frameworks?"
 )
 # Spelled-out cardinals (ten … ninety-nine) so "sixty habits" is caught too.
 _ONES = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,

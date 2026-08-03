@@ -64,7 +64,6 @@ from bookforge.pipeline.audio_script import (
     resolve_effective_word_count,
     resolve_item_count,
     resolve_overall_word_limit,
-    resolve_paragraph_targets,
     title_promises_item_count,
 )
 from bookforge.pipeline.audio_script_stages import AudioScriptStage, stages_payload

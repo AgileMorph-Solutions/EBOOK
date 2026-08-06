@@ -164,7 +164,7 @@ export function BookStatusPanel({
         </div>
       )}
 
-      {book?.status === "waiting" && (
+      {book && (book.status === "waiting" || (book.status === "running" && (book.error_kind === "quota_llm" || book.error_kind === "quota_images" || book.unfunded))) && (
         <div className="md:col-span-12">
           <Alert variant={book.unfunded || book.error_kind === "quota_llm" ? "error" : "info"}>
             {(book.unfunded || book.error_kind === "quota_llm") && (
@@ -185,6 +185,16 @@ export function BookStatusPanel({
                 className="mt-2 inline-block font-label text-label-sm font-semibold underline underline-offset-2"
               >
                 Recharge credits →
+              </a>
+            )}
+            {book.error_kind === "quota_images" && (
+              <a
+                href="https://ai.studio/billing"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="mt-2 inline-block font-label text-label-sm font-semibold underline underline-offset-2"
+              >
+                Manage billing →
               </a>
             )}
           </Alert>
@@ -237,9 +247,19 @@ export function BookStatusPanel({
               </a>
             )}
             {book.error_kind === "quota_images" && (
-              <p className="mt-2 font-label text-label-sm text-secondary">
-                Your book will continue automatically when the allowance resets — no need to resubmit.
-              </p>
+              <>
+                <p className="mt-2 font-label text-label-sm text-secondary">
+                  Your book will continue automatically when the allowance resets — no need to resubmit.
+                </p>
+                <a
+                  href="https://ai.studio/billing"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="mt-2 inline-block font-label text-label-sm font-semibold underline underline-offset-2"
+                >
+                  Manage billing →
+                </a>
+              </>
             )}
             {book.error_kind === "rate_limit" && (
               <p className="mt-2 font-label text-label-sm text-secondary">

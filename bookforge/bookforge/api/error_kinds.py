@@ -49,12 +49,15 @@ def classify(exc: BaseException) -> ClassifiedError:
         lo = getattr(exc, "lo", "?")
         hi = getattr(exc, "hi", "?")
         target = getattr(exc, "target", "?")
+        if isinstance(pages, int) and isinstance(hi, int) and pages > hi:
+            cause = "content grew past the page goal (often extra depth added during quality revisions)"
+        else:
+            cause = "planning or content did not produce enough material for the page goal"
         return ClassifiedError(
             kind="page_limit",
             message=(
                 f"This book came out to {pages} pages but needed {lo}–{hi} "
-                f"(target {target}). Planning or content did not produce "
-                f"enough material for the page goal."
+                f"(target {target}). {cause[0].upper()}{cause[1:]}."
             ),
             detail=top_detail,
         )

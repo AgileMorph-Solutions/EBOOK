@@ -1045,32 +1045,43 @@ def _enforce_toc_sections(
 
 
 _TOC_SECTION_HDR = re.compile(
-    r"^(?:section\s+\d+\s*:|part\s+\d+\s*:)", re.IGNORECASE,
+    r"^(?:section\s+\d+\s*:|part\s+\d+\s*:|chapter\s+\d+\s*:)", re.IGNORECASE,
 )
 _TOC_SKIP = frozenset({
     "subtitle", "what's inside", "whats inside", "bonus pages",
     "promise", "ideal length", "recipe count", "why this should exist",
 })
+_TOC_BARE_ORDINAL = re.compile(r"^\d{1,3}$")
 
 
 def _is_toc_section_header(line: str) -> bool:
     s = line.strip()
     if _TOC_SECTION_HDR.match(s):
         return True
-    return s.lower().startswith("section ") and ":" in s
+    low = s.lower()
+    return (low.startswith("section ") or low.startswith("chapter ")) and ":" in s
 
 
 def _parse_toc_lines(toc: list[str]) -> list[_BaseSection]:
     """Parse a flat TOC into section headers with recipe/entry lines."""
     sections: list[_BaseSection] = []
     cur: _BaseSection | None = None
+    next_is_header = False
     for raw in toc:
         line = raw.strip()
         if not line or line.lower() in _TOC_SKIP:
             continue
-        if _is_toc_section_header(line):
+        if _TOC_BARE_ORDINAL.match(line):
+            # A standalone numbering placeholder ("01", "02", ...) marks the
+            # NEXT line as its own top-level section — front/back-matter
+            # titles ("How to Use This Book") rarely say "Chapter N:" but are
+            # still meant to be distinct sections, not entries under one.
+            next_is_header = True
+            continue
+        if next_is_header or _is_toc_section_header(line):
             cur = _BaseSection(title=line, summary="", entries=[])
             sections.append(cur)
+            next_is_header = False
         else:
             if cur is None:
                 cur = _BaseSection(title="Recipes", summary="", entries=[])
@@ -1092,6 +1103,23 @@ def _merge_base_sections_to_limit(
     return out
 
 
+def _toc_looks_like_prose(toc: list[str]) -> bool:
+    """True when `toc` is actually prose (e.g. a pasted description/instructions
+    block dropped into the TOC field) rather than a list of chapter/entry
+    titles. Real titles are short; sentences are long and rarely match any
+    recognized section-header pattern. Used to discard unusable input rather
+    than forcing it through a doomed page-count plan."""
+    lines = [t.strip() for t in toc if t.strip()]
+    if not lines:
+        return False
+    headers = sum(1 for t in lines if _is_toc_section_header(t))
+    if headers > 0:
+        return False
+    avg_len = sum(len(t) for t in lines) / len(lines)
+    long_frac = sum(1 for t in lines if len(t) > 90) / len(lines)
+    return avg_len > 55 or long_frac > 0.3
+
+
 def _normalize_user_toc(
     toc: list[str],
     target_pages: int,
@@ -1100,6 +1128,9 @@ def _normalize_user_toc(
     pamphlet: bool,
 ) -> list[_BaseSection] | None:
     """Collapse recipe-list TOCs into page-feasible sections with planned entries."""
+    if _toc_looks_like_prose(toc):
+        log.warning("user_toc_looks_like_prose_discarded", raw_lines=len(toc))
+        return None
     max_secs = max_sections_for_target(target_pages, profile, pamphlet=pamphlet)
     if len(toc) <= max_secs:
         headers = sum(1 for t in toc if _is_toc_section_header(t))
@@ -1109,8 +1140,12 @@ def _normalize_user_toc(
     parsed = _parse_toc_lines(toc)
     if not parsed:
         return None
-    if not any(s.entries for s in parsed) and len(parsed) <= max_secs:
-        return None
+    # A clean parse with zero nested entries just means the TOC is already a
+    # flat per-section outline (e.g. ordinal-prefixed chapter/front-matter
+    # titles) — use it directly rather than discarding it in favor of the
+    # noisier `elif toc:` path, which would force the LLM toward `len(toc)`
+    # sections (including any bare ordinal placeholder lines) instead of the
+    # correct, already-deduplicated section count.
 
     merged = _merge_base_sections_to_limit(parsed, max_secs)
     log.info(
@@ -1243,6 +1278,98 @@ def _guide_toc_block(toc: list[str] | None) -> str:
     )
 
 
+def dry_run_toc_feasibility(
+    *,
+    topic: str,
+    text: str | None,
+    description: str | None,
+    toc: list[str] | None,
+    target_pages: int,
+    density_mode: str | None,
+    accepted_promised_count: int | None,
+    profile_overrides: dict | None = None,
+) -> tuple[bool, str, list]:
+    """Zero-cost (no LLM calls) feasibility pre-check for a TOC-driven
+    practical guide. Mirrors the real section-planning math in `build_bible`
+    (TOC normalization, density resolution, page-band reconciliation) using a
+    default profile guess instead of the LLM-derived one, so an infeasible
+    plan (e.g. 60 promised recipes across a real chapter structure that can't
+    fit the target page band at any density) is caught BEFORE the paid
+    profile-derivation and guide-planning calls, not after.
+
+    Only meaningful when `toc` is provided — without one, section structure
+    isn't knowable before the planning LLM runs, so this returns (True, "", [])
+    (no opinion, not a green light) rather than guessing.
+
+    Returns (ok, message, options) — `options` are `FeasibilityOption`s built
+    from the same real numbers as `message` (via `options_for_plan_infeasible`),
+    so a caller never ends up showing a message and a fix-it button that
+    disagree with each other."""
+    if not toc or target_pages <= 15:
+        return True, "", []
+
+    from bookforge.errors import PlanInfeasibleError
+    from bookforge.pipeline.feasibility import (
+        _default_profile,
+        apply_compact_profile,
+        assess_request,
+        options_for_plan_infeasible,
+    )
+
+    source = SourceDoc(topic=topic, text=text or "", passages=[])
+    cookbookish = _is_cookbookish(source, description=description, toc=toc)
+    profile = _default_profile(cookbookish)
+    if profile_overrides:
+        profile = profile.model_copy(update=profile_overrides)
+    profile = _apply_cookbook_profile_bias(
+        profile, cookbookish=cookbookish, has_user_toc=True,
+    )
+    pamphlet = target_pages <= 15
+
+    topic_promised = (
+        parse_promised_count(topic, description or "")
+        or parse_promised_count(topic, "")
+        or parse_promised_count("", text or "")
+    )
+    effective_promised = (
+        accepted_promised_count
+        if accepted_promised_count and accepted_promised_count > 0
+        else topic_promised
+    )
+
+    if density_mode == "compact" or (
+        density_mode is None
+        and effective_promised
+        and assess_request(
+            topic=topic, description=description, text=text,
+            target_pages=target_pages, toc=toc,
+            accepted_promised_count=accepted_promised_count,
+        ).status == "compact"
+    ):
+        profile = apply_compact_profile(profile)
+
+    normalized = _normalize_user_toc(toc, target_pages, profile, pamphlet=pamphlet)
+    if normalized is None:
+        # TOC is short/clean enough to skip straight to LLM-guided drafting —
+        # can't pre-validate a structure we don't have yet.
+        return True, "", []
+
+    density = _cap_density(
+        _guide_density(target_pages, profile, promised=effective_promised),
+        target_pages, profile, pamphlet=pamphlet, promised=effective_promised,
+    )
+    sections = _expand_sections(normalized, density, profile)
+    min_ent = effective_promised or 0
+    try:
+        reconcile_plan_to_page_band(
+            sections, profile, target_pages=target_pages, pamphlet=pamphlet,
+            min_entries=min_ent, promised_ceiling=effective_promised or None,
+        )
+        return True, "", []
+    except PlanInfeasibleError as exc:
+        return False, str(exc), options_for_plan_infeasible(exc)
+
+
 def build_bible(
     source: SourceDoc,
     *,
@@ -1256,6 +1383,13 @@ def build_bible(
 ) -> BookBible:
     excerpt = source.text[:20000]
     desc_block = _description_block(description)
+
+    if toc and _toc_looks_like_prose(toc):
+        # A prose block (e.g. the description pasted into the TOC field)
+        # cannot be honored as chapter structure — treat as if no TOC was
+        # given at all, everywhere below, rather than forcing a doomed plan.
+        log.warning("user_toc_looks_like_prose_discarded", raw_lines=len(toc))
+        toc = None
 
     if book_kind == "narrative":
         toc_block = _narrative_toc_block(toc)
@@ -1329,7 +1463,8 @@ def build_bible(
     from bookforge.errors import PlanInfeasibleError
 
     if density_mode == "compact" or (
-        effective_promised
+        density_mode is None
+        and effective_promised
         and assess_request(
             topic=source.topic,
             description=description,
@@ -1365,6 +1500,32 @@ def build_bible(
     if toc:
         normalized_toc_bases = _normalize_user_toc(
             toc, target_pages, profile, pamphlet=pamphlet,
+        )
+    if normalized_toc_bases is not None:
+        # Fail fast, using the REAL profile (already known at this point) —
+        # before the expensive guide-draft LLM call below. When a user TOC
+        # fully determines section structure, this check is exactly what
+        # the later reconciliation will do anyway; catching it here saves
+        # the largest cost component on a doomed plan instead of spending
+        # it and finding out afterward.
+        _preflight = _expand_sections(normalized_toc_bases, density, profile)
+        _preflight = _cap_sections_to_page_ceiling(
+            _preflight, target_pages, profile, pamphlet=pamphlet,
+            min_entries=effective_promised or 0,
+            min_sections=plan_scope.min_sections,
+        )
+        if effective_promised and planned_use_count(_preflight) < effective_promised:
+            _preflight = expand_sections_to_count(_preflight, effective_promised)
+        _preflight = _cap_sections_to_page_ceiling(
+            _preflight, target_pages, profile, pamphlet=pamphlet,
+            min_entries=effective_promised or 0,
+            min_sections=plan_scope.min_sections,
+        )
+        reconcile_plan_to_page_band(
+            _preflight, profile, target_pages=target_pages, pamphlet=pamphlet,
+            min_entries=effective_promised or plan_scope.min_entries or 0,
+            min_sections=plan_scope.min_sections,
+            promised_ceiling=effective_promised or None,
         )
     if normalized_toc_bases is not None:
         base_lo = base_hi = len(normalized_toc_bases)
@@ -1528,6 +1689,7 @@ def build_bible(
         pamphlet=pamphlet,
         min_entries=min_ent,
         min_sections=plan_scope.min_sections,
+        promised_ceiling=promised or None,
     )
     planned = planned_use_count(sections)
 
@@ -1554,6 +1716,9 @@ def build_bible(
     )
     # Always the honored count — never keep a higher marketing number after fit.
     bible.promised_uses = promised or planned
+    # Immutable snapshot of the user's original promise — later stages may
+    # resync `promised_uses` to actual content, but never overwrite this.
+    bible.original_promised_uses = bible.promised_uses
     # Make ALL planner-authored copy state the one promised count.
     propagate_promised_count(bible)
     log.info("bible_built", kind="practical_guide", title=bible.title,

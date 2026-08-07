@@ -28,23 +28,37 @@ _CAPS = {
 }
 
 
-def _caps_for(bible: BookBible | None) -> dict[str, int]:
+_MIN_CAP_SCALE = 0.25  # never shrink a field below 25% of its normal cap
+
+
+def _caps_for(bible: BookBible | None, *, scale: float = 1.0) -> dict[str, int]:
     if bible is None:
-        return _CAPS
-    es = profile_of(bible).entry_schema
-    caps = dict(_CAPS)
-    caps["title"] = max(caps["title"], 48)
-    # Headnotes: size to the profile's word range (~8 chars/word + slack).
-    caps["intro"] = max(caps["intro"], es.headnote_hi * 8 + 40)
-    if es.require_quantities:
-        # "1 (15-ounce) can condensed cream of mushroom soup" ≈ 50 chars —
-        # quantified items must never be cut mid-amount.
-        caps["need_item"] = 90
-    if es.max_steps > 5:
-        caps["step"] = 170
-    # Safety cautions are NEVER truncated (see _trim_entry) — a cut caution is a
-    # real safety risk, so no char cap is applied to it at all.
-    caps["savings"] = 100
+        caps = dict(_CAPS)
+    else:
+        es = profile_of(bible).entry_schema
+        caps = dict(_CAPS)
+        caps["title"] = max(caps["title"], 48)
+        # Headnotes: size to the profile's word range (~8 chars/word + slack).
+        caps["intro"] = max(caps["intro"], es.headnote_hi * 8 + 40)
+        if es.require_quantities:
+            # "1 (15-ounce) can condensed cream of mushroom soup" ≈ 50 chars —
+            # quantified items must never be cut mid-amount.
+            caps["need_item"] = 90
+        if es.max_steps > 5:
+            caps["step"] = 170
+        # Safety cautions are NEVER truncated (see _trim_entry) — a cut
+        # caution is a real safety risk, so no char cap applies to it at all.
+        caps["savings"] = 100
+    if scale < 1.0:
+        # A page-count overshoot too large for fixed caps to fix alone gets a
+        # proportional squeeze instead — same entries, shorter prose, rather
+        # than deleting entries below the book's promised count. need_item is
+        # exempt (quantified ingredients must never be cut mid-amount).
+        factor = max(_MIN_CAP_SCALE, scale)
+        for key in caps:
+            if key == "need_item":
+                continue
+            caps[key] = max(20, int(caps[key] * factor))
     return caps
 
 
@@ -116,17 +130,25 @@ def trim_how_to(how_to: dict | None) -> dict | None:
     return how_to
 
 
-def trim_chapter(chapter: Chapter, bible: BookBible | None = None) -> Chapter:
-    """Trim all UseEntry fields in a section chapter to layout char caps."""
-    caps = _caps_for(bible)
+def trim_chapter(
+    chapter: Chapter, bible: BookBible | None = None, *, scale: float = 1.0,
+) -> Chapter:
+    """Trim all UseEntry fields in a section chapter to layout char caps.
+
+    `scale` < 1.0 proportionally tightens every cap (see `_caps_for`) — used
+    when a fixed-cap pass alone can't close a large page-count overshoot."""
+    caps = _caps_for(bible, scale=scale)
     trimmed = 0
     for block in chapter.blocks:
         for entry in block.entries:
             trimmed += _trim_entry(entry, caps)
     if trimmed:
-        log.debug("layout_budget_trimmed", chapter=chapter.index, fields=trimmed)
+        log.debug("layout_budget_trimmed", chapter=chapter.index, fields=trimmed,
+                   scale=scale)
     return chapter
 
 
-def trim_chapters(chapters: list[Chapter], bible: BookBible | None = None) -> list[Chapter]:
-    return [trim_chapter(ch, bible) for ch in chapters]
+def trim_chapters(
+    chapters: list[Chapter], bible: BookBible | None = None, *, scale: float = 1.0,
+) -> list[Chapter]:
+    return [trim_chapter(ch, bible, scale=scale) for ch in chapters]

@@ -36,9 +36,29 @@ from bookforge.pipeline.page_limits import (
     scale_images_for_chapters,
     _upsize_sections_to_estimate,
 )
-from bookforge.schemas import BlockType, BookArtifact, BookBible, Chapter, QAResult
+from bookforge.schemas import (
+    BlockType, BookArtifact, BookBible, Chapter, QAResult, SourceDoc,
+)
 
 log = structlog.get_logger(__name__)
+
+
+def _total_words(chapters: list[Chapter]) -> int:
+    """Rough body-word count — the yardstick for "did expansion actually expand".
+
+    Counts every surface the layout turns into pages: block prose plus the
+    per-entry headnote, ingredient/needs list and steps. Absolute accuracy does
+    not matter; it is only ever compared against itself across one regen.
+    """
+    total = 0
+    for ch in chapters:
+        for b in ch.blocks:
+            total += len((b.text or "").split())
+            for e in b.entries:
+                total += len((e.intro or "").split())
+                total += sum(len(n.split()) for n in e.what_you_need)
+                total += sum(len((s.text or "").split()) for s in e.steps)
+    return total
 
 
 def _structural_expand_plan(
@@ -68,6 +88,7 @@ def _structural_expand_plan(
         target_estimate=lo,
         min_entries=planned_use_count(book_bible.sections),
         pamphlet=pamphlet,
+        promised_ceiling=book_bible.original_promised_uses or book_bible.promised_uses,
     )
     if planned_use_count(new_sections) <= planned_use_count(book_bible.sections):
         return book_bible, {}
@@ -278,6 +299,16 @@ def _final_vision_qa(
                 book_id, book_bible, chapters, all_images, qa_result,
                 cover_key=cover_key, pro=pro, source=source, stage=stage,
             )
+            target = book_bible.target_pages
+            if target:
+                lo, _hi = allowed_page_range(target)
+                if artifact.page_count < lo:
+                    log.warning("vision_qa_trim_undershoot",
+                                pages=artifact.page_count, floor=lo)
+                    artifact.warnings.append(
+                        f"page count {artifact.page_count} fell below the "
+                        f"{lo}-page target after a late layout fix — shipped anyway")
+                    artifact.degraded = True
             continue
         tag = "uncorroborated" if not corroborated else "unresolved"
         artifact.warnings.extend(f"vision QA ({tag}): {b}" for b in blocking[:5])
@@ -325,6 +356,17 @@ def _assemble_with_page_scale(
     Books outside [target, page ceiling] after all scale passes raise
     PageLimitError unless SHIP_ON_PAGE_OVERSHOOT=true (overshoot only)."""
     target = book_bible.target_pages or 100
+    # The bible-stage plan estimate, captured BEFORE the scale loop can
+    # mutate book_bible (page-expand replaces it) — this is what the
+    # synchronous pre-flight gate saw for this book. Logging it against the
+    # real final page count on every completed run (success, shipped-anyway,
+    # or PageLimitError) turns every run into a calibration data point for
+    # estimate_rendered_pages(), instead of re-deriving constants by hand
+    # from a one-off incident (see PLAN.md Part 5).
+    plan_estimate = estimate_rendered_pages(
+        book_bible.sections, book_bible.profile, specials=book_bible.specials,
+        pamphlet=target <= 15,
+    )
     chapters_cur = chapters
     images_cur = all_images
     artifact: BookArtifact | None = None
@@ -336,6 +378,10 @@ def _assemble_with_page_scale(
         )
         pages = artifact.page_count
         if is_acceptable_page_count(pages, target):
+            log.info("page_estimate_vs_actual", book_id=book_id,
+                      plan_estimate=plan_estimate, actual_pages=pages,
+                      target=target, outcome="in_band",
+                      ratio=round(pages / max(1, plan_estimate), 2))
             return _final_vision_qa(
                 book_id, artifact, book_bible, chapters_cur, images_cur,
                 qa_result, cover_key=cover_key, pro=pro, source=source,
@@ -343,12 +389,26 @@ def _assemble_with_page_scale(
             )
         if scale_attempt >= settings.max_page_scale_revisions:
             lo, hi = allowed_page_range(target)
-            if pages > hi and settings.ship_on_page_overshoot:
-                artifact.warnings.append(
-                    f"page count {pages} exceeds ceiling {hi} after "
-                    f"{scale_attempt} trim passes — shipped anyway")
+            ship = (
+                (pages > hi and settings.ship_on_page_overshoot)
+                or (pages < lo and settings.ship_on_page_undershoot)
+            )
+            log.info("page_estimate_vs_actual", book_id=book_id,
+                      plan_estimate=plan_estimate, actual_pages=pages,
+                      target=target, outcome="shipped_out_of_band" if ship else "failed",
+                      ratio=round(pages / max(1, plan_estimate), 2))
+            if ship:
+                if pages > hi:
+                    detail = (f"page count {pages} exceeds ceiling {hi} after "
+                              f"{scale_attempt} trim passes — shipped anyway")
+                    log.warning("page_overshoot_shipped", pages=pages, ceiling=hi)
+                else:
+                    detail = (f"page count {pages} is below the {lo}-page target "
+                              f"after content expansion and layout padding — "
+                              f"shipped anyway")
+                    log.warning("page_undershoot_shipped", pages=pages, floor=lo)
+                artifact.warnings.append(detail)
                 artifact.degraded = True
-                log.warning("page_overshoot_shipped", pages=pages, ceiling=hi)
                 return _final_vision_qa(
                     book_id, artifact, book_bible, chapters_cur, images_cur,
                     qa_result, cover_key=cover_key, pro=pro, source=source,
@@ -379,10 +439,24 @@ def _assemble_with_page_scale(
                     f"removing any {noun}s",
                 ]
             try:
-                chapters_cur = content.regenerate_guide_sections(
+                expanded = content.regenerate_guide_sections(
                     chapters_cur, book_bible, source, expand_faults,
                     registry_seed=chapters_cur,
                 )
+                # An EXPAND pass must never shrink the book. When the primary
+                # model times out, llm falls back to a smaller one (observed in
+                # prod: opus -> sonnet -> haiku), and smaller models write more
+                # tersely — so the pass meant to add pages removed them instead
+                # (49 -> 47 on book b09a09). Keep the longer draft; the
+                # deterministic pad in assemble closes any remaining gap.
+                before_words = _total_words(chapters_cur)
+                after_words = _total_words(expanded)
+                if after_words < before_words:
+                    log.warning("page_expand_shrank_discarded",
+                                before_words=before_words,
+                                after_words=after_words)
+                else:
+                    chapters_cur = expanded
             except BudgetExceeded:
                 log.warning("page_expand_budget_exhausted")
                 lo, hi = allowed_page_range(target)
@@ -409,6 +483,7 @@ def _assemble_with_page_scale(
         chapters_cur, removed = scale_chapters_to_pages(
             chapters_cur, book_bible,
             current_pages=pages, target_pages=target,
+            scale_attempt=scale_attempt,
         )
         images_cur = scale_images_for_chapters(images_cur, chapters_cur)
         content_guide.sync_card_image_briefs(chapters_cur, book_bible)
@@ -445,14 +520,31 @@ def _assemble_narrative_with_page_scale(
         pages = artifact.page_count
         if is_acceptable_page_count(pages, target):
             return artifact
+        lo, _hi = allowed_page_range(target)
+        if pages < lo:
+            # This path can only TRIM (scale_chapters_to_pages just bumps
+            # page_budget when under the floor and returns the chapters
+            # untouched), so re-rendering an undershooting narrative book
+            # produces a byte-identical PDF. Stop burning renders and let the
+            # ship/raise policy below decide immediately.
+            scale_attempt = settings.max_page_scale_revisions
         if scale_attempt >= settings.max_page_scale_revisions:
             lo, hi = allowed_page_range(target)
-            if pages > hi and settings.ship_on_page_overshoot:
-                artifact.warnings.append(
-                    f"page count {pages} exceeds ceiling {hi} after scaling — "
-                    "shipped anyway")
+            ship = (
+                (pages > hi and settings.ship_on_page_overshoot)
+                or (pages < lo and settings.ship_on_page_undershoot)
+            )
+            if ship:
+                if pages > hi:
+                    detail = (f"page count {pages} exceeds ceiling {hi} after "
+                              "scaling — shipped anyway")
+                    log.warning("page_overshoot_shipped", pages=pages, ceiling=hi)
+                else:
+                    detail = (f"page count {pages} is below the {lo}-page "
+                              "target — shipped anyway")
+                    log.warning("page_undershoot_shipped", pages=pages, floor=lo)
+                artifact.warnings.append(detail)
                 artifact.degraded = True
-                log.warning("page_overshoot_shipped", pages=pages, ceiling=hi)
                 return artifact
             raise PageLimitError(
                 f"page count {pages} outside allowed range {lo}–{hi} after scaling",
@@ -461,6 +553,7 @@ def _assemble_narrative_with_page_scale(
         chapters_cur, removed = scale_chapters_to_pages(
             chapters_cur, book_bible,
             current_pages=pages, target_pages=target,
+            scale_attempt=scale_attempt,
         )
         images_cur = scale_images_for_chapters(images_cur, chapters_cur)
         log.info("page_scale_trim", attempt=scale_attempt + 1,
@@ -471,6 +564,80 @@ def _assemble_narrative_with_page_scale(
 
 def _budget_qa_result(note: str) -> QAResult:
     return QAResult(groundedness=0.0, passed=False, layout_issues=[note])
+
+
+def plan_source(
+    book_id: str, topic: str, *, text: str | None, youtube_url: str | None,
+) -> SourceDoc:
+    """Load-or-ingest this book's source, checkpointing on ingest."""
+    source = checkpoints.load_source(book_id)
+    if source is not None:
+        log.info("source_checkpoint_hit", book_id=book_id,
+                 passages=len(source.passages))
+        return source
+    source = ingest.ingest(topic, text=text, youtube_url=youtube_url)
+    checkpoints.save_source(book_id, source)
+    return source
+
+
+def plan_bible(
+    book_id: str,
+    source: SourceDoc,
+    *,
+    target_pages: int,
+    book_kind: str = "practical_guide",
+    description: str | None = None,
+    toc: list[str] | None = None,
+    profile_overrides: dict | None = None,
+    density_mode: str | None = None,
+    accepted_promised_count: int | None = None,
+) -> BookBible:
+    """Load-or-build this book's bible, checkpointing on build."""
+    bible = checkpoints.load_bible(book_id)
+    if bible is not None:
+        log.info("bible_checkpoint_hit", book_id=book_id)
+        return bible
+    bible = bible_stage.build_bible(
+        source, target_pages=target_pages, book_kind=book_kind,
+        description=description, toc=toc,
+        profile_overrides=profile_overrides,
+        density_mode=density_mode,
+        accepted_promised_count=accepted_promised_count,
+    )
+    checkpoints.save_bible(book_id, bible)
+    return bible
+
+
+def plan_book(
+    book_id: str,
+    topic: str,
+    *,
+    text: str | None,
+    youtube_url: str | None,
+    target_pages: int,
+    book_kind: str = "practical_guide",
+    description: str | None = None,
+    toc: list[str] | None = None,
+    profile_overrides: dict | None = None,
+    density_mode: str | None = None,
+    accepted_promised_count: int | None = None,
+) -> tuple[SourceDoc, BookBible]:
+    """Ingest + build this book's bible, checkpointing both (idempotent on
+    checkpoint hit — safe to call again once a job resumes).
+
+    Used both as the synchronous pre-flight gate in api/main.py (before a job
+    is created, so an infeasible plan is never even queued) and inside
+    `_run_book_impl`'s cold-start path — sharing this one function means the
+    gate and the real run can never drift apart."""
+    source = plan_source(book_id, topic, text=text, youtube_url=youtube_url)
+    bible = plan_bible(
+        book_id, source, target_pages=target_pages, book_kind=book_kind,
+        description=description, toc=toc,
+        profile_overrides=profile_overrides,
+        density_mode=density_mode,
+        accepted_promised_count=accepted_promised_count,
+    )
+    return source, bible
 
 
 def run_book(
@@ -560,13 +727,7 @@ def _run_book_impl(
         require_ready(fresh=True)
 
     stage("ingest")
-    source = checkpoints.load_source(book_id)
-    if source is None:
-        source = ingest.ingest(topic, text=text, youtube_url=youtube_url)
-        checkpoints.save_source(book_id, source)
-    else:
-        log.info("source_checkpoint_hit", book_id=book_id,
-                 passages=len(source.passages))
+    source = plan_source(book_id, topic, text=text, youtube_url=youtube_url)
 
     if book_kind != "practical_guide":
         # ---- narrative path (bible+chapters resume parity; images/QA re-run) ----
@@ -578,14 +739,13 @@ def _run_book_impl(
             chapters = cached_chapters
         else:
             stage("bible")
-            book_bible = bible_stage.build_bible(
-                source, target_pages=target_pages, book_kind=book_kind,
+            book_bible = plan_bible(
+                book_id, source, target_pages=target_pages, book_kind=book_kind,
                 description=description, toc=toc,
                 profile_overrides=profile_overrides,
                 density_mode=density_mode,
                 accepted_promised_count=accepted_promised_count,
             )
-            checkpoints.save_bible(book_id, book_bible)
             stage("content")
             chapters = content.write_book(book_bible, source, limit=limit)
             checkpoints.save_chapters(book_id, chapters)
@@ -630,14 +790,13 @@ def _run_book_impl(
             log.info("qa_checkpoint_hit", book_id=book_id)
     else:
         stage("bible")
-        book_bible = bible_stage.build_bible(
-            source, target_pages=target_pages, book_kind=book_kind,
+        book_bible = plan_bible(
+            book_id, source, target_pages=target_pages, book_kind=book_kind,
             description=description, toc=toc,
             profile_overrides=profile_overrides,
             density_mode=density_mode,
             accepted_promised_count=accepted_promised_count,
         )
-        checkpoints.save_bible(book_id, book_bible)
 
         stage("content")
         partial = checkpoints.load_sections(book_id)

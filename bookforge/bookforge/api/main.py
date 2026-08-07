@@ -35,7 +35,7 @@ from typing import Any, Literal
 
 import anthropic
 import structlog
-from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Body, BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -51,7 +51,7 @@ from bookforge.errors import (
     IngestError, JobDeadlineError, PageLimitError, PipelineCancelledError,
     PlanInfeasibleError, ReadinessError,
 )
-from bookforge.pipeline import runctx
+from bookforge.pipeline import checkpoints, runctx
 from bookforge.pipeline.readiness import (
     ReadinessRequest,
     ReadinessResult,
@@ -439,13 +439,30 @@ class CreateBook(BaseModel):
         return self
 
 
+class RegenerateOverrides(BaseModel):
+    """Optional settings changes for POST /books/{id}/regenerate. Any field
+    left unset keeps the book's original value. Providing ANY override
+    forces a full pipeline re-run (never the zero-cost rerender shortcut) and
+    wipes prior plan/content checkpoints, since they were built for the old
+    settings and would otherwise be resumed-from incorrectly."""
+    target_pages: int | None = Field(None, gt=0, le=300)
+    text: str | None = None
+    description: str | None = None
+    toc: list[str] | None = None
+    density_mode: Literal["standard", "compact"] | None = None
+    accepted_promised_count: int | None = None
+    profile_overrides: dict | None = None
+
+
 def _enqueue_book(
     req: CreateBook,
     background_tasks: BackgroundTasks,
     *,
     source_filename: str | None = None,
+    book_id: str | None = None,
 ) -> dict[str, str]:
-    book_id = _make_book_id(req.topic)
+    if book_id is None:
+        book_id = _make_book_id(req.topic)
     state: dict[str, Any] = {
         "status": "queued",
         "topic": req.topic,
@@ -539,7 +556,70 @@ def create_book(req: CreateBook, background_tasks: BackgroundTasks):
         and not req.density_mode
     ):
         req = req.model_copy(update={"density_mode": "compact"})
-    return _enqueue_book(req, background_tasks)
+
+    # The coarse check above uses a guessed profile — it can't see the real
+    # per-book structure until planning actually runs. Run that planning step
+    # (ingest + build_bible) for real, synchronously, right here — before any
+    # job exists. It's the exact same call the background job would make as
+    # its first stage, so on success it costs nothing extra: build_bible's
+    # checkpoint is reused and the job resumes straight into content. On a
+    # genuine plan mismatch (promised count can't fit the page target), this
+    # blocks the request with an actionable message instead of letting a job
+    # start, run for a while, and fail later.
+    from bookforge.pipeline.orchestrator import plan_book
+
+    book_id = _make_book_id(req.topic)
+    try:
+        plan_book(
+            book_id, req.topic, text=req.text, youtube_url=req.youtube_url,
+            target_pages=req.target_pages, book_kind=req.book_kind,
+            description=req.description, toc=req.toc,
+            profile_overrides=req.profile_overrides,
+            density_mode=req.density_mode,
+            accepted_promised_count=req.accepted_promised_count,
+        )
+    except Exception as exc:
+        cls = _failure_class(exc)
+        if cls != "permanent":
+            # Provider hiccup, rate limit, etc. — don't block the user on
+            # infrastructure trouble; let the normal async job retry/park.
+            log.warning("sync_plan_check_deferred", book_id=book_id,
+                        err=str(exc)[:200], failure_class=cls)
+            return _enqueue_book(req, background_tasks)
+
+        from bookforge.api.error_kinds import classify as _classify_error
+        from bookforge.errors import PlanInfeasibleError
+        from bookforge.pipeline.feasibility import (
+            build_book_assessment, options_for_plan_infeasible,
+        )
+
+        classified = _classify_error(exc)
+        # The coarse assessment gives useful context (page band, scope) even
+        # though it can't be trusted for remediation options — those come
+        # from the real exception's own numbers when available, so the
+        # button offered always matches the message shown, never a
+        # separately (and possibly differently) computed suggestion.
+        options = (
+            options_for_plan_infeasible(exc)
+            if isinstance(exc, PlanInfeasibleError) else []
+        )
+        assessment = build_book_assessment(
+            topic=req.topic, description=req.description, text=req.text,
+            target_pages=req.target_pages, toc=req.toc,
+            accepted_promised_count=req.accepted_promised_count,
+            density_mode=req.density_mode,
+        ).model_copy(update={
+            "can_create": False, "status": "infeasible",
+            "message": classified.message,
+            **({"options": options} if options else {}),
+        })
+        result = ReadinessResult(
+            can_generate=False, title=req.topic, message=classified.message,
+            reason_code="request", assessment=assessment,
+        )
+        raise HTTPException(status_code=503, detail=result.model_dump())
+
+    return _enqueue_book(req, background_tasks, book_id=book_id)
 
 
 @app.post("/books/upload", status_code=202)
@@ -684,18 +764,28 @@ def rerender_book(book_id: str, background_tasks: BackgroundTasks):
 
 
 @app.post("/books/{book_id}/regenerate", status_code=202)
-def regenerate_book(book_id: str, background_tasks: BackgroundTasks):
+def regenerate_book(
+    book_id: str,
+    background_tasks: BackgroundTasks,
+    overrides: RegenerateOverrides | None = Body(None),
+):
     """Recover a failed job the smart way: reuse whatever work already exists
-    instead of starting over from scratch.
+    instead of starting over from scratch — unless `overrides` changes
+    content-affecting settings (target_pages, text, description, toc,
+    density_mode, accepted_promised_count), in which case old checkpoints are
+    wiped and the job always fully re-runs with the new settings, since a
+    zero-cost rerender or a resume from the old plan would silently ignore
+    the change or apply it inconsistently.
 
-    - If a render manifest is stored (failure happened at/after the layout
-      stage — content and images are already generated), this is a zero
-      LLM/image-cost re-render, identical to POST /rerender.
-    - Otherwise (failure happened at ingest/bible/content, before anything
-      reusable was cached), falls back to a full pipeline re-run from the
-      original request — same params the book was originally submitted with,
-      same book_id, so job history and the URL stay the same instead of
-      minting a new book.
+    - No overrides + a render manifest is stored (failure happened at/after
+      the layout stage): zero LLM/image-cost re-render, identical to
+      POST /rerender.
+    - No overrides + no manifest: full pipeline re-run from the original
+      request — same params the book was originally submitted with.
+    - Overrides given: full pipeline re-run from the original request merged
+      with the overrides, after re-checking readiness against the NEW
+      settings (so an infeasible edit — e.g. still not enough pages — fails
+      immediately with a clear reason instead of after ~2 minutes).
     """
     state = _read_state(book_id)
     if state is None:
@@ -706,6 +796,37 @@ def regenerate_book(book_id: str, background_tasks: BackgroundTasks):
             detail=f"book is {state.get('status')} — regenerate applies to "
                    "failed or waiting books only",
         )
+
+    has_overrides = overrides is not None and any(
+        v is not None for v in overrides.model_dump().values()
+    )
+
+    if has_overrides:
+        req = _read_request(book_id)
+        if req is None:
+            raise HTTPException(
+                status_code=409,
+                detail="no original request stored for this book — it "
+                       "cannot be regenerated; create a new book instead",
+            )
+        update = {k: v for k, v in overrides.model_dump().items() if v is not None}
+        req = req.model_copy(update=update)
+        readiness = check_readiness(
+            include_request=_to_readiness_request(req),
+            active_jobs=_count_active_jobs(),
+        )
+        if not readiness.can_generate:
+            raise HTTPException(status_code=503, detail=readiness.model_dump())
+        checkpoints.reset_for_replan(book_id, keep_source="text" not in update)
+        _write_request(book_id, req)
+        _set_state(book_id, status="queued", stage=None, attempts=0,
+                   resume_attempts=0, quota_parks=0, cost_usd=0.0,
+                   target_pages=req.target_pages, **_DONE_CLEARS)
+        background_tasks.add_task(_run_pipeline, book_id, req)
+        log.info("regenerate_with_overrides", book_id=book_id,
+                 changed=list(update.keys()))
+        return {"book_id": book_id, "status": "queued", "mode": "full_rerun",
+                "overrides_applied": list(update.keys())}
 
     has_manifest = storage.exists(f"books/{book_id}/render_manifest.json")
     if has_manifest:
@@ -1480,7 +1601,7 @@ def _failure_class(exc: Exception) -> str:
     return "transient"
 
 
-def _wait_reason(exc: Exception) -> str:
+def _wait_reason(exc: Exception, classified: "ClassifiedError | None" = None) -> str:
     """Fine-grained reason for a parked job (drives the message + UI styling)."""
     if llm.is_unfunded(exc):
         return "unfunded"
@@ -1490,6 +1611,15 @@ def _wait_reason(exc: Exception) -> str:
         return "timeout"
     if getattr(exc, "quota_class", "") == "daily":
         return "image_quota_daily"
+    if classified is None:
+        from bookforge.api.error_kinds import classify as _classify_error
+        classified = _classify_error(exc)
+    if classified.kind == "rate_limit":
+        return "llm_rate_limit"
+    if classified.kind == "quota_llm":
+        return "quota_llm"
+    if classified.kind == "quota_images":
+        return "quota_images"
     return "service"
 
 
@@ -1506,6 +1636,16 @@ def _waiting_message(reason: str) -> str:
                 "keep things healthy. Progress is saved — it will continue "
                 "automatically, no action needed.")
     if reason == "image_quota_daily":
+        return ("Paused: today's image allowance is used up. Your book will "
+                "finish automatically when it resets — no action needed.")
+    if reason == "llm_rate_limit":
+        return ("Paused: the writing service is rate-limited right now. Your "
+                "book will continue automatically in a few minutes — no "
+                "action needed.")
+    if reason == "quota_llm":
+        return ("Paused: writing credits are temporarily exhausted. Your book "
+                "will finish automatically once they're available again.")
+    if reason == "quota_images":
         return ("Paused: today's image allowance is used up. Your book will "
                 "finish automatically when it resets — no action needed.")
     return ("We're preparing your book — this is taking a little longer than "
@@ -1586,8 +1726,8 @@ def _park(book_id: str, exc: Exception, cls: str) -> None:
         if wait_until is not None and wait_until > next_dt:
             next_dt = wait_until
     delay = max(0, int((next_dt - now).total_seconds()))
-    reason = _wait_reason(exc)
     classified = _classify_error(exc)
+    reason = _wait_reason(exc, classified)
     _set_state(book_id, status="waiting", attempts=attempts,
                quota_parks=quota_parks,
                wait_reason=reason, unfunded=(reason == "unfunded"),

@@ -105,10 +105,18 @@ def never_swallow(exc: BaseException) -> bool:
     of skipping the current item: provider-wide failures (job parks), budget
     exhaustion (orchestrator ships partial work), and the cooperative
     cancel/deadline signals raised from runctx between calls — swallowing those
-    would let a cancelled or overdue job keep burning its remaining items."""
+    would let a cancelled or overdue job keep burning its remaining items.
+
+    A RateLimitError that reaches here has already exhausted `_cascade`'s full
+    model fallback chain (each model retried 4x by tenacity) — every model is
+    rate-limited, not just one. That's a job-level condition, not a one-off
+    item failure, so it must surface (park + auto-resume) instead of silently
+    dropping the item."""
     from bookforge.cost import BudgetExceeded
     from bookforge.errors import JobDeadlineError, PipelineCancelledError
 
+    if isinstance(exc, anthropic.RateLimitError):
+        return True
     return is_provider_unavailable(exc) or isinstance(
         exc, (BudgetExceeded, JobDeadlineError, PipelineCancelledError))
 

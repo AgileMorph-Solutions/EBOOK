@@ -125,10 +125,13 @@ def _gen_openai(prompt: str, aspect: str, negative_prompt: str = "") -> bytes:
 
 
 # Best-first Imagen model order; falls through on availability/permission errors.
+# Verified live against client.models.list() — "imagen-4.0-generate-preview-06-06"
+# and "imagen-3.0-generate-002" (the previous fallbacks) no longer exist on the
+# API (404 NOT_FOUND on every call), which silently broke the fallback chain.
 _IMAGEN_FALLBACKS = [
     "imagen-4.0-generate-001",
-    "imagen-4.0-generate-preview-06-06",
-    "imagen-3.0-generate-002",
+    "imagen-4.0-ultra-generate-001",
+    "imagen-4.0-fast-generate-001",
 ]
 
 
@@ -160,7 +163,17 @@ def _gen_gemini(prompt: str, aspect: str, negative_prompt: str = "") -> bytes:
     for model in models:
         try:
             resp = client.models.generate_images(model=model, prompt=full, config=cfg)
-            return resp.generated_images[0].image.image_bytes
+            images = resp.generated_images or []
+            if not images:
+                # Empty response (no exception raised) — often a safety-filtered
+                # prompt, but can also be a transient API glitch. Previously this
+                # crashed with a bare "'NoneType' object is not subscriptable",
+                # which matched neither the quota nor the fatal-error patterns
+                # below and got misclassified as a quota problem. Raise a clear
+                # RuntimeError instead so it's logged legibly and treated the
+                # same as any other per-model failure (try the next model).
+                raise RuntimeError(f"model {model} returned an empty image response")
+            return images[0].image.image_bytes
         except Exception as exc:
             if _is_quota_error(exc):
                 # 429 means the API key is exhausted — no point trying other models

@@ -24,7 +24,13 @@ from bookforge.clients import storage
 from bookforge.config import settings
 from bookforge.errors import GeometryError, LayoutError
 from bookforge.layout import build, guide, render
-from bookforge.pipeline import checkpoints, layout_budget, layout_qa, pdf_geometry
+from bookforge.pipeline import (
+    checkpoints,
+    layout_budget,
+    layout_qa,
+    page_pad,
+    pdf_geometry,
+)
 from bookforge.pipeline.page_limits import (
     allowed_page_range,
     is_within_page_range,
@@ -32,6 +38,10 @@ from bookforge.pipeline.page_limits import (
 from bookforge.schemas import BookArtifact, BookBible, Chapter, GeneratedImage, QAResult
 
 log = structlog.get_logger(__name__)
+
+# Deterministic page-pad rounds allowed before a short book ships as-is. Each
+# round is one extra render (free) and pads only the measured deficit.
+_MAX_PAD_ROUNDS = 3
 
 # Vision-QA issue fragments that indicate a real print defect (vs a
 # nice-to-fix whitespace/balance nit).
@@ -140,7 +150,9 @@ def _plan_repairs(overflows: list[dict], prev: dict[str, int]) -> dict[str, int]
 
 def _render_practical(bible, chapters, images, *, cover_key, how_to,
                       safety_data, pro,
-                      degraded: bool = False) -> tuple[str, bytes, dict | None, list[str]]:
+                      degraded: bool = False,
+                      seed_repairs: dict[str, int] | None = None,
+                      ) -> tuple[str, bytes, dict | None, list[str]]:
     """Build + render a practical guide with MEASURED one-shot self-repair.
 
     Render once, and if the in-page audit reports overflows, compute the exact
@@ -152,8 +164,12 @@ def _render_practical(bible, chapters, images, *, cover_key, how_to,
     warnings. What remains after 4 rounds raises LayoutError with structured
     defects so the orchestrator can regenerate the offending blocks — unless
     `degraded` is set, in which case the best render ships with the residual
-    defects as warnings (the orchestrator's last resort, never a dead job)."""
-    repairs: dict[str, int] = {}
+    defects as warnings (the orchestrator's last resort, never a dead job).
+
+    `seed_repairs` pre-loads the repair dict — used by _render_practical_to_floor
+    to apply deterministic page padding. Audit-driven repairs then escalate on
+    top of the seed, so padding can never mask a genuine overflow."""
+    repairs: dict[str, int] = dict(seed_repairs or {})
     defects: list[str] = []
     raw: list[dict] = []
     html = ""
@@ -193,6 +209,59 @@ def _render_practical(bible, chapters, images, *, cover_key, how_to,
         + " | ".join(defects[:3]),
         defects=raw,
     )
+
+
+def _render_practical_to_floor(
+    bible, chapters, images, *, cover_key, how_to, safety_data, pro,
+    degraded: bool = False, page_floor: int = 0,
+) -> tuple[str, bytes, dict | None, list[str]]:
+    """Render, then deterministically pad until the PDF meets `page_floor`.
+
+    target_pages is a floor, not a ceiling. Content expansion upstream is the
+    preferred way to reach it (real prose beats spread-out prose), but when a
+    book still renders short this closes the gap at zero API cost by driving
+    layout levels through the existing repair channel — see pipeline/page_pad.
+
+    Padding is incremental and stops at the first render that clears the floor,
+    so the result lands just above target rather than at the ceiling.
+    """
+    seed: dict[str, int] = {}
+    result = _render_practical(
+        bible, chapters, images, cover_key=cover_key, how_to=how_to,
+        safety_data=safety_data, pro=pro, degraded=degraded,
+    )
+    if page_floor <= 0 or bible.book_kind != "practical_guide":
+        return result
+    profile = bible.profile
+    if profile is None:
+        return result
+
+    for attempt in range(1, _MAX_PAD_ROUNDS + 1):
+        pages = _page_count(result[1])
+        if pages >= page_floor:
+            if attempt > 1:
+                log.info("page_pad_reached_floor", pages=pages, floor=page_floor)
+            return result
+        pad = page_pad.plan_pad(
+            chapters, profile, deficit=page_floor - pages, prev=seed,
+        )
+        if not pad:
+            log.warning("page_pad_exhausted", pages=pages, floor=page_floor)
+            return result
+        for key, level in pad.items():
+            seed[key] = max(seed.get(key, 0), level)
+        log.info("page_pad_applied", attempt=attempt, pages_before=pages,
+                 floor=page_floor, keys=len(seed))
+        result = _render_practical(
+            bible, chapters, images, cover_key=cover_key, how_to=how_to,
+            safety_data=safety_data, pro=pro, degraded=degraded,
+            seed_repairs=seed,
+        )
+
+    pages = _page_count(result[1])
+    if pages < page_floor:
+        log.warning("page_pad_incomplete", pages=pages, floor=page_floor)
+    return result
 
 
 def _page_count(pdf: bytes) -> int:
@@ -266,11 +335,12 @@ def rerender(book_id: str) -> BookArtifact:
     bible = BookBible(**data["bible"])
     chapters = [Chapter(**c) for c in data["chapters"]]
     images = [GeneratedImage(**i) for i in data["images"]]
-    html, pdf, report, warnings = _render_practical(
+    html, pdf, report, warnings = _render_practical_to_floor(
         bible, chapters, images, cover_key=data.get("cover_key"),
         how_to=data.get("how_to"), safety_data=data.get("safety"),
         pro=data.get("pro"),
         degraded=settings.ship_on_layout_defects,
+        page_floor=bible.target_pages or 0,
     )
     checkpoints.save_fit_report(book_id, report)
     pdf, warnings = _geometry_gate(html, pdf, warnings)
@@ -323,9 +393,10 @@ def assemble(
                               cover_key, how_to, safety_data, pro)
         # Deterministic render + audit + self-repair FIRST (free), so vision QA
         # credits are never spent on a layout the audit already rejects.
-        html, pdf, report, render_warnings = _render_practical(
+        html, pdf, report, render_warnings = _render_practical_to_floor(
             bible, chapters, images, cover_key=cover_key,
             how_to=how_to, safety_data=safety_data, pro=pro, degraded=degraded,
+            page_floor=bible.target_pages or 0,
         )
         warnings.extend(render_warnings)
         # Page-class map of THIS render, for the final vision QA page picker.

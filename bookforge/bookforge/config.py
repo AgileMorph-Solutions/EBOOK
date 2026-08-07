@@ -163,8 +163,20 @@ class Settings(BaseSettings):
     # to restore the old hard-fail behavior.
     ship_on_layout_defects: bool = Field(True, alias="SHIP_ON_LAYOUT_DEFECTS")
     # Ship a book that still exceeds its page ceiling after all trim passes
-    # (with a warning) instead of raising PageLimitError.
+    # (with a warning) instead of raising PageLimitError. Off by default: the
+    # up-front plan (bible stage, now gated synchronously before a job is
+    # even created — see api/main.py create_book) is accurate enough that an
+    # overshoot this late means something genuinely went wrong (e.g. QA
+    # revisions adding prose depth beyond the plan), and a book that blows
+    # past the requested page band should be a fixable failure, not a silent
+    # surprise. Set true to restore the old always-ship behavior.
     ship_on_page_overshoot: bool = Field(False, alias="SHIP_ON_PAGE_OVERSHOOT")
+    # Ship a book that is still SHORT of its page floor after content expansion
+    # and deterministic layout padding, instead of raising PageLimitError.
+    # Feasibility is gated up front at /readiness — a request that cannot reach
+    # its target is refused BEFORE generation, so reaching this point means an
+    # hour of work and real spend are already sunk and a short book beats none.
+    ship_on_page_undershoot: bool = Field(True, alias="SHIP_ON_PAGE_UNDERSHOOT")
     # Finished PDF page band: [target, min(ratio×target, target+absolute, 300)].
     max_page_overshoot_ratio: float = Field(1.2, alias="MAX_PAGE_OVERSHOOT_RATIO")
     max_page_overshoot_absolute: int = Field(20, alias="MAX_PAGE_OVERSHOOT_ABSOLUTE")

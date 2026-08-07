@@ -139,6 +139,46 @@ def test_finalize_marketing_counts_from_chapters():
     assert "4" not in bible.subtitle.split("6")[0]
 
 
+def test_finalize_marketing_counts_resyncs_down_after_trim():
+    """A transient over-generation must not permanently stick — once real
+    content shrinks back down, the marketing count should follow it, floored
+    only by the ORIGINAL user promise (never the last inflated value)."""
+    from bookforge.pipeline.content_guardrails import finalize_marketing_counts
+    from bookforge.schemas import BlockType, Chapter, ContentBlock, UseEntry
+
+    bible = _minimal_bible(
+        title="Oma's Poor-Man Kitchen: 60 Forgotten German Recipes",
+        subtitle="60 Forgotten German Recipes",
+        promised_uses=60,
+        original_promised_uses=60,
+        sections=[],
+    )
+
+    def _chapter(n: int) -> Chapter:
+        return Chapter(
+            index=1, title="Recipes",
+            blocks=[ContentBlock(
+                type=BlockType.use_list,
+                entries=[UseEntry(number=i, title=f"Use {i}") for i in range(1, n + 1)],
+            )],
+        )
+
+    # First pass: something inflated actual generation to 280 items.
+    finalize_marketing_counts(bible, [_chapter(280)])
+    assert bible.promised_uses == 280
+
+    # Later trimming brings real content back down to 65 items — the promise
+    # must resync down toward that, not stay pinned at 280.
+    finalize_marketing_counts(bible, [_chapter(65)])
+    assert bible.promised_uses == 65
+    assert "65" in bible.subtitle
+
+    # And it must never drop below the ORIGINAL promise, even if content
+    # shrinks under it.
+    finalize_marketing_counts(bible, [_chapter(10)])
+    assert bible.promised_uses == 60
+
+
 def test_shrink_sections_to_count():
     sections = [
         SectionPlan(index=i, title=f"S{i}", full_card_quota=7, list_quota=24)

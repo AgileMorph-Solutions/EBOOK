@@ -396,12 +396,19 @@ def count_generated_entries(chapters: list[Chapter]) -> int:
 
 
 def finalize_marketing_counts(bible: BookBible, chapters: list[Chapter]) -> None:
-    """Sync marketing copy to actual entries, never below the promised count."""
+    """Sync marketing copy to CURRENT actual entries, floored by the user's
+    ORIGINAL promise — never permanently stuck at a transient over-generation.
+    Unlike a plain "never go below the last promise" rule, this resyncs
+    `promised_uses` up OR down to match actual content each call, so later
+    trimming correctly lowers the stated count back toward the truth instead
+    of leaving marketing copy pinned at an earlier inflated value."""
     actual = count_generated_entries(chapters)
     if actual <= 0:
         return
-    floor = _promised(bible)
+    floor = bible.original_promised_uses or _promised(bible)
     target = max(actual, floor) if floor > 0 else actual
+    if target == bible.promised_uses:
+        return
     bible.promised_uses = target
     propagate_promised_count(bible)
 

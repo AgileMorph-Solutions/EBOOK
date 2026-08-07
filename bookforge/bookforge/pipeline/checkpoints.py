@@ -248,3 +248,26 @@ def clear_pdf(book_id: str) -> None:
     """Remove the interior PDF so a stale one from a partial prior attempt
     can't shadow the fresh output of the retry."""
     storage.delete(_key(book_id, "interior.pdf"))
+
+
+# ---------- Full reset (settings changed — old checkpoints no longer apply) ----------
+
+def reset_for_replan(book_id: str, *, keep_source: bool) -> None:
+    """Wipe every plan-derived checkpoint before a regenerate with changed
+    settings (target_pages, text, toc, density_mode, …). Without this, the
+    orchestrator's resume logic would find the OLD bible.json/chapters.json —
+    built for the OLD settings — and either reuse a now-wrong plan or corrupt
+    it against the new one. `keep_source=False` also clears source.json (the
+    source text itself changed, so cached passages are stale too)."""
+    if not keep_source:
+        storage.delete(_key(book_id, "source.json"))
+    storage.delete(_key(book_id, "bible.json"))
+    storage.delete(_key(book_id, "chapters.json"))
+    storage.delete(_key(book_id, "qa.json"))
+    storage.delete(_key(book_id, "images.json"))
+    storage.delete(_key(book_id, "fit_report.json"))
+    storage.delete(_key(book_id, "render_manifest.json"))
+    storage.delete(_key(book_id, "image_quota_park.json"))
+    clear_sections(book_id)
+    clear_pdf(book_id)
+    log.info("checkpoints_reset_for_replan", book_id=book_id, kept_source=keep_source)

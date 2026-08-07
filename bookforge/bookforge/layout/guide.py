@@ -40,6 +40,24 @@ _TOC_ROWS_PER_PAGE = 44
 _TOC_GROUP_COST = 2  # a group header costs ~2 row heights
 
 
+def entry_needs_spread(entry, profile) -> bool:
+    """Heuristic (no browser available at build time): estimate the vertical
+    lines the entry's body would need and only request the 2-page spread when
+    it clearly overflows one page. Dense profiles (recipes) get a slightly
+    lower bar since their pages also carry a photo + quantified list.
+
+    Module-level so pipeline/page_pad.py can predict, without rendering, which
+    entries already occupy two pages — an entry that is ALREADY a spread gains
+    nothing from pad level 1, and counting it would overstate pad capacity.
+    """
+    step_lines = sum(max(1, math.ceil(len(s.text) / 55)) for s in entry.steps)
+    need_lines = len(entry.what_you_need)
+    intro_lines = math.ceil(len(entry.intro or "") / 65)
+    total = step_lines + need_lines + intro_lines
+    limit = 22 if profile.pages_per_entry >= 1.5 else 30
+    return total > limit or len(entry.steps) > 9
+
+
 def _esc(t) -> str:
     return html.escape(str(t)) if t else ""
 
@@ -442,16 +460,7 @@ class GuideDirector:
             self._entry_single(section, p, hero_uri, key)
 
     def _entry_needs_spread(self, entry) -> bool:
-        """Heuristic (no browser available at build time): estimate the vertical
-        lines the entry's body would need and only request the 2-page spread when
-        it clearly overflows one page. Dense profiles (recipes) get a slightly
-        lower bar since their pages also carry a photo + quantified list."""
-        step_lines = sum(max(1, math.ceil(len(s.text) / 55)) for s in entry.steps)
-        need_lines = len(entry.what_you_need)
-        intro_lines = math.ceil(len(entry.intro or "") / 65)
-        total = step_lines + need_lines + intro_lines
-        limit = 22 if self.profile.pages_per_entry >= 1.5 else 30
-        return total > limit or len(entry.steps) > 9
+        return entry_needs_spread(entry, self.profile)
 
     @staticmethod
     def _entry_attr(key: str) -> str:

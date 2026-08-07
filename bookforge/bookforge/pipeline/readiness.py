@@ -154,10 +154,24 @@ def _check_images() -> CheckResult:
         detail = str(exc)[:200]
         lower = detail.lower()
         if "paid" in lower or "403" in detail or "permission" in lower:
-            reason: ReasonCode = "auth"
-        else:
-            reason = "quota_images"
-        return CheckResult(ok=False, reason_code=reason, detail=detail)
+            # A real, actionable account/billing problem — worth blocking on,
+            # since it won't self-resolve and every image in the book would
+            # fail the same way.
+            return CheckResult(ok=False, reason_code="auth", detail=detail)
+        # Anything else here is an UNCONFIRMED guess, not a known quota or
+        # billing condition (e.g. a stale model id, a transient empty
+        # response) — a real instance of this hard-blocked book creation with
+        # a false "today's image limit is used up, try again tomorrow"
+        # message while the actual cause was an unrelated bug. Same "never
+        # hard-block, ship degraded" philosophy as ImageQuotaError above: a
+        # wrong hard block is worse than a wrong soft pass, since the image
+        # stage's own retry/park/degrade handling deals with real failures
+        # during the run instead of a misdiagnosed front-door block.
+        return CheckResult(
+            ok=True, reason_code="ok",
+            detail=f"image check hit an unexpected error — book will ship "
+                   f"with partial/no images if this persists: {detail[:160]}",
+        )
     except RuntimeError as exc:
         msg = str(exc)
         if "not set" in msg.lower():
@@ -245,6 +259,45 @@ def _check_request(req: ReadinessRequest) -> tuple[CheckResult, FeasibilityResul
             "message": assessment.message,
             "options": [],
         })
+
+    # The assessment above uses a coarse pre-flight page estimate that doesn't
+    # know the REAL per-chapter structure once a TOC is present. Run a more
+    # accurate (still zero-cost) dry-run using the actual TOC-parsing logic
+    # to catch cases the coarse estimate misses — e.g. a well-formed chapter
+    # outline that structurally can't fit the target page band at any
+    # density. Best-effort: uses a guessed profile, so it can't be perfectly
+    # accurate (the real profile comes from an LLM call not made here), but
+    # it catches genuine structural mismatches before the user ever submits.
+    if req.toc and req.target_pages > 15:
+        from bookforge.pipeline.bible import dry_run_toc_feasibility
+
+        ok, msg, options = dry_run_toc_feasibility(
+            topic=req.topic,
+            text=req.text,
+            description=req.description,
+            toc=req.toc,
+            target_pages=req.target_pages,
+            density_mode=req.density_mode,
+            accepted_promised_count=req.accepted_promised_count,
+        )
+        if not ok:
+            # Replace — don't merge with — the coarse assessment's/feasibility's
+            # options: this dry-run's numbers are more accurate, and the coarse
+            # options can otherwise point in a different (even contradictory)
+            # direction than this message. The frontend prefers `feas.options`
+            # over `assessment.options` when both are present, so both must be
+            # updated together or the UI would still show the stale buttons.
+            assessment = assessment.model_copy(update={
+                "can_create": False, "status": "infeasible", "message": msg,
+                "options": options,
+            })
+            if feas is not None:
+                feas = feas.model_copy(update={
+                    "status": "infeasible", "message": msg, "options": options,
+                })
+            return CheckResult(
+                ok=False, reason_code="request", detail=msg,
+            ), feas, assessment
 
     detail = (
         f"assessment={assessment.status} band={assessment.page_range_lo}-"

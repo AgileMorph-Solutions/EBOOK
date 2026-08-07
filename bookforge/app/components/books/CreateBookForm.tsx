@@ -232,7 +232,17 @@ export function CreateBookForm() {
       const res = await createBook(body);
       router.push(`/books/${res.book_id}`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Submission failed");
+      // POST /books now runs a real, accurate plan check synchronously
+      // before creating a job — an infeasible plan comes back as a 503 with
+      // a ReadinessResult-shaped body (same contract as the pre-check
+      // above). Route it through the same alert + fix-it buttons instead of
+      // a flat error string.
+      const detail = (err as (Error & { detail?: unknown }) | undefined)?.detail;
+      if (detail && typeof detail === "object" && "can_generate" in detail) {
+        setRequestReadiness(detail as ReadinessResult);
+      } else {
+        setError(err instanceof Error ? err.message : "Submission failed");
+      }
       setSubmitting(false);
     }
   }
@@ -377,12 +387,18 @@ export function CreateBookForm() {
           className="w-full px-10 py-4 font-display text-headline-sm sm:w-auto"
         >
           {submitting
-            ? "Checking and starting…"
+            ? "Planning your book…"
             : readinessLoading
               ? "Checking…"
               : "Generate ebook"}
           {!submitting && !readinessLoading && <Icon name="auto_awesome" />}
         </Button>
+        {submitting && (
+          <p className="mt-2 font-body text-body-sm text-secondary">
+            Working out chapters and page count for your settings — this can
+            take up to a minute.
+          </p>
+        )}
       </div>
     </form>
   );

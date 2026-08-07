@@ -136,3 +136,43 @@ def test_thin_outline_expandable_not_blocked():
     assert assessment.can_create is True
     assert assessment.assessment_mode == "expand"
 
+
+def test_options_for_plan_infeasible_ceiling_capped_suggests_lower_pages():
+    from bookforge.errors import PlanInfeasibleError
+    from bookforge.pipeline.feasibility import options_for_plan_infeasible
+
+    exc = PlanInfeasibleError(
+        "plan tops out at 99 pages",
+        ceiling_capped=True, suggested_pages=99,
+    )
+    options = options_for_plan_infeasible(exc)
+    assert len(options) == 1
+    assert options[0].id == "lower_pages"
+    assert options[0].target_pages == 99
+
+
+def test_options_for_plan_infeasible_non_ceiling_capped_returns_nothing():
+    from bookforge.errors import PlanInfeasibleError
+    from bookforge.pipeline.feasibility import options_for_plan_infeasible
+
+    exc = PlanInfeasibleError("plan estimates 59 pages but need at least 100")
+    assert options_for_plan_infeasible(exc) == []
+
+
+def test_options_for_plan_infeasible_overshoot_suggests_raise_pages():
+    """Overshoot (suggested_pages above the original target) must offer
+    raise_pages, not lower_pages — the opposite direction from the
+    ceiling-capped undershoot case."""
+    from bookforge.errors import PlanInfeasibleError
+    from bookforge.pipeline.feasibility import options_for_plan_infeasible
+
+    exc = PlanInfeasibleError(
+        "plan estimates 168 pages but maximum is 98 (target 81) — raise "
+        "target to ~168 pages, or reduce chapters/items",
+        est=168, lo=81, hi=98, target_pages=81, suggested_pages=168,
+    )
+    options = options_for_plan_infeasible(exc)
+    assert len(options) == 1
+    assert options[0].id == "raise_pages"
+    assert options[0].target_pages == 168
+

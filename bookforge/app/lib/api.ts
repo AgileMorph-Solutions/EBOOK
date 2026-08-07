@@ -147,7 +147,9 @@ async function apiFetch<T>(
     } catch {
       /* ignore */
     }
-    throw new Error(formatApiError(detail));
+    const err = new Error(formatApiError(detail)) as Error & { detail?: unknown };
+    err.detail = detail;
+    throw err;
   }
   return res.json() as Promise<T>;
 }
@@ -356,10 +358,26 @@ export type RegenerateResponse = {
   book_id: string;
   status: string;
   mode?: "rerender" | "full_rerun";
+  overrides_applied?: string[];
 };
 
-export async function regenerateBook(bookId: string): Promise<RegenerateResponse> {
-  return apiFetch(`/books/${bookId}/regenerate`, { method: "POST" });
+export type RegenerateOverrides = {
+  target_pages?: number;
+  text?: string;
+  description?: string;
+  toc?: string[];
+  density_mode?: "standard" | "compact";
+  accepted_promised_count?: number;
+};
+
+export async function regenerateBook(
+  bookId: string,
+  overrides?: RegenerateOverrides
+): Promise<RegenerateResponse> {
+  return apiFetch(`/books/${bookId}/regenerate`, {
+    method: "POST",
+    body: JSON.stringify(overrides ?? null),
+  });
 }
 
 // --------------------------------------------------------------------------- #

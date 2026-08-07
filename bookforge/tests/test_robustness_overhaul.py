@@ -88,6 +88,24 @@ def test_error_kinds_for_new_domain_errors():
     assert classify(JobDeadlineError("slow")).kind == "timeout"
 
 
+def test_page_limit_error_message_matches_actual_direction():
+    """Regression test: the friendly message must say what actually happened
+    — "grew past the goal" for an overshoot, "didn't produce enough" for an
+    undershoot — never the wrong direction (previously always said "did not
+    produce enough material", even when the book was 87 pages too LONG)."""
+    from bookforge.api.error_kinds import classify
+
+    over = PageLimitError("x", pages=207, target=100, lo=100, hi=120)
+    over_msg = classify(over).message.lower()
+    assert "grew past" in over_msg
+    assert "did not produce enough" not in over_msg
+
+    under = PageLimitError("x", pages=59, target=100, lo=100, hi=120)
+    under_msg = classify(under).message.lower()
+    assert "did not produce enough" in under_msg
+    assert "grew past" not in under_msg
+
+
 # --------------------------------------------------------------------------- #
 # Quota parsing — grounded on the live captured Imagen 429
 # --------------------------------------------------------------------------- #

@@ -6,6 +6,7 @@ from bookforge.pipeline.bible import (
     _expand_sections,
     _guide_density,
     _is_cookbookish,
+    dry_run_toc_feasibility,
 )
 from bookforge.pipeline.content_guardrails import (
     parse_promised_count,
@@ -128,3 +129,53 @@ def test_cookbook_density_image_quota_standard():
     density = _guide_density(75, profile)
     expected = max(1, min(density.cards_per_section, round(density.page_budget / 1.5)))
     assert density.image_quota == expected
+
+
+def test_dry_run_toc_feasibility_propagates_options_from_plan_infeasible(monkeypatch):
+    """Regression test for the "raise pages" bug: when the real page-band
+    reconciliation determines the plan is ceiling-capped, dry_run_toc_feasibility
+    must surface the SAME structured remediation (a lower_pages option), not a
+    stale or contradictory one — verified by mocking reconcile_plan_to_page_band
+    itself so this test doesn't depend on the TOC-normalization/density
+    arithmetic (covered separately in test_page_limits.py)."""
+    from bookforge.pipeline import bible
+    from bookforge.errors import PlanInfeasibleError
+
+    def fake_reconcile(*args, **kwargs):
+        raise PlanInfeasibleError(
+            "plan tops out at 99 pages", ceiling_capped=True, suggested_pages=99,
+        )
+
+    monkeypatch.setattr(bible, "reconcile_plan_to_page_band", fake_reconcile)
+
+    toc = ["Section 1: Starters"] + [f"Recipe {i}" for i in range(1, 51)]
+    toc += ["Section 2: Mains"] + [f"Dish {i}" for i in range(1, 51)]
+    ok, msg, options = dry_run_toc_feasibility(
+        topic="100 Forgotten Recipes",
+        text="placeholder source text",
+        description=None,
+        toc=toc,
+        target_pages=200,
+        density_mode=None,
+        accepted_promised_count=None,
+    )
+    assert ok is False
+    assert "99 pages" in msg
+    assert len(options) == 1
+    assert options[0].id == "lower_pages"
+    assert options[0].target_pages == 99
+
+
+def test_dry_run_toc_feasibility_no_toc_returns_no_opinion():
+    ok, msg, options = dry_run_toc_feasibility(
+        topic="Simple Guide",
+        text="placeholder",
+        description=None,
+        toc=None,
+        target_pages=100,
+        density_mode=None,
+        accepted_promised_count=None,
+    )
+    assert ok is True
+    assert msg == ""
+    assert options == []

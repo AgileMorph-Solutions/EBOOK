@@ -12,6 +12,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from bookforge.errors import PlanInfeasibleError
 from bookforge.pipeline.content_guardrails import parse_promised_count
 from bookforge.pipeline.plan_scope import (
     PlanScope,
@@ -33,6 +34,7 @@ COMPACT_PAGES_PER_ENTRY = 0.8
 STANDARD_COOKBOOK_PPE = 2.0
 MIN_COMPACT_PPE = 0.8
 MAX_CARDS_PER_SECTION = 8
+MAX_LIST_QUOTA_PER_SECTION = 12
 PROSE_EXPAND_BUFFER = 15
 
 DensityStatus = Literal["ok", "compact", "infeasible"]
@@ -45,6 +47,34 @@ class FeasibilityOption(BaseModel):
     label: str
     target_pages: int | None = None
     promised_count: int | None = None
+
+
+def options_for_plan_infeasible(exc: PlanInfeasibleError) -> list[FeasibilityOption]:
+    """Build remediation option(s) directly from a real PlanInfeasibleError's
+    own numbers, instead of a separately-computed coarse estimate that can
+    disagree with (or even contradict) the message the user is shown.
+
+    Two well-defined cases carry a `suggested_pages`: ceiling-capped
+    undershoot (ceiling_capped=True — lower the target to the plan's own
+    achievable estimate) and overshoot (raise the target — raising
+    target_pages genuinely raises the allowed ceiling here, unlike the
+    undershoot case). Direction is read off whether the suggestion is above
+    or below the original target, so both share one code path. Bare (no
+    structured fields) PlanInfeasibleErrors return no options — callers
+    should fall back to their own assessment in that case."""
+    if not exc.suggested_pages:
+        return []
+    if exc.target_pages is not None and exc.suggested_pages > exc.target_pages:
+        option_id: Literal["raise_pages", "lower_pages"] = "raise_pages"
+    else:
+        option_id = "lower_pages"
+    return [
+        FeasibilityOption(
+            id=option_id,
+            label=f"Use ~{exc.suggested_pages} pages",
+            target_pages=exc.suggested_pages,
+        ),
+    ]
 
 
 class FeasibilityResult(BaseModel):
@@ -223,6 +253,10 @@ def _expand_undershoot(
     warnings: list[str],
 ) -> _AssessmentBundle | None:
     """Return expand-allowed bundle when estimate is below floor but fillable."""
+    # Local import: /readiness is polled continuously and page_pad pulls in the
+    # layout stack. Same cycle-and-cost convention page_limits.py uses.
+    from bookforge.pipeline import page_pad
+
     if est >= lo:
         return None
 
@@ -266,9 +300,20 @@ def _expand_undershoot(
         )
         return _AssessmentBundle(feas=feas, assessment=assessment)
 
+    # Beyond content expansion the renderer can ALSO pad deterministically
+    # (pipeline/page_pad), so the honest question is whether content + padding
+    # together clear the floor — not whether the raw outline gets within some
+    # fraction of it. The old rule here was `gap <= 15 or max_est >= lo*0.80`,
+    # which waved through a book whose own planner said 94 pages against a
+    # 100-page floor; it then burnt an hour of generation and died on
+    # PageLimitError. Capacity is now measured with the same function the pad
+    # loop uses, so what readiness promises is what generation can deliver.
     gap = lo - max_est
-    prose_ok = gap <= PROSE_EXPAND_BUFFER or max_est >= int(lo * 0.80)
-    if prose_ok:
+    pad_capacity = page_pad.pad_capacity_for_plan(
+        _max_expandable_entries(n_sections, scope, effective),
+    )
+    max_est_padded = max_est + pad_capacity
+    if max_est_padded >= lo:
         expand_warnings.append(
             f"Outline estimates ~{est} pages; page-expand will deepen prose "
             f"to reach {lo}."
@@ -303,10 +348,16 @@ def _expand_undershoot(
         )
         return _AssessmentBundle(feas=feas, assessment=assessment)
 
-    suggested = max(max_est, est)
+    # Suggest a target this outline can actually HIT — content plus padding.
+    # (The old suggestion here was `lo + gap`, i.e. 2*lo - max_est, which raised
+    # the target FURTHER above what the outline supports and made the shortfall
+    # strictly worse the more infeasible the request was.)
+    suggested = max(1, min(ABSOLUTE_PAGE_CEILING, max_est_padded))
     msg = (
-        f"Your outline needs at least ~{max_est} pages but you asked for "
-        f"{target} (band {lo}–{hi}). Add more source detail or lower the target."
+        f"This outline supports about {max_est_padded} pages "
+        f"(~{est} from the outline as written, up to ~{max_est} once entries "
+        f"are expanded), but you asked for {target} (band {lo}–{hi}). "
+        f"Lower the target to ~{suggested} pages, or add more source material."
     )
     options = [
         FeasibilityOption(
@@ -319,8 +370,8 @@ def _expand_undershoot(
         options.append(
             FeasibilityOption(
                 id="raise_pages",
-                label=f"Keep {promised} items — use {min(ABSOLUTE_PAGE_CEILING, lo + gap)} pages",
-                target_pages=min(ABSOLUTE_PAGE_CEILING, lo + gap),
+                label=f"Keep {promised} items — use {suggested} pages",
+                target_pages=suggested,
             ),
         )
     feas = FeasibilityResult(
@@ -594,7 +645,7 @@ def _assess_book(
 
     # --- In band [lo, hi] ---
     if effective and effective > 0:
-        if est > target and not user_compact:
+        if est > target and not user_compact and density_mode != "standard":
             compact_profile = apply_compact_profile(_default_profile(cookbookish))
             est_compact = estimate_preflight_pages(
                 num_sections=n_sections,

@@ -12,6 +12,7 @@ import { Alert } from "@/components/ui/Alert";
 import { Breadcrumb } from "@/components/ui/Breadcrumb";
 import { Button } from "@/components/ui/Button";
 import { DetailsCollapsible } from "@/components/ui/DetailsCollapsible";
+import { Input, Label, Textarea } from "@/components/ui/Input";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { Skeleton } from "@/components/ui/Spinner";
 import { Icon } from "@/components/ui/Icon";
@@ -80,6 +81,9 @@ export function BookStatusPanel({
   const [archiveError, setArchiveError] = useState<string | null>(null);
   const [regenerating, setRegenerating] = useState(false);
   const [regenerateError, setRegenerateError] = useState<string | null>(null);
+  const [editingSettings, setEditingSettings] = useState(false);
+  const [editTargetPages, setEditTargetPages] = useState<number | null>(null);
+  const [editSourceText, setEditSourceText] = useState<string | null>(null);
 
   async function handleArchive() {
     if (archiving) return;
@@ -97,18 +101,37 @@ export function BookStatusPanel({
     }
   }
 
-  async function handleRegenerate() {
+  async function handleRegenerate(overrides?: { target_pages?: number; text?: string }) {
     if (regenerating) return;
     setRegenerating(true);
     setRegenerateError(null);
     try {
-      await regenerateBook(bookId);
+      await regenerateBook(bookId, overrides);
+      setEditingSettings(false);
       router.refresh();
     } catch (e) {
       setRegenerateError(e instanceof Error ? e.message : "Regenerate failed");
     } finally {
       setRegenerating(false);
     }
+  }
+
+  function openEditSettings() {
+    setEditTargetPages(book?.target_pages ?? 100);
+    setEditSourceText(book?.source_text ?? "");
+    setRegenerateError(null);
+    setEditingSettings(true);
+  }
+
+  function handleRegenerateWithEdits() {
+    const overrides: { target_pages?: number; text?: string } = {};
+    if (editTargetPages != null && editTargetPages !== book?.target_pages) {
+      overrides.target_pages = editTargetPages;
+    }
+    if (editSourceText != null && editSourceText.trim() && editSourceText !== book?.source_text) {
+      overrides.text = editSourceText;
+    }
+    handleRegenerate(overrides);
   }
 
   if (loading && !book) {
@@ -164,7 +187,7 @@ export function BookStatusPanel({
         </div>
       )}
 
-      {book && (book.status === "waiting" || (book.status === "running" && (book.error_kind === "quota_llm" || book.error_kind === "quota_images" || book.unfunded))) && (
+      {book && (book.status === "waiting" || (book.status === "running" && (book.error_kind === "quota_llm" || book.error_kind === "quota_images" || book.error_kind === "rate_limit" || book.unfunded))) && (
         <div className="md:col-span-12">
           <Alert variant={book.unfunded || book.error_kind === "quota_llm" ? "error" : "info"}>
             {(book.unfunded || book.error_kind === "quota_llm") && (
@@ -172,6 +195,9 @@ export function BookStatusPanel({
             )}
             {book.error_kind === "quota_images" && (
               <p className="font-medium">Image allowance reached — auto-resuming when it resets</p>
+            )}
+            {book.error_kind === "rate_limit" && (
+              <p className="font-medium">Writing service is busy — auto-resuming shortly</p>
             )}
             <p className="mt-1">
               {book.error ??
@@ -318,11 +344,22 @@ export function BookStatusPanel({
               variant="surface"
               type="button"
               disabled={regenerating}
-              onClick={handleRegenerate}
+              onClick={() => handleRegenerate()}
             >
               <Icon name={regenerating ? "hourglass_top" : "refresh"} />
               {regenerating ? "Regenerating…" : "Regenerate"}
             </Button>
+            {!editingSettings && (
+              <Button
+                variant="outline"
+                type="button"
+                disabled={regenerating}
+                onClick={openEditSettings}
+              >
+                <Icon name="tune" />
+                Edit settings &amp; regenerate
+              </Button>
+            )}
             <Link href="/">
               <Button variant="outline" type="button">
                 Create new book
@@ -339,6 +376,63 @@ export function BookStatusPanel({
             were already generated, it re-renders for free; otherwise it
             re-runs the full pipeline with the same settings.
           </p>
+
+          {editingSettings && (
+            <div className="mt-4 rounded-xl border border-white/[0.08] bg-surface-container-low p-5">
+              <p className="font-label text-label-md text-primary">
+                Edit settings before regenerating
+              </p>
+              <p className="mt-1 font-body text-body-sm text-secondary">
+                Changing either field wipes the previous plan and content for
+                this book and starts a full re-run with the new settings —
+                this is not free.
+              </p>
+              <div className="mt-4 flex flex-col gap-2">
+                <Label htmlFor="edit-pages">Target pages</Label>
+                <Input
+                  id="edit-pages"
+                  type="number"
+                  min={1}
+                  max={300}
+                  value={editTargetPages ?? 100}
+                  onChange={(e) =>
+                    setEditTargetPages(
+                      Math.min(300, parseInt(e.target.value, 10) || 100)
+                    )
+                  }
+                />
+              </div>
+              <div className="mt-4 flex flex-col gap-2">
+                <Label htmlFor="edit-source">Source material</Label>
+                <Textarea
+                  id="edit-source"
+                  rows={8}
+                  value={editSourceText ?? ""}
+                  onChange={(e) => setEditSourceText(e.target.value)}
+                  placeholder="Paste your source notes, transcript, or research here…"
+                />
+              </div>
+              <div className="mt-4 flex flex-wrap items-center gap-3">
+                <Button
+                  variant="surface"
+                  type="button"
+                  disabled={regenerating}
+                  onClick={handleRegenerateWithEdits}
+                >
+                  <Icon name={regenerating ? "hourglass_top" : "refresh"} />
+                  {regenerating ? "Regenerating…" : "Regenerate with these settings"}
+                </Button>
+                <Button
+                  variant="outline"
+                  type="button"
+                  disabled={regenerating}
+                  onClick={() => setEditingSettings(false)}
+                >
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 

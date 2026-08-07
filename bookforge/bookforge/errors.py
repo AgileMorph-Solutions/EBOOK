@@ -112,7 +112,33 @@ class PlanInfeasibleError(RuntimeError):
 
     Raised when planning would silently shrink the marketing count, collapse into
     a mega-section, or otherwise produce a doomed plan. User must adjust pages
-    or explicitly accept a lower count at readiness."""
+    or explicitly accept a lower count at readiness.
+
+    The structured fields (all optional — most call sites still raise a bare
+    string) let callers give accurate, self-consistent remediation instead of
+    generic advice: `ceiling_capped=True` means the plan is already pinned to
+    its promised-item ceiling, so raising `target_pages` provably cannot help
+    (it only raises the floor the plan must clear) — `suggested_pages` is the
+    one number that's actually achievable."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        est: int | None = None,
+        lo: int | None = None,
+        hi: int | None = None,
+        target_pages: int | None = None,
+        ceiling_capped: bool = False,
+        suggested_pages: int | None = None,
+    ):
+        self.est = est
+        self.lo = lo
+        self.hi = hi
+        self.target_pages = target_pages
+        self.ceiling_capped = ceiling_capped
+        self.suggested_pages = suggested_pages
+        super().__init__(message)
 
 
 class PipelineCancelledError(RuntimeError):

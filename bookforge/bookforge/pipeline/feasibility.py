@@ -515,9 +515,13 @@ def _handle_overshoot(
                 target_pages=suggested_pages,
             ),
         ]
+        outline_noun = (
+            "table of contents" if scope.locked_toc else "outline"
+        )
         msg = (
-            f"Your outline needs about {est_std} pages but the maximum at "
-            f"target {target} is {hi}. Raise pages or shorten the outline."
+            f"Your {outline_noun} needs about {est_std} pages but the maximum "
+            f"at target {target} is {hi}. Raise pages or shorten the "
+            f"{outline_noun}."
         )
     feas = FeasibilityResult(
         status="infeasible",
@@ -601,7 +605,8 @@ def _assess_book(
     warnings: list[str] = []
     if scope.locked_toc and scope.min_sections > 0:
         warnings.append(
-            f"{scope.min_sections} chapters from your outline will be kept."
+            f"{scope.min_sections} chapters from your table of contents "
+            "will be kept."
         )
 
     # --- Overshoot: shorten first (compact) ---

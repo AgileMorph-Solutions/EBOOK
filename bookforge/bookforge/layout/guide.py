@@ -483,28 +483,46 @@ class GuideDirector:
             f'<div class="gbody-box"><div class="gfit" data-fitmin="14">'
             f'{inner}</div></div></section>')
 
+    # Below this much VISIBLE text (HTML tags stripped — a handful of short,
+    # aggressively-trimmed steps carries plenty of markup but very little
+    # actual content) on the working page (method + callouts + foot), Page B
+    # reads as near-empty — pull the headnote over from Page A so it always
+    # carries substantive content, regardless of which mechanism (real
+    # overflow vs. a page-count repair) forced the spread. Mirrors the
+    # "never a near-empty trailing page" guarantee chart_page() and
+    # list_page() already give their own multi-page content.
+    _SPREAD_PAGE_B_MIN_CHARS = 180
+    _STRIP_TAGS_RE = re.compile(r"<[^>]+>")
+
     def _entry_spread(self, section: str, p: dict[str, str],
                       hero_uri: str | None, key: str = "") -> None:
+        page_b_text = self._STRIP_TAGS_RE.sub(
+            "", p["steps_panel"] + p["callouts"] + p["foot"])
+        page_b_thin = len(page_b_text) < self._SPREAD_PAGE_B_MIN_CHARS
         # Page A — the presentation page: title, meta, headnote, photo, list.
         folio = self._pos()
         hero = (f'<figure class="entry-hero spread-hero grow">'
                 f'<img src="{hero_uri}"/></figure>' if hero_uri else "")
         mid = (f'<div class="entry-mid">{hero}{p["need_card"]}</div>'
                if (hero or p["need_card"]) else "")
+        intro_a = "" if page_b_thin else p["intro"]
         inner_a = (f'<div class="entry-fit">'
                    f'<div class="eyebrow">{_esc(section)}</div>'
                    f'{self._entry_title_html(p)}'
-                   f'{p["meta"]}{p["intro"]}{mid}</div>')
+                   f'{p["meta"]}{intro_a}{mid}</div>')
         self.pages.append(
             f'<section class="page"{self._entry_attr(key)}>{self._chrome(folio)}'
             f'<div class="gbody-box"><div class="gfit" data-fitmin="14">'
             f'{inner_a}</div></div></section>')
         # Page B — the working page: method, callouts, notes. No repeated full
         # title; just a small "(continued)" tag so the eye isn't hit twice.
+        # When the method/notes alone would leave this page near-empty, the
+        # headnote moves here too instead of staying on Page A.
         folio = self._pos()
+        intro_b = p["intro"] if page_b_thin else ""
         inner_b = (f'<div class="entry-fit entry-continued">'
                    f'<div class="eyebrow">{_esc(section)}</div>'
-                   f'{p["steps_panel"]}{p["callouts"]}{p["foot"]}</div>')
+                   f'{intro_b}{p["steps_panel"]}{p["callouts"]}{p["foot"]}</div>')
         self.pages.append(
             f'<section class="page"{self._entry_attr(key)}>{self._chrome(folio)}'
             f'<div class="gbody-box"><div class="gfit" data-fitmin="14">'

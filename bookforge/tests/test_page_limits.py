@@ -533,6 +533,35 @@ def test_parse_toc_lines_ordinal_marks_any_line_as_header():
     assert all(len(s.entries) == 0 for s in parsed)
 
 
+def test_parse_toc_lines_strips_dot_leader_page_numbers():
+    """Regression test: a pasted TOC ("How to Use This Cookbook ......... 3")
+    carries its own dot-leader + page number, which is source-document
+    bookkeeping, not part of the title — it was leaking verbatim into
+    generated chapter-opener headings and corrupting them (confirmed via a
+    real shipped book's fit_report.json overflow entries)."""
+    toc = [
+        "01",
+        "Introduction: When German Grandmothers Made Something from Almost "
+        "Nothing .......... 2",
+        "02",
+        "How to Use This Cookbook ................................"
+        "................................. 3",
+        "03",
+        "Chapter 1: Three-Ingredient Meals ..................................."
+        "................ 6",
+        "Normal line with no dots",
+    ]
+    parsed = _parse_toc_lines(toc)
+    titles = [s.title for s in parsed]
+    assert (
+        "Introduction: When German Grandmothers Made Something from Almost "
+        "Nothing" in titles
+    )
+    assert "How to Use This Cookbook" in titles
+    assert "Chapter 1: Three-Ingredient Meals" in titles
+    assert not any(".." in t for t in titles)
+
+
 def test_toc_looks_like_prose_detects_pasted_description():
     prose_toc = [
         "Create a warm, nostalgic German cookbook featuring 60 affordable recipes "
@@ -720,9 +749,10 @@ def test_oma_book_scenario_rejected_before_any_spend():
     """The exact real production scenario that cost $31.38 before failing:
     60-recipe cookbook, target_pages=81 (band 81-98). With the Part 5
     recalibration, this must now be rejected by reconcile_plan_to_page_band
-    (the same function the synchronous pre-flight gate calls) — for $0,
-    before any job is created — instead of running the full pipeline to
-    find out 45+ minutes and $31 later."""
+    (the same function the free dry-run TOC check and the job's own
+    build_bible planning stage both call) — for $0 or for the cost of one
+    planning call, instead of running the full pipeline (content + images)
+    to find out 45+ minutes and $31 later."""
     profile = _full_cookbook_profile(pages_per_entry=0.8)
     sections = [
         SectionPlan(index=i, title=f"S{i}", full_card_quota=4, list_quota=0)
@@ -771,6 +801,28 @@ def test_reconcile_undershoot_without_ceiling_keeps_raise_pages_advice():
     exc = excinfo.value
     assert exc.ceiling_capped is False
     assert "raise pages" in str(exc).lower()
+
+
+def test_reconcile_undershoot_sections_locked_never_advises_raising_pages():
+    """Regression test: a locked table of contents fixes the section count
+    regardless of target_pages, so raising the target can't help here either
+    — same contract as the promised-item ceiling case, but triggered by
+    `sections_locked` instead of `ceiling_capped`."""
+    sections = [
+        SectionPlan(index=i, title=f"S{i}", full_card_quota=0, list_quota=0)
+        for i in range(1, 3)
+    ]
+    with pytest.raises(PlanInfeasibleError) as excinfo:
+        reconcile_plan_to_page_band(
+            sections, _essay_profile(), target_pages=1000,
+            sections_locked=True,
+        )
+    exc = excinfo.value
+    assert exc.ceiling_capped is False
+    assert exc.suggested_pages is not None
+    assert exc.suggested_pages < 1000
+    assert "raise pages" not in str(exc).lower()
+    assert "table of contents" in str(exc).lower()
 
 
 def test_assemble_ships_oversized_pdf_with_advisory(monkeypatch):

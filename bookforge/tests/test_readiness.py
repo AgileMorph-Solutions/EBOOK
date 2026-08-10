@@ -219,116 +219,28 @@ def test_post_books_202_when_ready():
     assert res.json()["status"] == "queued"
 
 
-def test_post_books_reuses_book_id_from_sync_plan():
-    """On a successful synchronous plan, the job must be enqueued under the
-    SAME book_id the plan was checkpointed against — not a fresh one — or the
-    background job would re-derive (and re-pay for) the bible from scratch."""
-    captured: dict = {}
-
-    def fake_plan_book(book_id, *args, **kwargs):
-        captured["book_id"] = book_id
-        return MagicMock(), MagicMock()
-
+def test_post_books_never_calls_plan_book_synchronously():
+    """POST /books must enqueue immediately without running real planning
+    (ingest + build_bible) synchronously on the request thread — that used to
+    block the endpoint for up to a minute on every submission. Real planning
+    still runs as the job's own first stage (see orchestrator/pipeline
+    tests); a mismatch surfaces as a failed job, not a blocked POST. Matches
+    /books/upload, which never had a synchronous planning gate."""
     with patch("bookforge.api.main._run_pipeline"):
         with patch("bookforge.api.main.check_readiness", return_value=_passing_checks()):
             with patch(
                 "bookforge.pipeline.orchestrator.plan_book",
-                side_effect=fake_plan_book,
-            ):
+                side_effect=AssertionError(
+                    "plan_book must not be called synchronously by POST /books"
+                ),
+            ) as mock_plan_book:
                 res = client.post(
                     "/books",
                     json={"topic": "Reused Id Book", "text": "Enough source " * 30},
                 )
     assert res.status_code == 202
-    assert res.json()["book_id"] == captured["book_id"]
-
-
-def test_post_books_503_when_plan_infeasible():
-    """A real (not coarse-guessed) plan mismatch must block synchronously,
-    before any job is created — the exact bug this gate exists to fix."""
-    from bookforge.errors import PlanInfeasibleError
-
-    with patch("bookforge.api.main._run_pipeline") as mock_run:
-        with patch("bookforge.api.main.check_readiness", return_value=_passing_checks()):
-            with patch(
-                "bookforge.pipeline.orchestrator.plan_book",
-                side_effect=PlanInfeasibleError(
-                    "plan estimates 59 pages but need at least 100 "
-                    "(target 100, max 120) — raise pages or add content"
-                ),
-            ):
-                res = client.post(
-                    "/books",
-                    json={
-                        "topic": "100 Cheap Household Fixes",
-                        "text": "Enough source " * 30,
-                        "target_pages": 100,
-                    },
-                )
-    assert res.status_code == 503
-    body = res.json()["detail"]
-    assert body["reason_code"] == "request"
-    assert "raise pages" in body["message"].lower()
-    assert body["assessment"]["can_create"] is False
-    mock_run.assert_not_called()
-
-
-def test_post_books_503_options_match_ceiling_capped_message():
-    """Regression test for the "raise pages" bug: when the real plan is
-    ceiling-capped, the 503's assessment.options must offer the SAME
-    achievable page count as the message — never the separately-computed
-    coarse assessment's (possibly contradictory) suggestion, and never advice
-    to raise pages when that's proven not to work."""
-    from bookforge.errors import PlanInfeasibleError
-
-    with patch("bookforge.api.main._run_pipeline") as mock_run:
-        with patch("bookforge.api.main.check_readiness", return_value=_passing_checks()):
-            with patch(
-                "bookforge.pipeline.orchestrator.plan_book",
-                side_effect=PlanInfeasibleError(
-                    "plan tops out at 99 pages — it's already at its promised "
-                    "item ceiling (66 items) and target 177 needs at least 177. "
-                    "Raising pages will not help; use ~99 pages instead, or add "
-                    "more source material / promise more items to allow a "
-                    "bigger plan.",
-                    est=99, lo=177, hi=197, target_pages=177,
-                    ceiling_capped=True, suggested_pages=99,
-                ),
-            ):
-                res = client.post(
-                    "/books",
-                    json={
-                        "topic": "60 Cheap Household Fixes",
-                        "text": "Enough source " * 30,
-                        "target_pages": 177,
-                    },
-                )
-    assert res.status_code == 503
-    body = res.json()["detail"]
-    assert "raise pages" not in body["message"].lower()
-    options = body["assessment"]["options"]
-    assert len(options) == 1
-    assert options[0]["id"] == "lower_pages"
-    assert options[0]["target_pages"] == 99
-    mock_run.assert_not_called()
-
-
-def test_post_books_falls_back_to_async_on_transient_plan_error():
-    """A provider hiccup during the synchronous plan check must not block the
-    user on infrastructure trouble — it should fall through to the normal
-    async job, which already has its own retry/park handling."""
-    with patch("bookforge.api.main._run_pipeline"):
-        with patch("bookforge.api.main.check_readiness", return_value=_passing_checks()):
-            with patch(
-                "bookforge.pipeline.orchestrator.plan_book",
-                side_effect=TimeoutError("provider hiccup"),
-            ):
-                res = client.post(
-                    "/books",
-                    json={"topic": "Test Book", "text": "Enough source " * 30},
-                )
-    assert res.status_code == 202
     assert res.json()["status"] == "queued"
+    mock_plan_book.assert_not_called()
 
 
 def test_check_request_replaces_stale_options_with_dry_run_options():

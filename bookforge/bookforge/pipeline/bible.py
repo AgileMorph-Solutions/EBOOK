@@ -1052,6 +1052,11 @@ _TOC_SKIP = frozenset({
     "promise", "ideal length", "recipe count", "why this should exist",
 })
 _TOC_BARE_ORDINAL = re.compile(r"^\d{1,3}$")
+# A pasted TOC line often carries its own dot-leader + page number
+# ("How to Use This Cookbook ......... 3") — that's page-number bookkeeping
+# from the source document, not part of the title, and must never survive
+# into a generated chapter/section heading.
+_TOC_DOT_LEADER = re.compile(r"\s*\.{2,}\s*\d+\s*$")
 
 
 def _is_toc_section_header(line: str) -> bool:
@@ -1068,7 +1073,7 @@ def _parse_toc_lines(toc: list[str]) -> list[_BaseSection]:
     cur: _BaseSection | None = None
     next_is_header = False
     for raw in toc:
-        line = raw.strip()
+        line = _TOC_DOT_LEADER.sub("", raw.strip()).strip()
         if not line or line.lower() in _TOC_SKIP:
             continue
         if _TOC_BARE_ORDINAL.match(line):
@@ -1364,6 +1369,7 @@ def dry_run_toc_feasibility(
         reconcile_plan_to_page_band(
             sections, profile, target_pages=target_pages, pamphlet=pamphlet,
             min_entries=min_ent, promised_ceiling=effective_promised or None,
+            sections_locked=True,
         )
         return True, "", []
     except PlanInfeasibleError as exc:
@@ -1526,6 +1532,7 @@ def build_bible(
             min_entries=effective_promised or plan_scope.min_entries or 0,
             min_sections=plan_scope.min_sections,
             promised_ceiling=effective_promised or None,
+            sections_locked=True,
         )
     if normalized_toc_bases is not None:
         base_lo = base_hi = len(normalized_toc_bases)
@@ -1690,6 +1697,7 @@ def build_bible(
         min_entries=min_ent,
         min_sections=plan_scope.min_sections,
         promised_ceiling=promised or None,
+        sections_locked=plan_scope.locked_toc,
     )
     planned = planned_use_count(sections)
 

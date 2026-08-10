@@ -14,7 +14,7 @@ const DEFAULTS: AppConfig = {
   apiUrl: process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000",
   trimWidthIn: 8.5,
   trimHeightIn: 11,
-  contentModel: "claude-opus-4-8",
+  contentModel: "claude-opus-5",
   draftModel: "claude-haiku-4-5-20251001",
   imagePrimaryModel: "imagen-4.0-generate-001",
   imagePrimaryProvider: "gemini",

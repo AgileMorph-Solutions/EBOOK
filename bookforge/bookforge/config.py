@@ -19,9 +19,9 @@ class Settings(BaseSettings):
     anthropic_api_key: str = Field("", alias="ANTHROPIC_API_KEY")
     openai_api_key: str = Field("", alias="OPENAI_API_KEY")
     gemini_api_key: str = Field("", alias="GEMINI_API_KEY")
-    content_model: str = Field("claude-opus-4-8", alias="CONTENT_MODEL")
+    content_model: str = Field("claude-opus-5", alias="CONTENT_MODEL")
     draft_model: str = Field("claude-haiku-4-5-20251001", alias="DRAFT_MODEL")
-    vision_qa_model: str = Field("claude-opus-4-8", alias="VISION_QA_MODEL")
+    vision_qa_model: str = Field("claude-opus-5", alias="VISION_QA_MODEL")
     # Comma-separated fallback models tried (in order) when the primary model
     # fails with a MODEL-SPECIFIC error (not-found, overload, non-credit 400).
     # Credits/auth failures are NOT cascaded — they fail identically on every

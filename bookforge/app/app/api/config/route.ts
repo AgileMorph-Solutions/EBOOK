@@ -15,7 +15,7 @@ export function GET() {
     authEnabled: process.env.AUTH_ENABLED === "true",
     trimWidthIn: parseFloat(process.env.TRIM_WIDTH_IN ?? "8.5"),
     trimHeightIn: parseFloat(process.env.TRIM_HEIGHT_IN ?? "11"),
-    contentModel: process.env.CONTENT_MODEL ?? "claude-opus-4-8",
+    contentModel: process.env.CONTENT_MODEL ?? "claude-opus-5",
     draftModel: process.env.DRAFT_MODEL ?? "claude-haiku-4-5-20251001",
     imagePrimaryModel:
       process.env.IMAGE_PRIMARY_MODEL ?? "imagen-4.0-generate-001",

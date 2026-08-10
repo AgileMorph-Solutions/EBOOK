@@ -152,6 +152,67 @@ def test_spread_continued_page_is_top_aligned():
     assert "entry-fit entry-continued" in d.pages[1]
 
 
+def test_entry_spread_moves_intro_to_thin_page_b():
+    """Regression test: when the method/callouts/notes on Page B are thin
+    (the actual shape of the real defect), the headnote must move there
+    instead of leaving Page B near-empty — mirroring chart_page/list_page's
+    existing "never a near-empty trailing page" guarantee."""
+    long_intro = "Patience and a hot pan. " * 100
+    entry = _entry(
+        intro=long_intro,
+        steps=[StepItem(text="Wash the pan.")],  # one short step -> thin Page B
+        what_you_need=[],
+    )
+    d = GuideDirector(_bible())
+    d.entry_card("Seasoning", entry, None, key="1.2", level=1)
+    assert len(d.pages) == 2
+    assert "entry-intro" not in d.pages[0]
+    assert "entry-intro" in d.pages[1]
+
+
+def test_entry_spread_thin_check_strips_html_markup():
+    """Regression test for the exact real defect, using the real numbers:
+    4 short, aggressively-trimmed steps + a short note measured at 334 raw
+    HTML characters (the first version of this fix used raw HTML length and
+    never triggered) but only 148 characters of actual visible text once
+    tags are stripped — well under the threshold. Markup overhead must never
+    mask genuinely thin content."""
+    entry = _entry(
+        intro="Six themed chapters carry all sixty dishes; knowing…",
+        steps=[
+            StepItem(text="Match your main ingredient…"),
+            StepItem(text="Open the chapter for…"),
+            StepItem(text="Read the chapter opener; it…"),
+            StepItem(text="Choose from the ten recipes…"),
+        ],
+        what_you_need=[
+            "Chapter 1: recipes 1 to 10, three-ingredient meals",
+            "Chapter 2: recipes 11 to 20, forgotten potato dishes",
+        ],
+        note="Sixty dishes across six chapters…",
+    )
+    d = GuideDirector(_bible())
+    d.entry_card("Seasoning", entry, None, key="1.2", level=1)
+    assert len(d.pages) == 2
+    assert "entry-intro" not in d.pages[0]
+    assert "entry-intro" in d.pages[1]
+
+
+def test_entry_spread_keeps_intro_on_page_a_when_page_b_has_content():
+    """When Page B already has substantive content (steps/callouts/notes),
+    the intro must stay on Page A as before — the guard should only kick in
+    for genuinely thin working pages."""
+    long_intro = "Patience and a hot pan. " * 100
+    many_steps = [StepItem(text="A reasonably detailed step in the method.")
+                  for _ in range(8)]
+    entry = _entry(intro=long_intro, steps=many_steps)
+    d = GuideDirector(_bible())
+    d.entry_card("Seasoning", entry, None, key="1.2", level=1)
+    assert len(d.pages) == 2
+    assert "entry-intro" in d.pages[0]
+    assert "entry-intro" not in d.pages[1]
+
+
 def test_entry_flow_continued_has_entry_continued_class():
     long_steps = [
         StepItem(text=" ".join(["patience"] * 55)) for _ in range(10)

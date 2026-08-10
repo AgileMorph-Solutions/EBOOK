@@ -145,7 +145,11 @@ export function RequestReadinessAlert({
           )}
           {assessment?.scope.sections ? (
             <StatRow
-              label="Chapters in outline"
+              label={
+                assessment.scope.locked_toc
+                  ? "Chapters in table of contents"
+                  : "Chapters in outline"
+              }
               value={String(assessment.scope.sections)}
             />
           ) : null}

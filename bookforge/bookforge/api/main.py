@@ -557,69 +557,16 @@ def create_book(req: CreateBook, background_tasks: BackgroundTasks):
     ):
         req = req.model_copy(update={"density_mode": "compact"})
 
-    # The coarse check above uses a guessed profile — it can't see the real
-    # per-book structure until planning actually runs. Run that planning step
-    # (ingest + build_bible) for real, synchronously, right here — before any
-    # job exists. It's the exact same call the background job would make as
-    # its first stage, so on success it costs nothing extra: build_bible's
-    # checkpoint is reused and the job resumes straight into content. On a
-    # genuine plan mismatch (promised count can't fit the page target), this
-    # blocks the request with an actionable message instead of letting a job
-    # start, run for a while, and fail later.
-    from bookforge.pipeline.orchestrator import plan_book
-
-    book_id = _make_book_id(req.topic)
-    try:
-        plan_book(
-            book_id, req.topic, text=req.text, youtube_url=req.youtube_url,
-            target_pages=req.target_pages, book_kind=req.book_kind,
-            description=req.description, toc=req.toc,
-            profile_overrides=req.profile_overrides,
-            density_mode=req.density_mode,
-            accepted_promised_count=req.accepted_promised_count,
-        )
-    except Exception as exc:
-        cls = _failure_class(exc)
-        if cls != "permanent":
-            # Provider hiccup, rate limit, etc. — don't block the user on
-            # infrastructure trouble; let the normal async job retry/park.
-            log.warning("sync_plan_check_deferred", book_id=book_id,
-                        err=str(exc)[:200], failure_class=cls)
-            return _enqueue_book(req, background_tasks)
-
-        from bookforge.api.error_kinds import classify as _classify_error
-        from bookforge.errors import PlanInfeasibleError
-        from bookforge.pipeline.feasibility import (
-            build_book_assessment, options_for_plan_infeasible,
-        )
-
-        classified = _classify_error(exc)
-        # The coarse assessment gives useful context (page band, scope) even
-        # though it can't be trusted for remediation options — those come
-        # from the real exception's own numbers when available, so the
-        # button offered always matches the message shown, never a
-        # separately (and possibly differently) computed suggestion.
-        options = (
-            options_for_plan_infeasible(exc)
-            if isinstance(exc, PlanInfeasibleError) else []
-        )
-        assessment = build_book_assessment(
-            topic=req.topic, description=req.description, text=req.text,
-            target_pages=req.target_pages, toc=req.toc,
-            accepted_promised_count=req.accepted_promised_count,
-            density_mode=req.density_mode,
-        ).model_copy(update={
-            "can_create": False, "status": "infeasible",
-            "message": classified.message,
-            **({"options": options} if options else {}),
-        })
-        result = ReadinessResult(
-            can_generate=False, title=req.topic, message=classified.message,
-            reason_code="request", assessment=assessment,
-        )
-        raise HTTPException(status_code=503, detail=result.model_dump())
-
-    return _enqueue_book(req, background_tasks, book_id=book_id)
+    # The coarse check above (and the free dry-run TOC check inside it) is
+    # what the create form already showed the user before they clicked
+    # Generate. Enqueue immediately rather than re-running real planning
+    # (ingest + build_bible) synchronously here — that used to block this
+    # endpoint for up to a minute on every submission. Real planning still
+    # runs as the job's own first stage; on a genuine plan mismatch the job
+    # fails fast (within seconds, before any content/image spend) with the
+    # same actionable message, surfaced on the job page instead of the
+    # create button. Matches /books/upload, which never had this gate.
+    return _enqueue_book(req, background_tasks)
 
 
 @app.post("/books/upload", status_code=202)

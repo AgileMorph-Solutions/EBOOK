@@ -147,7 +147,7 @@ export function PreviewGrid({
           collapseLabel="Show less"
         >
           <ol className="space-y-2.5">
-            {toc!.map((entry, index) => (
+            {(toc ?? []).map((entry, index) => (
               <li
                 key={`${index}-${entry}`}
                 className="flex gap-3 font-body text-body-sm text-on-surface"

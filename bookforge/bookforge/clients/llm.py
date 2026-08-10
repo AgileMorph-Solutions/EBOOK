@@ -134,6 +134,7 @@ def _model_chain(primary: str) -> list[str]:
 # Sticker prices (Sonnet 5 has intro pricing of 2.0/10.0 through 2026-08-31;
 # we budget at sticker so the guardrail stays valid when the intro lapses).
 _PRICE = {
+    "claude-opus-5": (5.0, 25.0),
     "claude-opus-4-8": (5.0, 25.0),
     "claude-sonnet-5": (3.0, 15.0),
     "claude-sonnet-4-6": (3.0, 15.0),
@@ -157,7 +158,7 @@ def _get_client() -> anthropic.Anthropic:
 
 
 def _track(model: str, usage) -> None:
-    pin, pout = _PRICE.get(model, _PRICE["claude-opus-4-8"])
+    pin, pout = _PRICE.get(model, _PRICE["claude-opus-5"])
     # Cached prefix tokens are billed at 1.25x (write) / 0.1x (read) of the
     # input price and are NOT included in usage.input_tokens.
     cache_write = getattr(usage, "cache_creation_input_tokens", 0) or 0

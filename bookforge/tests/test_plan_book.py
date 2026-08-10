@@ -1,10 +1,11 @@
 """plan_source/plan_bible/plan_book: checkpoint-hit-or-build semantics.
 
-These are the functions shared between the synchronous pre-flight gate
-(api/main.py's POST /books, before a job exists) and the background job's
-cold-start path (orchestrator._run_book_impl) — the point of sharing them is
-that a checkpoint written by one is transparently reused by the other, so the
-real plan is computed exactly once per book.
+These are the functions the background job's cold-start path
+(orchestrator._run_book_impl) uses as its own first stage — real planning
+(ingest + build_bible) runs there, not synchronously in the API request
+thread, so a genuine PlanInfeasibleError surfaces as a failed job rather than
+blocking POST /books. Checkpointing means a partial plan already on disk
+(e.g. from a resumed/retried job) is reused instead of recomputed.
 """
 from __future__ import annotations
 

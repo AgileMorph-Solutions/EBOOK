@@ -31,10 +31,16 @@ function buildRequestBody(params: {
   densityMode: "standard" | "compact" | null;
   acceptedPromisedCount: number | null;
 }): CreateBookRequest {
+  // Drop bare-ordinal placeholder lines ("01", "02", ...) that come from
+  // pasting a TOC formatted with the chapter number on its own line above
+  // the title. The backend's TOC parser already merges these into the
+  // following title (see _parse_toc_lines in bible.py); filtering them here
+  // too keeps the live pre-submit readiness preview accurate, since it
+  // reflects whatever array we send.
   const tocLines = params.toc
     .split("\n")
     .map((l) => l.trim())
-    .filter(Boolean);
+    .filter((l) => l.length > 0 && !/^\d{1,3}$/.test(l));
   return {
     topic: params.topic.trim(),
     target_pages: params.targetPages,

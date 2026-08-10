@@ -16,6 +16,10 @@ log = structlog.get_logger(__name__)
 # NB: gap words must match hyphenated words (e.g. "200 Best-Loved Kitchen Tips") —
 # plain \w+ silently failed there, so the subtitle promise was never parsed and
 # the book shipped 1,176 entries under a "200" subtitle.
+# NB: this is a static whitelist and will always be incomplete for genres we
+# haven't seen yet (a "50 Franchise Concepts" or "50 Micro-SaaS Ideas" book
+# hits the same gap the day it's added) — parse_exact_promised_count() below
+# is the durable fix for those; this list is just a cheap, immediate widening.
 _COUNT_NOUNS = (
     r"ways?|tips?|uses?|tricks?|methods?|ideas?|hacks?|recipes?|dishes?|meals?|suppers?|"
     r"dinners?|fixes?|projects?|patterns?|exercises?|lessons?|entries|habits?|steps?|rules?|"
@@ -23,7 +27,8 @@ _COUNT_NOUNS = (
     r"reasons?|laws?|keys?|changes?|foods?|drinks?|workouts?|stretches|poses?|"
     r"questions?|skills?|routines?|swaps?|rituals?|practices?|"
     r"signs?|behaviors?|concepts?|indicators?|signals?|traits?|types?|facts?|truths?|examples?|"
-    r"models?|frameworks?"
+    r"models?|frameworks?|services?|businesses?|profiles?|niches?|opportunities?|ventures?|"
+    r"startups?|side\s?hustles?|gigs?"
 )
 # Spelled-out cardinals (ten … ninety-nine) so "sixty habits" is caught too.
 _ONES = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
@@ -78,8 +83,17 @@ _TITLE_COUNT_RE = re.compile(
 
 # "Level 1 to 100 … Secrets" / "1-50 tips" — take the range end, not the start
 # digit (which _TITLE_COUNT_RE would otherwise latch onto as the count).
+# Anchored to a trailing count noun (same as _TITLE_COUNT_RE) — an unanchored
+# range regex will happily match an unrelated numeric range in the same
+# sentence, e.g. "around 150-180 pages", and misreport a page-count estimate
+# as the item promise. Uses a SHORT gap (not the permissive _GAP_WORDS, which
+# allows up to 6 words) — a wide gap lets the search skip straight over the
+# range's own real trailing word ("pages", not a count noun) and latch onto
+# an unrelated noun several words later in the same sentence.
+_RANGE_GAP_WORDS = r"(?:\s+[\w\"'“”‘’.,-]+){0,3}"
 _RANGE_COUNT_RE = re.compile(
-    r"\b(?:levels?\s+)?(\d{1,4})\s*(?:to|-|–|—)\s*(\d{1,4})\b",
+    r"\b(?:levels?\s+)?(\d{1,4})\s*(?:to|-|–|—)\s*(\d{1,4})\b%s\s*(?:\+?\s*)?(?:%s)\b"
+    % (_RANGE_GAP_WORDS, _COUNT_NOUNS),
     re.IGNORECASE,
 )
 
@@ -181,6 +195,56 @@ def parse_promised_count(title: str, subtitle: str) -> int | None:
         if leading is not None:
             return leading
     return None
+
+
+_EXACTLY_N_RE = re.compile(r"\bexactly\s+(\d{1,4})\b", re.IGNORECASE)
+_NUMBERED_ITEM_RE = re.compile(r"(?m)^\s*(\d{1,4})[.)]\s+\S")
+
+
+def parse_exact_promised_count(text: str) -> int | None:
+    """High-confidence EXACT item count from raw source `text` — never from
+    title/subtitle, which are soft marketing copy (see parse_promised_count).
+
+    Two signals, either being enough:
+    - Explicit "create exactly N ..." / "exactly N ..." phrasing.
+    - A complete sequential numbered list (1., 2., ... N.) with no gaps.
+
+    Unlike parse_promised_count's result, this is treated as a hard cap, not
+    just a floor: the plan must contain exactly this many entries, not "at
+    least" this many."""
+    if not text:
+        return None
+    m = _EXACTLY_N_RE.search(text)
+    if m:
+        return int(m.group(1))
+    nums = [int(x) for x in _NUMBERED_ITEM_RE.findall(text)]
+    if len(nums) >= 5 and nums == list(range(1, len(nums) + 1)):
+        return nums[-1]
+    return None
+
+
+_TOC_BARE_ORDINAL_RE = re.compile(r"^\d{1,3}$")
+
+
+def count_toc_sections(toc: list[str] | None) -> int:
+    """Real section count for a raw TOC list, excluding standalone
+    numeric-ordinal placeholder lines ("01", "02", ...) — the artifact of
+    pasting a TOC formatted with the chapter number on its own line above
+    its title. Those lines mark the FOLLOWING line as a header rather than
+    being sections themselves (see bible.py's _parse_toc_lines, which does
+    the equivalent merge for the real section-building path).
+
+    Anything using a raw `len(toc)` as a section-count proxy — as
+    plan_scope.build_plan_scope does for the coarse feasibility check —
+    must use this instead, or a "01\\n<Title>" paste silently doubles the
+    section count that check reasons about, producing a page-count estimate
+    that disagrees with the real (correctly-normalized) build."""
+    if not toc:
+        return 0
+    return sum(
+        1 for t in toc
+        if t.strip() and not _TOC_BARE_ORDINAL_RE.match(t.strip())
+    )
 
 
 def reconcile_promise(title: str, subtitle: str, planned: int,

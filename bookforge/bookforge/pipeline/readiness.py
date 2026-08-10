@@ -86,6 +86,7 @@ class ReadinessRequest(BaseModel):
     section_limit: int | None = None
     density_mode: Literal["standard", "compact"] | None = None
     accepted_promised_count: int | None = None
+    profile_overrides: dict | None = None
 
 
 class ReadinessResult(BaseModel):
@@ -279,6 +280,7 @@ def _check_request(req: ReadinessRequest) -> tuple[CheckResult, FeasibilityResul
             target_pages=req.target_pages,
             density_mode=req.density_mode,
             accepted_promised_count=req.accepted_promised_count,
+            profile_overrides=req.profile_overrides,
         )
         if not ok:
             # Replace — don't merge with — the coarse assessment's/feasibility's

@@ -196,6 +196,16 @@ def _default_profile(cookbookish: bool) -> EditorialProfile:
         structure_template="essay_entries" if cookbookish else "project_based",
         pages_per_entry=STANDARD_COOKBOOK_PPE if cookbookish else 2.0,
         image_density="every_entry" if cookbookish else "every_entry",
+        # EditorialProfile.tiers defaults to 2 (an "Essentials + More Uses"
+        # split), which fits a tips-card cookbook but not a project_based
+        # guide where each entry is a single self-contained profile (a
+        # business, a project, a plan) with no natural secondary quick-list
+        # tier. Left at the schema default here, the guessed profile silently
+        # doubles every section during _expand_sections — inflating the free
+        # feasibility pre-check's page estimate well above what the real,
+        # Opus-planned per-book profile (which correctly picks tiers=1 for
+        # this shape) actually needs, and the two estimators disagree.
+        tiers=2 if cookbookish else 1,
     )
 
 

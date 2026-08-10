@@ -166,6 +166,68 @@ def test_dry_run_toc_feasibility_propagates_options_from_plan_infeasible(monkeyp
     assert options[0].target_pages == 99
 
 
+def test_dry_run_toc_feasibility_boring_businesses_regression():
+    """End-to-end regression test for the real production incident: a book
+    promising "exactly 50 business profiles" (source text) / "50 Unsexy
+    Services" (topic) / "50 boring business profiles" (description), with a
+    TOC pasted as "01\\n<Title>\\n02\\n<Title>..." (26 raw entries for 13 real
+    chapters), at target_pages=205.
+
+    Before the fix this silently produced a 180-item, 319-page book under a
+    title that still said "50". After the fix, the free zero-cost check must
+    correctly detect the promise as exactly 50 (not 180, not None) and
+    report upfront that 205 pages isn't reachable with exactly 50 items —
+    never silently pass."""
+    topic = (
+        "The Boring Businesses Blueprint: 50 Unsexy Services with "
+        "Repeat-Customer Potential"
+    )
+    description = (
+        'Create a practical small-business guide called "The Boring '
+        "Businesses Blueprint.\" The book should explain 50 simple, unsexy "
+        "local service businesses that can create repeat customers because "
+        "they solve ordinary recurring problems. The book should be around "
+        "150-180 pages and include 50 boring business profiles."
+    )
+    text = (
+        "Create exactly 50 business profiles:\n\n"
+        "Chapter 2: Home Cleaning\n"
+        "1. Trash bin cleaning route\n2. Window washing\n"
+    )
+    toc = [
+        "01", "Introduction: Why Boring Businesses Can Beat Trendy Ideas",
+        "02", "Chapter 1: What Makes a Business Repeatable",
+        "03", "Chapter 2: Home Cleaning & Maintenance Businesses",
+        "04", "Chapter 3: Outdoor & Property Care Businesses",
+        "05", "Chapter 4: Senior, Errand & Household Help Businesses",
+        "06", "Chapter 5: Car, Garage & Equipment Businesses",
+        "07", "Chapter 6: Small Commercial Service Businesses",
+        "08", "Chapter 7: Seasonal Repeat Businesses",
+        "09", "Chapter 8: Pricing, Routes and Recurring Customers",
+        "10", "Chapter 9: First 10 Customers Blueprint",
+        "11", "Chapter 10: Systems, Checklists and Simple Growth",
+        "12", "Chapter 11: 50 Business Profiles and Worksheets",
+        "13", "Final Note: Boring Pays Because Problems Repeat",
+    ]
+
+    from bookforge.pipeline.content_guardrails import parse_exact_promised_count
+    assert parse_exact_promised_count(text) == 50
+    assert parse_promised_count(topic, description) == 50
+
+    ok, msg, options = dry_run_toc_feasibility(
+        topic=topic, text=text, description=description, toc=toc,
+        target_pages=205, density_mode="compact", accepted_promised_count=None,
+    )
+    # The forbidden outcome is silence: ok=True with no relation to reality.
+    # Either an upfront, actionable rejection (target unreachable with
+    # exactly 50 items) or — on a different target — a genuine pass are both
+    # fine; what's not fine is the old behavior of never even trying.
+    assert ok is False
+    assert "50" in msg or (options and options[0].promised_count == 50)
+    if not ok:
+        assert "raise pages" not in msg.lower()
+
+
 def test_dry_run_toc_feasibility_no_toc_returns_no_opinion():
     ok, msg, options = dry_run_toc_feasibility(
         topic="Simple Guide",

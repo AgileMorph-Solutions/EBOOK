@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from bookforge.pipeline.content_guardrails import (
     extract_title_item_label,
+    parse_exact_promised_count,
     parse_leading_marketing_count,
     parse_promised_count,
     planned_use_count,
@@ -103,6 +104,54 @@ def test_parse_promised_count_negative_titles():
         "Pest Guide",
         "How to Fight Roaches Without Paying Hundreds",
     ) is None
+
+
+def test_parse_promised_count_range_requires_noun():
+    """Regression test for the real "Boring Businesses" incident: an
+    unrelated page-count range ("around 150-180 pages") must never be
+    misparsed as the item promise just because _RANGE_COUNT_RE matched some
+    numeric range anywhere in the text — the promise here is the "50" in
+    "50 boring business profiles", not the page estimate."""
+    description = (
+        'Create a practical small-business guide called "The Boring '
+        "Businesses Blueprint.\" The book should explain 50 simple, unsexy "
+        "local service businesses that can create repeat customers because "
+        "they solve ordinary recurring problems. The book should be around "
+        "150-180 pages and include 50 boring business profiles."
+    )
+    topic = (
+        "The Boring Businesses Blueprint: 50 Unsexy Services with "
+        "Repeat-Customer Potential"
+    )
+    assert parse_promised_count(topic, description) == 50
+    # A page-range with no item-count noun anywhere near it must not match.
+    assert parse_promised_count("", "The book should be around 150-180 pages.") is None
+
+
+def test_parse_promised_count_services_businesses_profiles_nouns():
+    assert parse_promised_count("50 Unsexy Services", "") == 50
+    assert parse_promised_count("", "50 boring business profiles") == 50
+    assert parse_promised_count("50 Side Hustle Ideas", "") == 50
+
+
+def test_parse_exact_promised_count_explicit_phrasing():
+    text = "Create exactly 50 business profiles:\n\n1. Trash bin cleaning route\n"
+    assert parse_exact_promised_count(text) == 50
+
+
+def test_parse_exact_promised_count_sequential_numbered_list():
+    text = "\n".join(f"{i}. Business idea {i}" for i in range(1, 51))
+    assert parse_exact_promised_count(text) == 50
+
+
+def test_parse_exact_promised_count_ignores_short_unrelated_list():
+    text = "1. Step one\n2. Step two\n3. Step three"
+    assert parse_exact_promised_count(text) is None
+
+
+def test_parse_exact_promised_count_none_for_empty():
+    assert parse_exact_promised_count("") is None
+    assert parse_exact_promised_count(None) is None
 
 
 def test_shrink_pamphlet_sections_to_promise():

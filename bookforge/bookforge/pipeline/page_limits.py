@@ -27,13 +27,21 @@ ABSOLUTE_PAGE_CEILING = MAX_BOOK_PAGES
 MIN_VIABLE_ENTRIES_PER_SECTION = 3
 
 
-def _promise_ceiling(promised_ceiling: int | None) -> int | None:
-    """Entry-count ceiling a promised item count imposes (10% tolerance) —
-    shared by `_upsize_sections_to_estimate` (which enforces it) and
+def _promise_ceiling(promised_ceiling: int | None, *, exact: bool = False) -> int | None:
+    """Entry-count ceiling a promised item count imposes — shared by
+    `_upsize_sections_to_estimate` (which enforces it) and
     `reconcile_plan_to_page_band` (which needs to know whether an undershoot
-    it can't fix is because this ceiling was hit)."""
+    it can't fix is because this ceiling was hit).
+
+    `exact=True` (an unambiguous "create exactly N" / complete numbered-list
+    promise, see content_guardrails.parse_exact_promised_count) applies the
+    literal count with zero tolerance — the plan must never end up with more
+    or fewer than N entries. `exact=False` (the default, a soft marketing
+    count like "50 Recipes") keeps the usual 10% padding allowance."""
     if not promised_ceiling or promised_ceiling <= 0:
         return None
+    if exact:
+        return promised_ceiling
     return math.ceil(promised_ceiling * 1.10)
 
 
@@ -582,14 +590,16 @@ def _upsize_sections_to_estimate(
     specials: list | None = None,
     pamphlet: bool = False,
     promised_ceiling: int | None = None,
+    exact: bool = False,
 ) -> list[SectionPlan]:
     """Pad section quotas until the page estimate clears `target_estimate`.
 
     `promised_ceiling` (the book's stated/promised item count, with the same
-    10% tolerance `reconcile_promise` uses elsewhere) stops the *quantity*
-    fallbacks from inventing entries past what the title promises — once hit,
-    any remaining page deficit is left to page_pad.py's free layout-level
-    padding and prose-depth expansion instead of more filler items."""
+    10% tolerance `reconcile_promise` uses elsewhere — or zero tolerance when
+    `exact=True`, see `_promise_ceiling`) stops the *quantity* fallbacks from
+    inventing entries past what the title promises — once hit, any remaining
+    page deficit is left to page_pad.py's free layout-level padding and
+    prose-depth expansion instead of more filler items."""
     from bookforge.pipeline.content_guardrails import (
         expand_sections_to_count,
         planned_use_count,
@@ -599,7 +609,7 @@ def _upsize_sections_to_estimate(
         MAX_LIST_QUOTA_PER_SECTION,
     )
 
-    ceiling = _promise_ceiling(promised_ceiling)
+    ceiling = _promise_ceiling(promised_ceiling, exact=exact)
 
     out = [s.model_copy(deep=True) for s in sections]
     for _ in range(512):
@@ -652,6 +662,7 @@ def reconcile_plan_to_page_band(
     min_sections: int = 0,
     promised_ceiling: int | None = None,
     sections_locked: bool = False,
+    exact: bool = False,
 ) -> list[SectionPlan]:
     """Upsize or trim the plan so the render estimate falls in [lo, hi].
 
@@ -663,7 +674,12 @@ def reconcile_plan_to_page_band(
     table of contents) means the section *count* cannot grow no matter what
     target_pages is passed — the TOC is followed exactly, so raising the
     target only raises the floor `lo`, never the achievable `est`, in
-    exactly the same way a promised-item ceiling does."""
+    exactly the same way a promised-item ceiling does.
+
+    `exact` (True for an unambiguous "create exactly N" / complete
+    numbered-list promise) removes the usual 10% tolerance on
+    `promised_ceiling` — the plan may never end up with more than exactly N
+    entries, not just "close to" N."""
     lo, hi = allowed_page_range(target_pages)
     out = [s.model_copy(deep=True) for s in sections]
     est = estimate_rendered_pages(out, profile, specials=specials, pamphlet=pamphlet)
@@ -674,7 +690,7 @@ def reconcile_plan_to_page_band(
         out = _upsize_sections_to_estimate(
             out, profile, target_estimate=lo,
             min_entries=min_entries, specials=specials, pamphlet=pamphlet,
-            promised_ceiling=promised_ceiling,
+            promised_ceiling=promised_ceiling, exact=exact,
         )
         est = estimate_rendered_pages(
             out, profile, specials=specials, pamphlet=pamphlet,
@@ -696,7 +712,7 @@ def reconcile_plan_to_page_band(
             )
             return out
 
-        ceiling = _promise_ceiling(promised_ceiling)
+        ceiling = _promise_ceiling(promised_ceiling, exact=exact)
         ceiling_capped = ceiling is not None and planned_use_count(out) >= ceiling
         if ceiling_capped or sections_locked:
             # Raising target_pages only raises `lo` (the floor) — it cannot

@@ -27,9 +27,9 @@ from bookforge.config import settings
 from bookforge.layout import theme
 from bookforge.pipeline import templates
 from bookforge.pipeline.content_guardrails import (
-    expand_sections_to_count, parse_promised_count, planned_use_count,
-    propagate_promised_count, reconcile_promise, rewrite_promised_number,
-    shrink_sections_to_count,
+    expand_sections_to_count, parse_exact_promised_count, parse_promised_count,
+    planned_use_count, propagate_promised_count, reconcile_promise,
+    rewrite_promised_number, shrink_sections_to_count,
 )
 from bookforge.pipeline.page_limits import (
     estimate_guide_pages,
@@ -1137,7 +1137,15 @@ def _normalize_user_toc(
         log.warning("user_toc_looks_like_prose_discarded", raw_lines=len(toc))
         return None
     max_secs = max_sections_for_target(target_pages, profile, pamphlet=pamphlet)
-    if len(toc) <= max_secs:
+    # A TOC pasted as "01\n<Title>\n02\n<Title>..." (number on its own line)
+    # splits into standalone bare-ordinal entries interleaved with the real
+    # titles. Those need the _parse_toc_lines merge below even when the raw
+    # TOC already "looks" like a clean flat outline (fits under max_secs,
+    # has real "Chapter N:" headers) — otherwise the bare ordinals survive
+    # as their own bogus chapters (literally titled "01", "02", ...) and the
+    # section count silently doubles.
+    has_bare_ordinal_noise = any(_TOC_BARE_ORDINAL.match(t.strip()) for t in toc)
+    if len(toc) <= max_secs and not has_bare_ordinal_noise:
         headers = sum(1 for t in toc if _is_toc_section_header(t))
         if headers >= 2 or len(toc) <= max(6, max_secs // 2):
             return None
@@ -1331,16 +1339,21 @@ def dry_run_toc_feasibility(
     )
     pamphlet = target_pages <= 15
 
+    exact_count = parse_exact_promised_count(text or "")
     topic_promised = (
         parse_promised_count(topic, description or "")
         or parse_promised_count(topic, "")
         or parse_promised_count("", text or "")
     )
-    effective_promised = (
-        accepted_promised_count
-        if accepted_promised_count and accepted_promised_count > 0
-        else topic_promised
-    )
+    if accepted_promised_count and accepted_promised_count > 0:
+        effective_promised = accepted_promised_count
+        effective_promised_exact = exact_count is not None
+    elif exact_count is not None:
+        effective_promised = exact_count
+        effective_promised_exact = True
+    else:
+        effective_promised = topic_promised
+        effective_promised_exact = False
 
     if density_mode == "compact" or (
         density_mode is None
@@ -1365,11 +1378,16 @@ def dry_run_toc_feasibility(
     )
     sections = _expand_sections(normalized, density, profile)
     min_ent = effective_promised or 0
+    if (
+        effective_promised and effective_promised_exact
+        and planned_use_count(sections) > effective_promised
+    ):
+        sections = shrink_sections_to_count(sections, effective_promised)
     try:
         reconcile_plan_to_page_band(
             sections, profile, target_pages=target_pages, pamphlet=pamphlet,
             min_entries=min_ent, promised_ceiling=effective_promised or None,
-            sections_locked=True,
+            sections_locked=True, exact=effective_promised_exact,
         )
         return True, "", []
     except PlanInfeasibleError as exc:
@@ -1450,6 +1468,12 @@ def build_bible(
         profile = profile.model_copy(update={"tiers": 1})
 
     # Effective promise: user-accepted lower count wins over topic marketing.
+    # An unambiguous EXACT promise from the raw source text ("create exactly
+    # N ..." or a complete 1..N numbered list) outranks the soft
+    # topic/description marketing count — it's the strongest signal the user
+    # gave, and unlike a soft count it's a hard cap, not just a floor (see
+    # effective_promised_exact below, threaded through to reconciliation).
+    exact_count = parse_exact_promised_count(source.text or "")
     topic_promised = (
         parse_promised_count(source.topic, description or "")
         or parse_promised_count(source.topic, "")
@@ -1457,8 +1481,13 @@ def build_bible(
     )
     if accepted_promised_count and accepted_promised_count > 0:
         effective_promised = accepted_promised_count
+        effective_promised_exact = exact_count is not None
+    elif exact_count is not None:
+        effective_promised = exact_count
+        effective_promised_exact = True
     else:
         effective_promised = topic_promised
+        effective_promised_exact = False
 
     # Auto-compact when density_mode says so, or when promise only fits compact.
     from bookforge.pipeline.feasibility import (
@@ -1527,12 +1556,18 @@ def build_bible(
             min_entries=effective_promised or 0,
             min_sections=plan_scope.min_sections,
         )
+        if (
+            effective_promised and effective_promised_exact
+            and planned_use_count(_preflight) > effective_promised
+        ):
+            _preflight = shrink_sections_to_count(_preflight, effective_promised)
         reconcile_plan_to_page_band(
             _preflight, profile, target_pages=target_pages, pamphlet=pamphlet,
             min_entries=effective_promised or plan_scope.min_entries or 0,
             min_sections=plan_scope.min_sections,
             promised_ceiling=effective_promised or None,
             sections_locked=True,
+            exact=effective_promised_exact,
         )
     if normalized_toc_bases is not None:
         base_lo = base_hi = len(normalized_toc_bases)
@@ -1622,6 +1657,11 @@ def build_bible(
         parse_promised_count(title, subtitle)
         or parse_promised_count(source.topic, "")
     )
+    # The exact flag only carries over from the pre-computed effective_promised
+    # — a promise re-derived from the LLM-drafted title/subtitle here is
+    # always a soft marketing count (parse_promised_count, never the exact
+    # detector), so it's never treated as a hard cap.
+    promised_exact = effective_promised_exact if effective_promised else False
     # If the user accepted a lower count, rewrite marketing copy to match.
     if (
         accepted_promised_count
@@ -1656,10 +1696,11 @@ def build_bible(
     )
     planned = planned_use_count(sections)
 
-    if pamphlet and promised and planned > promised:
+    if (pamphlet or promised_exact) and promised and planned > promised:
         sections = shrink_sections_to_count(sections, promised)
         planned = promised
-        log.info("pamphlet_shrunk_to_promise", promised=promised,
+        log.info("plan_shrunk_to_promise", promised=promised,
+                 exact=promised_exact, pamphlet=pamphlet,
                  sections=len(sections))
     elif promised and planned < promised:
         # Could not honor the promise without user-accepted reduction.
@@ -1668,7 +1709,7 @@ def build_bible(
             f"at {target_pages} pages — raise pages or accept a lower count "
             f"at readiness"
         )
-    elif not pamphlet and promised and promised < planned:
+    elif not pamphlet and not promised_exact and promised and promised < planned:
         title, subtitle, promise_fixed = reconcile_promise(
             title, subtitle, planned)
         if promise_fixed:
@@ -1698,6 +1739,7 @@ def build_bible(
         min_sections=plan_scope.min_sections,
         promised_ceiling=promised or None,
         sections_locked=plan_scope.locked_toc,
+        exact=promised_exact,
     )
     planned = planned_use_count(sections)
 

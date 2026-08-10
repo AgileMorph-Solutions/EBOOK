@@ -5,7 +5,7 @@ import re
 
 from pydantic import BaseModel
 
-from bookforge.pipeline.content_guardrails import parse_promised_count
+from bookforge.pipeline.content_guardrails import count_toc_sections, parse_promised_count
 
 _BULLET_RE = re.compile(r"^(\-|\*|•|\d+\.)\s+\S")
 _CHAPTER_HDR_RE = re.compile(r"^chapter\s+\d+\s*:", re.IGNORECASE)
@@ -60,7 +60,7 @@ def build_plan_scope(
         promised = parse_promised_count("", body)
     bullets = _count_source_bullets(body) if body else 0
     src_chapters = _count_source_chapters(body) if body else 0
-    toc_len = len(toc) if toc else 0
+    toc_len = count_toc_sections(toc)
 
     min_sections = toc_len
     locked_toc = toc_len > 0

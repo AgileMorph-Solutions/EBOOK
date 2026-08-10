@@ -604,6 +604,37 @@ def test_normalize_user_toc_collapses_recipe_list():
     assert sum(len(s.entries) for s in normalized) >= 50
 
 
+def test_normalize_user_toc_merges_bare_ordinal_noise_even_when_under_max_sections():
+    """Regression test for the real "Boring Businesses" incident: pasting a
+    TOC as "01\\n<Title>\\n02\\n<Title>..." (chapter number on its own line)
+    must not double the section count. Even though this 26-entry TOC already
+    fits under max_secs and has >=2 recognized "Chapter N:" headers — the
+    condition that used to short-circuit _normalize_user_toc before it ever
+    ran _parse_toc_lines's bare-ordinal merge — it must still collapse to
+    the 13 real chapters, with no section literally titled a bare digit."""
+    toc = [
+        "01", "Introduction: Why Boring Businesses Can Beat Trendy Ideas",
+        "02", "Chapter 1: What Makes a Business Repeatable",
+        "03", "Chapter 2: Home Cleaning & Maintenance Businesses",
+        "04", "Chapter 3: Outdoor & Property Care Businesses",
+        "05", "Chapter 4: Senior, Errand & Household Help Businesses",
+        "06", "Chapter 5: Car, Garage & Equipment Businesses",
+        "07", "Chapter 6: Small Commercial Service Businesses",
+        "08", "Chapter 7: Seasonal Repeat Businesses",
+        "09", "Chapter 8: Pricing, Routes and Recurring Customers",
+        "10", "Chapter 9: First 10 Customers Blueprint",
+        "11", "Chapter 10: Systems, Checklists and Simple Growth",
+        "12", "Chapter 11: 50 Business Profiles and Worksheets",
+        "13", "Final Note: Boring Pays Because Problems Repeat",
+    ]
+    assert len(toc) == 26
+    normalized = _normalize_user_toc(toc, 205, _essay_profile(), pamphlet=False)
+    assert normalized is not None
+    assert len(normalized) == 13
+    for section in normalized:
+        assert not section.title.strip().isdigit()
+
+
 def test_upsize_sections_distributes_list_quota_across_sections():
     from bookforge.pipeline.page_limits import _upsize_sections_to_estimate
 
@@ -801,6 +832,34 @@ def test_reconcile_undershoot_without_ceiling_keeps_raise_pages_advice():
     exc = excinfo.value
     assert exc.ceiling_capped is False
     assert "raise pages" in str(exc).lower()
+
+
+def test_upsize_exact_ceiling_has_zero_tolerance_vs_soft_ceiling():
+    """`exact=True` (an unambiguous "create exactly N" promise) must cap
+    entry-count padding at literally N, not N*1.10 like a soft marketing
+    count — otherwise a book promising "exactly 50" could still land on 55
+    and nobody would notice the mismatch."""
+    from bookforge.pipeline.page_limits import _upsize_sections_to_estimate
+
+    def _fresh_sections():
+        return [
+            SectionPlan(index=i, title=f"S{i}", full_card_quota=0, list_quota=0)
+            for i in range(1, 11)
+        ]
+
+    soft = _upsize_sections_to_estimate(
+        _fresh_sections(), _essay_profile(), target_estimate=10_000,
+        promised_ceiling=50, exact=False,
+    )
+    exact = _upsize_sections_to_estimate(
+        _fresh_sections(), _essay_profile(), target_estimate=10_000,
+        promised_ceiling=50, exact=True,
+    )
+    soft_count = sum(s.full_card_quota + s.list_quota for s in soft)
+    exact_count = sum(s.full_card_quota + s.list_quota for s in exact)
+    assert exact_count == 50
+    assert soft_count > exact_count
+    assert soft_count <= 56  # ceil(50*1.10)=55, plus the loop's own +1 boundary step
 
 
 def test_reconcile_undershoot_sections_locked_never_advises_raising_pages():
